@@ -41,6 +41,8 @@ Out of scope (later phases / slices):
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import html
 import ipaddress
 import os
@@ -1076,11 +1078,32 @@ def _format_run_shell_result(returncode: int, stdout: str, stderr: str) -> str:
     )
 
 
-#: Rolling-tail retention per child stream during the drain. The head keeps
-#: up to the output cap (so downstream truncation has full material); the
-#: tail keeps the newest bytes so a flooding child's FINAL output (the part
-#: that usually carries the error) survives with bounded memory.
-_RUN_SHELL_TAIL_CAP_BYTES = 65_536
+#: Per-stream capture split. Head + drop marker + tail must COMPOSE inside
+#: the 8000-byte output cap, or the final head-only truncation would discard
+#: the tail it exists to preserve (a flooding child's FINAL bytes usually
+#: carry the error). The ~400-byte slack absorbs the drop marker plus
+#: replacement-character inflation at the two cut boundaries.
+_RUN_SHELL_HEAD_CAP_BYTES = 4_200
+_RUN_SHELL_TAIL_CAP_BYTES = 3_400
+
+#: Absolute monotonic wall for run_shell children, bound by the ENGINE
+#: around a chat loop (never part of the model-visible schema). The drain's
+#: wall becomes min(call-start + timeout, this deadline), measured from call
+#: START — validation/sandbox setup cannot restart the budget.
+_SHELL_ABS_DEADLINE: "contextvars.ContextVar[float | None]" = (
+    contextvars.ContextVar("shell_abs_deadline", default=None))
+
+
+@contextlib.contextmanager
+def shell_deadline(deadline: "float | None"):
+    """Bind an absolute ``time.monotonic()`` wall for every ``run_shell``
+    child started inside the context. Engine-owned: tool-call arguments
+    cannot see or move it. ``None`` binds nothing (no behavior change)."""
+    token = _SHELL_ABS_DEADLINE.set(deadline)
+    try:
+        yield
+    finally:
+        _SHELL_ABS_DEADLINE.reset(token)
 
 
 class _BoundedPipeCapture:
@@ -1165,7 +1188,7 @@ def _drain_shell_pipes(
                 continue
             os.set_blocking(stream.fileno(), False)
             captures[stream] = _BoundedPipeCapture(
-                _RUN_SHELL_MAX_OUTPUT_BYTES, _RUN_SHELL_TAIL_CAP_BYTES)
+                _RUN_SHELL_HEAD_CAP_BYTES, _RUN_SHELL_TAIL_CAP_BYTES)
             sel.register(stream, selectors.EVENT_READ)
         while True:
             if should_abort is not None and should_abort():
@@ -1315,6 +1338,10 @@ def make_run_shell(
         cwd: str = "",
         timeout: float = _DEFAULT_RUN_SHELL_TIMEOUT_SECONDS,
     ) -> str:
+        # The drain wall measures from CALL START under an engine-bound
+        # absolute deadline — validation, payload resolution, and sandbox
+        # setup below must not restart the budget.
+        call_start = time.monotonic()
         timeout = _clamp_timeout(
             timeout, lo=_RUN_SHELL_MIN_TIMEOUT_SECONDS,
             hi=_RUN_SHELL_MAX_TIMEOUT_SECONDS,
@@ -1461,6 +1488,16 @@ def make_run_shell(
             # tears down with the bwrap process, --die-with-parent is the
             # belt if we are reaped first, and the drain's bounded post-kill
             # collection covers a re-parented grandchild holding the pipes.
+            wall = call_start + timeout
+            abs_deadline = _SHELL_ABS_DEADLINE.get()
+            lane_bound = abs_deadline is not None and abs_deadline < wall
+            if lane_bound:
+                wall = abs_deadline
+            if time.monotonic() >= wall:
+                # Setup consumed the remainder: start no child. The wall is
+                # absolute from call start — setup cannot restart it.
+                return _format_run_shell_result(
+                    -1, "", "[lane deadline expired — command not started]")
             proc = subprocess.Popen(
                 run_argv,
                 cwd=str(wd),
@@ -1475,11 +1512,15 @@ def make_run_shell(
             _apply_rlimits_to_pid(proc.pid)
             stdout, stderr, outcome = _drain_shell_pipes(
                 proc,
-                wall=time.monotonic() + timeout,
+                wall=wall,
                 should_abort=should_abort,
             )
             if outcome == "timeout":
-                stderr = (stderr or "") + f"\n[TIMEOUT after {timeout}s]"
+                marker = (
+                    "[TIMEOUT at lane deadline]" if lane_bound
+                    else f"[TIMEOUT after {timeout}s]"
+                )
+                stderr = (stderr or "") + f"\n{marker}"
                 return _format_run_shell_result(-1, stdout or "", stderr)
             if outcome == "abort":
                 # Engine-owned classification, assembled from the drain

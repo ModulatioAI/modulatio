@@ -8542,7 +8542,10 @@ class Orchestrator:
 
     def _staging_tool_registry(self, staging: Path) -> "dict[str, tools.Tool]":
         """Re-bind the path-bound builtins to ``staging`` while preserving
-        any custom tools the caller merged into ``self.tool_registry``."""
+        any custom tools the caller merged into ``self.tool_registry``.
+        Binds the orchestrator's abort signal into ``run_shell`` — also used
+        with the SHARED artifacts root on the sequential path, where the
+        host-built registry lacks abort wiring."""
         folder_rw, folder_read = self._folder_roots()
         rebound = tools.build_registry(
             artifacts_root=staging,
@@ -9465,10 +9468,33 @@ class Orchestrator:
         concurrent worker, decompose children, goal-redo) records one
         deterministic episodic entry per party when the task reaches a
         terminal status. Agents accrue memory from the jobs they actually
-        work — the MEMORY tab's standing promise."""
+        work — the MEMORY tab's standing promise.
+
+        Also the sequential-path registry boundary: the shared registry is
+        built by the host factory WITHOUT the orchestrator's abort signal,
+        so an in-flight run_shell would only die at its own timeout. When no
+        stronger override exists (isolated workers bind staging first) and
+        the shared registry serves run_shell, ONLY that tool is re-bound
+        here with abort wiring — every other tool (custom or builtin) keeps
+        its host-built binding — and the override is restored on every
+        exit."""
+        installed_override = False
+        if (
+            getattr(self._tls, "tool_registry_override", None) is None
+            and "run_shell" in self.tool_registry
+        ):
+            rebound = self._staging_tool_registry(
+                self._shared_artifacts_root())
+            if "run_shell" in rebound:
+                merged = dict(self.tool_registry)
+                merged["run_shell"] = rebound["run_shell"]
+                self._tls.tool_registry_override = merged
+                installed_override = True
         try:
             self._run_task_with_redo_inner(t, summary, initial_corrective_notes)
         finally:
+            if installed_override:
+                self._tls.tool_registry_override = None
             # All FOUR terminal states — incl. ABANDONED (a Leader-iterate
             # drop): the producer still worked the task and remembers it.
             # Best-effort: a memory-write failure
@@ -13363,18 +13389,23 @@ class Orchestrator:
         self._tls.tool_registry_override = registry
         self._tls.seat_extra_grants = (str(self._scope_root()),)
         try:
-            self._run_chat_loop(
-                prompt=prompt,
-                tool_loadout=loadout,
-                role="leader",
-                agent_id="leader",
-                task_id=goal.id,
-                transcript_path=transcript_path,
-                skill_name="leader-fix",
-                budget_role="leader-reflect",
-                goal_id=goal.id,
-                deadline=_lane_deadline,
-            )
+            # shell_deadline: the same absolute wall reaches the shell's
+            # DRAIN — a child's budget is min(per-call timeout, lane wall)
+            # measured from call start, so validation/sandbox setup cannot
+            # extend a run past the lane deadline.
+            with tools.shell_deadline(_lane_deadline):
+                self._run_chat_loop(
+                    prompt=prompt,
+                    tool_loadout=loadout,
+                    role="leader",
+                    agent_id="leader",
+                    task_id=goal.id,
+                    transcript_path=transcript_path,
+                    skill_name="leader-fix",
+                    budget_role="leader-reflect",
+                    goal_id=goal.id,
+                    deadline=_lane_deadline,
+                )
         except Exception as exc:
             # Best-effort fix: the re-verify below renders the binding judgment
             # on whatever state the deliverable is in, and the retry budget

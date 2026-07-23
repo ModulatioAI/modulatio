@@ -1173,3 +1173,128 @@ def test_fix_lane_shell_timeout_clamped_to_subsecond_remainder(
     Orchestrator(project, runners).kickoff("clamp to the remainder")
     assert len(shell_log) == 1
     assert shell_log[0]["timeout"] < 1.0
+
+
+def test_fix_lane_binds_shell_deadline_contextvar(project, monkeypatch):
+    """The lane's absolute wall reaches run_shell's drain via the engine-
+    bound contextvar — the same value threaded as the chat-loop deadline."""
+    registry = {name: _stub_tool(name) for name in (
+        "read_file", "read_tool_result", "edit_file", "write_artifact")}
+    monkeypatch.setattr(
+        Orchestrator, "_resolve_chat_runner", lambda self, agent_id: object())
+    monkeypatch.setattr(
+        Orchestrator, "_leader_verify_tool_registry",
+        lambda self, **kw: registry)
+    seen: dict = {}
+
+    def _capture_chat_loop(self, **kwargs):
+        seen["deadline"] = kwargs.get("deadline")
+        seen["shell_wall"] = tools._SHELL_ABS_DEADLINE.get()
+        return "captured"
+
+    monkeypatch.setattr(Orchestrator, "_run_chat_loop", _capture_chat_loop)
+    counter = {"n": 0}
+    runners = {
+        "leader": _progressive_leader(["disappointed", "satisfied"], counter),
+        "planner": _planner_stub,
+        "drafter": _drafter_stub,
+        "qc": _qc_stub,
+    }
+    Orchestrator(project, runners).kickoff("bind the shell wall")
+    assert seen["shell_wall"] is not None
+    assert seen["shell_wall"] == seen["deadline"]
+    assert tools._SHELL_ABS_DEADLINE.get() is None  # unbound after the lane
+
+
+# ── sequential-path registry boundary: abort wiring for run_shell ────────────
+
+
+def _redo_harness_orchestrator(project, tool_registry):
+    counter = {"n": 0}
+    runners = {
+        "leader": _progressive_leader(["satisfied"], counter),
+        "planner": _planner_stub,
+        "drafter": _drafter_stub,
+        "qc": _qc_stub,
+    }
+    return Orchestrator(project, runners, tool_registry=tool_registry)
+
+
+def _minimal_task(project):
+    from modulatio.types import Task as _Task
+    return _Task(
+        id="STA-T-001", project_id=project.id, goal_id="STA-G-001",
+        description="probe the registry boundary")
+
+
+def test_sequential_redo_rebinds_only_run_shell(project, monkeypatch):
+    """On the sequential path the redo boundary re-binds run_shell with the
+    orchestrator's abort signal; every other tool keeps its host-built
+    object, and the override is cleared on exit."""
+    host_shell = tools.Tool(
+        name="run_shell", description="d", call=lambda **kw: "host")
+    custom = tools.Tool(name="custom", description="d", call=lambda **kw: "c")
+    orch = _redo_harness_orchestrator(
+        project, {"run_shell": host_shell, "custom": custom})
+    seen: dict = {}
+
+    def _inner(self, t, summary, notes=""):
+        seen["registry"] = self._active_tool_registry()
+
+    monkeypatch.setattr(Orchestrator, "_run_task_with_redo_inner", _inner)
+    orch._run_task_with_redo(_minimal_task(project), None)
+    assert seen["registry"] is not orch.tool_registry
+    assert seen["registry"]["custom"] is custom
+    assert seen["registry"]["run_shell"] is not host_shell
+    assert getattr(orch._tls, "tool_registry_override", None) is None
+
+
+def test_sequential_redo_override_cleared_after_exception(
+        project, monkeypatch):
+    host_shell = tools.Tool(
+        name="run_shell", description="d", call=lambda **kw: "host")
+    orch = _redo_harness_orchestrator(project, {"run_shell": host_shell})
+
+    def _boom(self, t, summary, notes=""):
+        raise RuntimeError("inner failure")
+
+    monkeypatch.setattr(Orchestrator, "_run_task_with_redo_inner", _boom)
+    with pytest.raises(RuntimeError):
+        orch._run_task_with_redo(_minimal_task(project), None)
+    assert getattr(orch._tls, "tool_registry_override", None) is None
+
+
+def test_worker_staging_override_not_clobbered(project, monkeypatch):
+    """A stronger existing override (an isolated worker's staging registry)
+    is left untouched by the sequential boundary."""
+    host_shell = tools.Tool(
+        name="run_shell", description="d", call=lambda **kw: "host")
+    orch = _redo_harness_orchestrator(project, {"run_shell": host_shell})
+    sentinel = {"run_shell": host_shell}
+    orch._tls.tool_registry_override = sentinel
+    seen: dict = {}
+
+    def _inner(self, t, summary, notes=""):
+        seen["registry"] = self._active_tool_registry()
+
+    monkeypatch.setattr(Orchestrator, "_run_task_with_redo_inner", _inner)
+    orch._run_task_with_redo(_minimal_task(project), None)
+    assert seen["registry"] is sentinel
+    assert orch._tls.tool_registry_override is sentinel
+    orch._tls.tool_registry_override = None
+
+
+def test_sequential_redo_no_run_shell_installs_nothing(project, monkeypatch):
+    """A host registry that deliberately omits run_shell stays untouched —
+    the boundary must not add an exec tool the host opted out of."""
+    custom = tools.Tool(name="custom", description="d", call=lambda **kw: "c")
+    orch = _redo_harness_orchestrator(project, {"custom": custom})
+    seen: dict = {}
+
+    def _inner(self, t, summary, notes=""):
+        seen["registry"] = self._active_tool_registry()
+
+    monkeypatch.setattr(Orchestrator, "_run_task_with_redo_inner", _inner)
+    orch._run_task_with_redo(_minimal_task(project), None)
+    assert seen["registry"] is orch.tool_registry
+    assert "run_shell" not in seen["registry"]

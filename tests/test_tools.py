@@ -780,13 +780,16 @@ def test_run_shell_timeout_terminates_command(tmp_path):
 
 
 def test_run_shell_output_truncated_past_limit(tmp_path):
-    """Massive output is truncated with a marker — keeps artifact
-    bodies readable and bounded for QC's review prompt."""
+    """Massive output is bounded with an explicit marker — keeps artifact
+    bodies readable for QC's review prompt. The capture's head/tail split
+    drops the middle with a byte count; the formatter's own truncation
+    marker is the backstop when a composed body still exceeds the cap."""
     art = _make_artifacts(tmp_path)
     (art / "big.py").write_text("print('A' * 20000)\n")
     rs = tools.make_run_shell(art)
     out = rs(cmd="python3 big.py", profile="full", timeout=5)
-    assert "truncated" in out
+    assert "bytes dropped mid-stream" in out or "truncated" in out
+    assert len(out.encode("utf-8")) < 20_000
 
 
 def test_run_shell_shell_metacharacters_not_expanded(tmp_path):
@@ -2998,20 +3001,81 @@ def test_run_shell_stream_shapes(tmp_path, unsandboxed):
 
 def test_run_shell_two_pipe_flood_bounded_no_deadlock(tmp_path, unsandboxed):
     """A child flooding BOTH pipes simultaneously completes (no
-    full-pipe-buffer deadlock) and the retained output stays bounded."""
+    full-pipe-buffer deadlock), the retained output stays bounded, and the
+    FIRST bytes, the LAST bytes, and the dropped-byte count all survive
+    result formatting — the tail is retained through the final truncation,
+    not captured and then discarded."""
     art = _make_artifacts(tmp_path)
     rs = tools.make_run_shell(art)
     out = rs(
         cmd=("python3 -c \"import sys\n"
+             "print('HEAD-MARKER')\n"
              "d = 'x' * 65536\n"
              "for _ in range(50):\n"
              "    sys.stdout.write(d)\n"
              "    sys.stderr.write(d)\n"
-             "print('flood-done')\""),
+             "print('TAIL-MARKER')\""),
         profile="full", timeout=60.0)
     assert out.startswith("exit_code: 0")
-    assert len(out) < 100_000
-    assert "truncated" in out or "dropped" in out
+    assert len(out.encode("utf-8")) < 20_000
+    assert "HEAD-MARKER" in out
+    assert "TAIL-MARKER" in out
+    assert "bytes dropped mid-stream" in out
+
+
+def test_run_shell_lane_deadline_bounds_drain_from_call_start(
+        tmp_path, unsandboxed):
+    """An engine-bound absolute deadline caps the child regardless of the
+    requested per-call timeout, with its own classification."""
+    art = _make_artifacts(tmp_path)
+    rs = tools.make_run_shell(art)
+    start = _time.monotonic()
+    with tools.shell_deadline(start + 0.5):
+        out = rs(cmd="python3 -c 'import time; time.sleep(30)'",
+                 profile="full", timeout=30.0)
+    assert _time.monotonic() - start < 8.0
+    assert "[TIMEOUT at lane deadline]" in out
+    assert out.startswith("exit_code: -1")
+
+
+def test_run_shell_setup_consuming_remainder_starts_no_child(
+        tmp_path, unsandboxed, monkeypatch):
+    """When validation/setup consumes the whole remaining budget, no child
+    starts — the wall measures from call start, and setup cannot restart
+    it."""
+    import subprocess as _sp
+
+    art = _make_artifacts(tmp_path)
+    real_resolve = tools._resolve_payload_binary
+
+    def _slow_resolve(head):
+        _time.sleep(0.4)
+        return real_resolve(head)
+
+    monkeypatch.setattr(tools, "_resolve_payload_binary", _slow_resolve)
+
+    def _no_spawn(*a, **k):
+        raise AssertionError("child must not start past the lane deadline")
+
+    monkeypatch.setattr(_sp, "Popen", _no_spawn)
+    rs = tools.make_run_shell(art)
+    with tools.shell_deadline(_time.monotonic() + 0.2):
+        out = rs(cmd="python3 -c 'print(1)'", profile="full", timeout=30.0)
+    assert "command not started" in out
+    assert out.startswith("exit_code: -1")
+
+
+def test_run_shell_requested_timeout_wins_when_earliest(
+        tmp_path, unsandboxed):
+    """A distant lane deadline leaves the per-call timeout as the binding
+    bound, with the classic classification."""
+    art = _make_artifacts(tmp_path)
+    rs = tools.make_run_shell(art)
+    with tools.shell_deadline(_time.monotonic() + 300.0):
+        out = rs(cmd="python3 -c 'import time; time.sleep(30)'",
+                 profile="full", timeout=1.0)
+    assert "[TIMEOUT after 1.0s]" in out
+    assert "lane deadline" not in out
 
 
 def test_run_shell_grandchild_pipe_holder_cannot_wedge(tmp_path, unsandboxed):
