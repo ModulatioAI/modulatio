@@ -1035,6 +1035,7 @@ def doctor_access_snapshot(code: "str | None"):
     from modulatio import config as _config
     from modulatio import leader_permissions as _lp
     from modulatio import mcp_config as _mcp
+    from modulatio import oauth_helpers as _oauth
     from modulatio import permissions as _perm
     from modulatio import sandbox as _sandbox
     from modulatio import tools as _tools
@@ -1091,6 +1092,7 @@ def doctor_access_snapshot(code: "str | None"):
         clay_disallowed_tools=claude_cli._DISALLOWED_TOOLS,
         mcp_servers=servers,
         corrupt_folders=tuple(corrupt),
+        clay_active=_oauth.find_claude_binary() is not None,
     )
 
 

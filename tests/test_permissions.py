@@ -563,14 +563,32 @@ def test_snapshot_unreachable_folder_states_narrow_claim():
     assert "cause unknown" in folders["/proj"].state
 
 
-def test_snapshot_declared_exceptions_render_reduced():
-    """Every ledger entry appears as Reduced/non-parity — their presence is
-    what blocks a full-parity claim."""
+def test_snapshot_declared_exceptions_render_when_applicable():
+    """A parity exception renders only when its backend is active: Clay
+    exceptions with clay_active, the MCP-stdio one with an enabled stdio
+    server. The full ledger still governs conformance."""
     from modulatio import permissions as perm
 
+    # default kwargs: clay_active True, mcp_servers carry no transport →
+    # only the two Clay exceptions render.
     snap = perm.effective_capability_snapshot(**_snapshot_kwargs())
     reduced = [f for f in snap.facts if f.state == perm.STATE_REDUCED]
-    assert len(reduced) == len(perm.PARITY_EXCEPTIONS)
+    assert {f.source for f in reduced} == {"clay_confinement"}
+    assert len(reduced) == 2
+
+    # a stdio MCP server makes the MCP-stdio exception applicable.
+    with_stdio = _snapshot_kwargs(mcp_servers=(
+        {"name": "files", "trust": "gated", "transport": "stdio"},))
+    snap2 = perm.effective_capability_snapshot(**with_stdio)
+    sources = {f.source for f in snap2.facts if f.state == perm.STATE_REDUCED}
+    assert sources == {"clay_confinement", "mcp_servers"}
+
+    # no Clay backend → no Clay exception stated.
+    snap3 = perm.effective_capability_snapshot(
+        **_snapshot_kwargs(clay_active=False))
+    assert not [f for f in snap3.facts
+                if f.source == "clay_confinement"
+                and f.state == perm.STATE_REDUCED]
 
 
 def test_card_is_a_pure_renderer_of_the_snapshot():

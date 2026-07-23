@@ -8542,6 +8542,60 @@ class Orchestrator:
 
         return _config.folder_grant_roots()
 
+    def runtime_capability_snapshot(self):
+        """The LIVE effective-capability snapshot for this run: the current
+        autonomy mode, the gate's live session AND once grants, the broker's
+        session/always grants, the active converse loadout, the folder
+        registry, and the enabled MCP servers with transport/trust — plus
+        whether Clay is actually configured, so its parity exception is
+        stated only when the backend is present. Doctor's card is the
+        CONFIGURED view (no live session state); this is the run view."""
+        from modulatio import claude_cli
+        from modulatio import config as _config
+        from modulatio import leader_permissions as lp
+        from modulatio import mcp_config as _mcp
+        from modulatio import oauth_helpers as _oauth
+        from modulatio import permissions as _perm
+        from modulatio import sandbox as _sandbox
+
+        gate = self.leader_gate()
+        broker_view = self._permission_grants().grants_view()
+        corrupt: list = []
+        folders = tuple(_config.list_folders(on_corrupt=corrupt.append))
+        loadout = tuple(sorted(self._leader_function_tools()) + sorted(
+            set(self._leader_tool_registry())))
+        servers = tuple(
+            {"name": sid, "trust": s.trust, "transport": s.transport}
+            for sid, s in _mcp.enabled_servers().items())
+        return _perm.effective_capability_snapshot(
+            mode=self._session_mode,
+            sandbox_available=_sandbox.is_sandbox_available(),
+            profile=_sandbox.current_profile(),
+            bypass=_sandbox.is_bypass_requested(),
+            workspace=str(self._leader_workspace()),
+            standing_roots=self._harness_roots(),
+            folders=folders,
+            folder_reachable=_config.probe_folder,
+            gate_session=dict(gate._session),
+            gate_durable={cls: lp.load_grants(self.project.code, cls)
+                          for cls in ("path", "exec", "network")
+                          if lp.load_grants(self.project.code, cls)},
+            broker_grants=broker_view,
+            tool_loadout=loadout,
+            clay_confined_tools=claude_cli._ALLOWED_CONFINED_TOOLS,
+            clay_disallowed_tools=claude_cli._DISALLOWED_TOOLS,
+            mcp_servers=servers,
+            corrupt_folders=tuple(corrupt),
+            clay_active=_oauth.find_claude_binary() is not None,
+        )
+
+    def capability_card(self) -> "tuple[str, ...]":
+        """The live capability card lines for this run — the runtime snapshot
+        rendered through the one shared ``capability_card_rows`` generator."""
+        from modulatio import permissions as _perm
+
+        return _perm.capability_card_rows(self.runtime_capability_snapshot())
+
     def _picked_output_base(self, summary: "RunSummary | None" = None) -> "Path | None":
         """The FOLDERS output pick as a delivery base, or None for the default
         root. The accessor floor already treats a deleted/mode-changed pick as

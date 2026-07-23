@@ -21,6 +21,7 @@ import time
 
 import pytest
 
+from modulatio import access_surface as axs
 from modulatio import claude_cli
 from modulatio import leader_gate as lg
 from modulatio import leader_permissions as lp
@@ -364,6 +365,227 @@ def test_clay_confinement_inventory_matches_contract():
     assert set(claude_cli._ALLOWED_CONFINED_TOOLS) & CLAY_BANNED == set()
 
 
+# ── descriptor coverage: every production axis value is accounted for ────────
+#
+# Each descriptor value maps to how it is covered: an EXECUTED cell/test in
+# this file, the BRIDGE conformance suite, the LINUX black-box tier, or an
+# explicit reasoned exclusion. Completeness compares the descriptor sets to
+# these maps before any cell runs, so a new production class/surface/backend/
+# origin/substrate fails until it is handled.
+
+_REQUEST_CLASS_COVERAGE = {
+    "path": "executed: path-workspace/outside/blocked/broad cells",
+    "exec": "executed: exec-workspace/outside/broad cells",
+    "network": "executed: network cell (public) + network-local fence test",
+    "shell": "executed: exec cells raise the sandbox-requiring shell cap",
+    "file-write": "executed: write_artifact rides the path axis",
+    "secret": "executed: secret-dotfile fence test (below-root floor)",
+    "mcp": "executed: mcp-gated / mcp-trusted cells",
+    "capability": "executed: network cell is a pure capability ask",
+    "substrate": "executed: substrate axis + linux black-box tier",
+}
+_SURFACE_COVERAGE = {
+    "tui": "bridge suite: test_tui_bridge_*",
+    "web": "bridge suite: test_web_bridge_*",
+    "acp": "bridge suite: test_acp_bridge_*",
+}
+_BACKEND_COVERAGE = {
+    "modulatio-tool-loop": "executed: every coordinator cell",
+    "clay-confined": "executed: clay confinement inventory + parity",
+    "clay-interactive": "reason: full-loadout Leader seat is the tool-loop "
+                        "path with no added fence — covered by the tool-loop "
+                        "cells; its confinement DELTA is the clay-confined "
+                        "backend",
+}
+_ORIGIN_COVERAGE = {
+    "builtin": "executed: tool inventory + coordinator cells",
+    "service": "executed: service-spend fence test",
+    "mcp-gated": "executed: mcp-gated cell",
+    "mcp-trusted": "executed: mcp-trusted cell",
+}
+_SUBSTRATE_COVERAGE = {
+    "sandboxed_full": "executed: substrate=full cells + linux tier",
+    "degraded_allowlist": "linux black-box tier",
+    "refused": "executed: substrate=refused cells + linux tier",
+    "off": "linux black-box tier",
+}
+
+
+def test_descriptor_coverage_is_complete():
+    """Every production descriptor value has a coverage entry; a new value in
+    any descriptor fails here before a single cell executes."""
+    assert set(_REQUEST_CLASS_COVERAGE) == set(axs.REQUEST_CLASSES)
+    assert set(_SURFACE_COVERAGE) == set(axs.OPERATOR_SURFACES)
+    assert set(_BACKEND_COVERAGE) == set(axs.EXECUTION_BACKENDS)
+    assert set(_ORIGIN_COVERAGE) == set(axs.TOOL_ORIGINS)
+    assert set(_SUBSTRATE_COVERAGE) == set(axs.SUBSTRATE_STATES)
+    assert all(_REQUEST_CLASS_COVERAGE.values())
+    assert all(_SURFACE_COVERAGE.values())
+    assert all(_BACKEND_COVERAGE.values())
+    assert all(_ORIGIN_COVERAGE.values())
+    assert all(_SUBSTRATE_COVERAGE.values())
+
+
+def test_synthetic_production_class_fails_completeness(monkeypatch):
+    """A new production request class with no coverage entry fails — proving
+    the guard is bound to production, not a static echo."""
+    monkeypatch.setattr(
+        axs, "REQUEST_CLASSES", axs.REQUEST_CLASSES + ("teleport",))
+    with pytest.raises(AssertionError):
+        test_descriptor_coverage_is_complete()
+
+
+# ── executed cells for the omitted signed categories ────────────────────────
+
+
+def _matrix_project(tmp_path, monkeypatch):
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    vault.init_project(CODE, "m", "m")
+
+
+def _coord_over(gate, broker, ws, prompt_fn):
+    return perm.build_authorization_coordinator(
+        gate=gate, root=ws, prompt_fn=prompt_fn, broker=broker)
+
+
+def test_cell_standing_root_silent_allow(tmp_path, monkeypatch):
+    """A path under a STANDING root is silently allowed — no prompt, any
+    mode."""
+    _matrix_project(tmp_path, monkeypatch)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    standing = tmp_path / "harness"
+    standing.mkdir()
+    (standing / "cfg.txt").write_text("x")
+    prompts: list = []
+    gate = lg.LeaderPermissionGate(
+        CODE, workspace=ws, standing_roots=(str(standing),))
+    broker = perm.PermissionBroker(
+        mode=perm.RunMode.DEFAULT, grants=perm.GrantStore(tmp_path / "g.json"),
+        ask=None, sandbox_available=lambda: True)
+    coord = _coord_over(gate, broker, ws, lambda r: prompts.append(r))
+    assert coord("read_file", {"path": str(standing / "cfg.txt")}) is True
+    assert prompts == []
+
+
+def test_cell_pregranted_outside_silent_allow(tmp_path, monkeypatch):
+    """A pre-seeded durable path grant makes an outside read silent."""
+    _matrix_project(tmp_path, monkeypatch)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    outside = tmp_path / "proj"
+    outside.mkdir()
+    (outside / "f.txt").write_text("x")
+    lp.add_grant(CODE, request_class=lp.REQUEST_CLASS_PATH,
+                 resource=str(outside), actions=lp.PATH_ACTIONS)
+    prompts: list = []
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    broker = perm.PermissionBroker(
+        mode=perm.RunMode.DEFAULT, grants=perm.GrantStore(tmp_path / "g.json"),
+        ask=None, sandbox_available=lambda: True)
+    coord = _coord_over(gate, broker, ws, lambda r: prompts.append(r))
+    assert coord("read_file", {"path": str(outside / "f.txt")}) is True
+    assert prompts == []
+
+
+def _mcp_env(tmp_path, monkeypatch, trust):
+    _matrix_project(tmp_path, monkeypatch)
+    from modulatio import mcp_config
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    class _Srv:
+        name = "files"
+        trust = None
+        transport = "stdio"
+
+    srv = _Srv()
+    srv.trust = trust
+    monkeypatch.setattr(
+        mcp_config, "get_server", lambda sid: srv if sid == "files" else None)
+    prompts: list = []
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    broker = perm.PermissionBroker(
+        mode=perm.RunMode.DEFAULT, grants=perm.GrantStore(tmp_path / "g.json"),
+        ask=None, sandbox_available=lambda: True)
+    coord = _coord_over(
+        gate, broker, ws,
+        lambda r: (prompts.append(r) or lg.ScopedDecision(scope=lp.SCOPE_SESSION)))
+    return coord, prompts
+
+
+def test_cell_mcp_gated_prompts_once(tmp_path, monkeypatch):
+    coord, prompts = _mcp_env(tmp_path, monkeypatch, "gated")
+    assert coord("mcp__files__read", {"path": "/x"}) is True
+    assert len(prompts) == 1
+    assert prompts[0].request_class == "mcp"
+
+
+def test_cell_mcp_trusted_silent(tmp_path, monkeypatch):
+    coord, prompts = _mcp_env(tmp_path, monkeypatch, "trusted")
+    assert coord("mcp__files__read", {"path": "/x"}) is True
+    assert prompts == []
+
+
+def test_cell_network_local_refused_at_tool_fence(tmp_path):
+    """Local-network egress is refused at the tool fence (the coordinator
+    grants the network capability; the tool's own guard refuses loopback)."""
+    with pytest.raises(ValueError):
+        tools._check_url_safe_for_http_get("http://127.0.0.1:9/x")
+    with pytest.raises(ValueError):
+        tools._check_url_safe_for_http_get("http://169.254.169.254/latest")
+
+
+def test_cell_secret_dotfile_refused_below_root(tmp_path):
+    """A dotfile component under any bound root is refused by the secret
+    floor — even inside a granted root."""
+    root = tmp_path / "granted"
+    (root / "sub").mkdir(parents=True)
+    (root / ".env").write_text("SECRET=1")
+    assert tools._is_safe_file_arg(
+        str(root / ".env"), root, extra_roots=(root,)) is False
+
+
+def test_cell_service_spend_gated_by_authorizer():
+    """A metered (paid-cloud) service call with no authorizer wired fails
+    CLOSED at the tool loop's spend gate rather than spending — executed
+    through the real ``run_llm_with_tools`` metered path."""
+    from modulatio import runners as _runners
+
+    calls: list = []
+    paid = tools.Tool(
+        name="generate_image", description="paid",
+        call=lambda **kw: calls.append(kw) or "made an image",
+        cost_class="paid-cloud")
+    responses = iter([
+        _runners.ChatResponse(content="", tool_calls=[
+            _runners.ToolCall(id="1", name="generate_image", args={"p": "cat"}),
+        ]),
+        _runners.ChatResponse(content="done", tool_calls=[]),
+    ])
+    reply = _runners.run_llm_with_tools(
+        chat_runner=lambda **kw: next(responses), prompt="p",
+        tool_loadout=("generate_image",),
+        tool_registry={"generate_image": paid},
+        metered_authorizer=None)  # no authorizer → fail closed
+    assert reply == "done"
+    assert calls == []  # the paid call never executed (no spend)
+
+
+def test_cell_degraded_substrate_denies_shell(tmp_path, monkeypatch):
+    """A non-full substrate denies the sandbox-requiring shell capability by
+    every path (§6.A) — the broker refuses before any ask."""
+    _matrix_project(tmp_path, monkeypatch)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    broker = perm.PermissionBroker(
+        mode=perm.RunMode.YOLO, grants=perm.GrantStore(tmp_path / "g.json"),
+        ask=None, sandbox_available=lambda: False)  # degraded/refused
+    coord = _coord_over(gate, broker, ws, lambda r: None)
+    assert coord("run_shell", {"cmd": "ls", "cwd": str(ws)}) is False
+
+
 # ── the executed cells ──────────────────────────────────────────────────────
 
 
@@ -480,3 +702,39 @@ def test_zz_matrix_stays_seconds_class():
     """The whole module — every executed cell included — must stay far from
     minute-class, or it can no longer ride the default scoped path."""
     assert time.monotonic() - _T0 < 30.0
+
+
+# ── the live run-time capability card (Orchestrator) ────────────────────────
+
+
+def test_runtime_card_reflects_live_mode_and_session_grants(
+        project_orch, monkeypatch):
+    """The live snapshot shows the CURRENT autonomy mode and live gate/broker
+    session grants — state that never reaches the configured doctor card."""
+    orch = project_orch
+    orch._session_mode = perm.RunMode.YOLO
+    gate = orch.leader_gate()
+    # seed a live session path grant + a broker session capability
+    gate._session.setdefault("path", []).append(
+        {"resource": "/live/root", "actions": ["read", "edit", "write"]})
+    orch._permission_grants().record(
+        perm.capability_for("http_get", {"url": "https://api.example.com/x"}),
+        perm.Decision.ALLOW_SESSION)
+
+    snap = orch.runtime_capability_snapshot()
+    mode_fact = next(f for f in snap.facts if f.source == "mode")
+    assert mode_fact.state == perm.STATE_ALWAYS  # yolo auto-grants
+    gate_res = {f.resource for f in snap.facts if f.source == "gate_grants"}
+    assert "/live/root" in gate_res
+    broker_res = {f.resource for f in snap.facts if f.source == "broker_grants"}
+    assert any("api.example.com" in r for r in broker_res)
+    # the card renders through the one shared generator
+    card = orch.capability_card()
+    assert any("/live/root" in line for line in card)
+
+
+def test_runtime_card_completeness_tracks_descriptor(project_orch):
+    """The live snapshot's sources equal the production descriptor — a new
+    authority source fails the live view too, not only doctor."""
+    snap = project_orch.runtime_capability_snapshot()
+    assert set(snap.sources) == set(axs.CAPABILITY_SOURCES)

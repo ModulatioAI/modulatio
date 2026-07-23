@@ -809,11 +809,23 @@ def effective_capability_snapshot(
     clay_disallowed_tools: tuple,
     mcp_servers: tuple,
     corrupt_folders: tuple = (),
+    clay_active: bool = True,
 ) -> CapabilitySnapshot:
     """Assemble the snapshot from live state. Pure logic (web-UI-safe): the
     caller supplies every source's current objects; nothing is read from
-    globals, so the same inputs always yield the same snapshot."""
+    globals, so the same inputs always yield the same snapshot.
+
+    A parity exception is rendered only when its backend is ACTUALLY active:
+    the Clay exceptions when ``clay_active`` (a Clay seat is configured), the
+    MCP-stdio exception when an enabled server uses the stdio transport. The
+    full ledger still governs conformance (``parity_verdict``); the card
+    states only the exceptions that apply to THIS install/run."""
     facts: list[CapabilityFact] = []
+    has_stdio_mcp = any(s.get("transport") == "stdio" for s in mcp_servers)
+    _exc_applies = {
+        "clay_confinement": clay_active,
+        "mcp_servers": has_stdio_mcp,
+    }
 
     # mode — whether capability asks auto-grant.
     facts.append(CapabilityFact(
@@ -909,6 +921,8 @@ def effective_capability_snapshot(
     # declared parity exceptions — always rendered; their presence is what
     # blocks a full-parity claim.
     for _id, source, cls, resource, detail, _obs in PARITY_EXCEPTIONS:
+        if not _exc_applies.get(source, True):
+            continue  # backend not active on this install/run — not stated
         facts.append(CapabilityFact(
             source, cls, resource, STATE_REDUCED, detail))
 
