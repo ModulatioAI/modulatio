@@ -151,6 +151,56 @@ class StateTransition(BaseModel):
     rationale: str
 
 
+class ConventionContractConflict(RuntimeError):
+    """A sealed convention contract was asked to change or to serve in an
+    unservable state: a different digest against an already-sealed
+    contract, or a prompt render against an unresolved/missing/mismatched
+    one. Fail closed — sealed authority never mutates in place and an
+    unresolved contract never presents as enforced coherence."""
+
+
+class ConventionContract(BaseModel):
+    """One component's sealed naming/layout authority, derived ONCE at plan
+    time and owned by the Goal. Producers, QC, and fixers all render the
+    same sealed record, so modules cohere by construction; recovery loads
+    it by digest and never re-derives from prose.
+
+    v1 closure claim: the ``python`` ecosystem plus the neutral standalone
+    form. ``state="unresolved"`` carries the fields as evidence but is
+    never renderable and never dispatchable for coherence-requiring plans.
+    """
+
+    #: Stable identity — derived from the digest, so identical conventions
+    #: share an id and a different derivation can never impersonate one.
+    contract_id: str
+    schema_version: int = 1
+    #: ``python`` (the one named v1 ecosystem). Non-Python code plans are
+    #: typed unresolved — explicitly outside the closure claim.
+    ecosystem: str
+    #: ``resolved`` | ``unresolved``. Only resolved contracts render or
+    #: bind dispatchable coherence-requiring tasks.
+    state: str
+    #: Component directory relative to the shared workspace root; empty
+    #: string = the root component.
+    component_root: str = ""
+    #: ``standalone`` (one file, no package claim) | ``flat`` (package dir
+    #: at the component root) | ``src`` (package under ``src/``).
+    layout: str
+    #: Package directory relative to the workspace root (empty for
+    #: standalone — a lone script invents no package).
+    source_root: str = ""
+    test_root: str = ""
+    #: Python import identifier — validated separately from the
+    #: distribution name; the two are never the same field.
+    import_name: str = ""
+    distribution_name: str = ""
+    manifest_filename: str = ""
+    #: Content digest over every convention field above (id and digest
+    #: excluded). Write-once: a differing digest against a sealed record
+    #: is a typed conflict, never last-writer-wins.
+    digest: str
+
+
 class Goal(BaseModel):
     id: str  # e.g. "STA-G-001"
     project_id: UUID
@@ -178,6 +228,24 @@ class Goal(BaseModel):
     max_retries: int = Field(
         default_factory=lambda: _env_int("MODULATIO_GOAL_MAX_RETRIES", 4))
     retry_count_date: date | None = None
+    #: Sealed per-component convention authorities for this goal's code
+    #: tasks, derived once at plan time. Recovery loads these by digest —
+    #: never re-derives from prose. Empty for non-code goals.
+    convention_contracts: list["ConventionContract"] = Field(
+        default_factory=list)
+    #: Task-plan commit witness. ``none`` (no witnessed plan — legacy or
+    #: pre-plan) → ``prepared`` (manifest recorded, tasks being persisted)
+    #: → ``committed`` (exact set + projections verified; the sole
+    #: dispatch authority). A prepared plan runs zero producers.
+    task_plan_state: str = "none"
+    #: Ordered expected task ids of the prepared/committed plan.
+    expected_task_ids: list[str] = Field(default_factory=list)
+    #: task id → immutable plan-projection digest. A stored task whose
+    #: projection differs cannot be mistaken for the planned one.
+    expected_task_digests: dict[str, str] = Field(default_factory=dict)
+    #: Whole-plan digest stamped at commit (order + membership +
+    #: projections).
+    task_plan_digest: str | None = None
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
 
@@ -402,6 +470,11 @@ class Task(BaseModel):
     #: re-runs the producer for a claimed nonterminal child (at-most-once;
     #: a claim-then-crash conservatively costs the attempt).
     attempt_claim_id: str | None = None
+    #: The sealed convention contract this code task is bound to (id into
+    #: the goal's ``convention_contracts``). Immutable birth field:
+    #: decompose children copy it — re-decompose inherits authority, never
+    #: creates it. ``None`` for non-code tasks and unwitnessed plans.
+    convention_contract_id: str | None = None
     #: Monotonic sequence of the durable tool-call budget. The STORE owns
     #: it: ``consume_tool_call_budget`` advances it under the store lock
     #: before each attempted tool call, and the wave merge keeps whichever

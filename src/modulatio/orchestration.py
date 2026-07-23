@@ -47,6 +47,7 @@ from modulatio.types import (
     ActivityEvent,
     ArtifactEvidence,
     AssertionEvidence,
+    ConventionContractConflict,
     DecomposeMintConflict,
     DecomposeMintRecord,
     EvidenceRequirement,
@@ -4209,6 +4210,192 @@ class Orchestrator:
         )
         return tasks
 
+    # ── Convention sealing + the task-plan commit witness ─────────────────
+    #
+    # A multi-file code plan needs ONE sealed naming/layout authority before
+    # any producer runs, and recovery needs a durable witness that the task
+    # set it finds is the COMPLETE planned set. The Goal record carries
+    # both: sealed contracts plus a prepared→committed manifest (expected
+    # ids + immutable projection digests). Only a committed plan executes;
+    # a prepared/partial one runs zero producers, before or after restart.
+
+    def _seal_convention_contracts(self, goal: Goal, tasks: list[Task]) -> None:
+        """Derive + seal the plan's convention contracts onto the Goal and
+        bind each code task to its contract. Raises ``_PlanError`` on any
+        unresolved component or root-incompatible target (the plan rejects
+        before dispatch), and a typed conflict when a re-plan derives a
+        DIFFERENT authority than the goal already sealed."""
+        from modulatio import conventions as _conv
+        result = _conv.derive_convention_contracts(
+            tasks, component_inspect_root=self._shared_artifacts_root())
+        if result.unresolved:
+            reasons = "; ".join(
+                f"{u.reason} (tasks: {', '.join(u.task_ids)})"
+                for u in result.unresolved)
+            raise _PlanError(f"convention contract unresolved — {reasons}")
+        for outside in result.outside_claim:
+            # EXPLICITLY outside the v1 closure claim — the tasks run, but
+            # unbound: no prompt block, no import smoke, and no surface may
+            # report them as convention-enforced. Loud, never silent.
+            _logger.warning(
+                "convention closure does not cover tasks %s — %s",
+                ", ".join(outside.task_ids), outside.reason)
+        if goal.convention_contracts:
+            prior = {c.contract_id for c in goal.convention_contracts}
+            fresh = {c.contract_id for c in result.contracts}
+            if prior != fresh:
+                raise _conv.ConventionContractConflict(
+                    f"goal {goal.id} already sealed convention authority "
+                    f"{sorted(prior)}; a re-plan derived {sorted(fresh)} — "
+                    f"sealed contracts never mutate; a correction needs a "
+                    f"new plan")
+        goal.convention_contracts = list(result.contracts)
+        by_id = {c.contract_id: c for c in result.contracts}
+        for t in tasks:
+            t.convention_contract_id = result.bindings.get(t.id)
+            if t.convention_contract_id and t.output_path:
+                violation = _conv.target_root_violation(
+                    by_id[t.convention_contract_id], t.output_path)
+                if violation is not None:
+                    raise _PlanError(f"task {t.id}: {violation}")
+
+    def _prepare_task_plan(self, goal: Goal, tasks: list[Task]) -> None:
+        """Persist the prepared plan manifest (ordered expected ids +
+        immutable projection digests) and verify it by readback. Raises
+        ``_PlanError`` on any persistence/readback failure — zero
+        producers may start from an unwitnessed plan."""
+        from modulatio import conventions as _conv
+        goal.task_plan_state = "prepared"
+        goal.expected_task_ids = [t.id for t in tasks]
+        goal.expected_task_digests = {
+            t.id: _conv.task_plan_projection_digest(t) for t in tasks}
+        goal.task_plan_digest = None
+        store.save_goal(self.project.code, goal, run_id=self.project.run_id)
+        loaded = store.get_goal(
+            self.project.code, goal.id, run_id=self.project.run_id)
+        if (
+            loaded is None
+            or loaded.task_plan_state != "prepared"
+            or loaded.expected_task_ids != goal.expected_task_ids
+            or loaded.expected_task_digests != goal.expected_task_digests
+        ):
+            raise _PlanError(
+                "prepared task-plan manifest failed readback verification")
+
+    def _commit_task_plan(self, goal: Goal) -> None:
+        """Verify the exact expected task set + projections from the store,
+        then flip the Goal to the committed dispatch authority. Raises
+        ``_PlanError`` on a missing/extra task or any projection drift —
+        a partial or altered plan is never mistaken for a complete one."""
+        from modulatio import conventions as _conv
+        stored = store.list_tasks(
+            self.project.code, goal_id=goal.id, run_id=self.project.run_id)
+        stored_ids = {t.id for t in stored}
+        expected = set(goal.expected_task_ids)
+        if stored_ids != expected:
+            missing = sorted(expected - stored_ids)
+            extra = sorted(stored_ids - expected)
+            raise _PlanError(
+                f"task-plan commit refused: stored set differs from the "
+                f"prepared manifest (missing {missing}, unexpected {extra})")
+        by_id = {t.id: t for t in stored}
+        for tid in goal.expected_task_ids:
+            digest = _conv.task_plan_projection_digest(by_id[tid])
+            if digest != goal.expected_task_digests.get(tid):
+                raise _PlanError(
+                    f"task-plan commit refused: task {tid} projection "
+                    f"differs from the prepared manifest")
+        goal.task_plan_state = "committed"
+        goal.task_plan_digest = _conv.plan_digest(
+            goal.expected_task_ids, goal.expected_task_digests)
+        store.save_goal(self.project.code, goal, run_id=self.project.run_id)
+        loaded = store.get_goal(
+            self.project.code, goal.id, run_id=self.project.run_id)
+        if (
+            loaded is None
+            or loaded.task_plan_state != "committed"
+            or loaded.task_plan_digest != goal.task_plan_digest
+        ):
+            raise _PlanError(
+                "committed task-plan state failed readback verification")
+
+    def _convention_block_for(self, task: Task) -> str:
+        """The rendered convention truth for ``task`` — identical for
+        producer, QC, and fixer prompts. Empty for unbound tasks (non-code
+        work, unwitnessed plans). FAIL CLOSED for a bound task whose
+        authority is broken: missing goal/contract, tampered digest,
+        unresolved state, or an uncommitted plan all raise typed — a bound
+        code task is never quietly treated like non-code work."""
+        from modulatio import conventions as _conv
+        if task.convention_contract_id is None:
+            return ""
+        goal = store.get_goal(
+            self.project.code, task.goal_id, run_id=self.project.run_id)
+        if goal is None:
+            raise ConventionContractConflict(
+                f"task {task.id} is bound to convention contract "
+                f"{task.convention_contract_id} but goal {task.goal_id} "
+                f"has no durable record")
+        contract = next(
+            (c for c in goal.convention_contracts
+             if c.contract_id == task.convention_contract_id), None)
+        if contract is None:
+            raise ConventionContractConflict(
+                f"task {task.id}'s bound contract "
+                f"{task.convention_contract_id} is not among goal "
+                f"{goal.id}'s sealed contracts")
+        if _conv.contract_digest(contract) != contract.digest:
+            raise ConventionContractConflict(
+                f"contract {contract.contract_id} fails its own digest — "
+                f"the sealed record was altered and is not authority")
+        if goal.task_plan_state != "committed":
+            raise ConventionContractConflict(
+                f"goal {goal.id}'s task plan is "
+                f"{goal.task_plan_state!r} — only a committed plan "
+                f"reaches prompt resolution")
+        return _conv.render_contract_block(contract)
+
+    def _task_plan_dispatch_refusal(self, t: Task) -> str | None:
+        """Mechanism reason ``t`` may not dispatch under its goal's
+        task-plan witness, or None when authorized.
+
+        A committed plan is the sole dispatch authority: the task must be
+        in its manifest with a matching immutable projection. A prepared
+        plan gets ONE recovery chance — commit from the already-recorded
+        manifest when the complete expected set validates (zero
+        re-derivation) — else it refuses. A goal with no witness
+        (``none`` — predates the manifest, or ad-hoc) makes no
+        completeness claim. Decompose-minted children ride the mint's
+        durable authority, never the plan manifest."""
+        from modulatio import conventions as _conv
+        if t.minted_by is not None:
+            return None
+        goal = store.get_goal(
+            self.project.code, t.goal_id, run_id=self.project.run_id)
+        if goal is None or goal.task_plan_state == "none":
+            return None
+        if goal.task_plan_state == "prepared":
+            try:
+                self._commit_task_plan(goal)
+            except _PlanError as exc:
+                return (
+                    f"task plan for goal {goal.id} is prepared but cannot "
+                    f"commit — {exc}")
+        expected = goal.expected_task_digests.get(t.id)
+        if expected is None:
+            return (
+                f"task {t.id} is not in goal {goal.id}'s committed plan "
+                f"manifest")
+        stored = store.get_task(
+            self.project.code, t.id, run_id=self.project.run_id)
+        subject = stored if stored is not None else t
+        if _conv.task_plan_projection_digest(subject) != expected:
+            return (
+                f"task {t.id}'s immutable projection differs from the "
+                f"committed manifest — the stored record is not the "
+                f"planned one")
+        return None
+
     # ── Leader between-task reflection ──────────
     #
     # The iterative continue/revise/drop judgment
@@ -4918,7 +5105,7 @@ class Orchestrator:
         # The producer runbook rides at the HEAD of the task prompt — the
         # always-on bar-commit spine, the same on the single-shot and tool-loop
         # producer paths.
-        prompt = self._with_producer_runbook(prompt)
+        prompt = self._with_producer_runbook(prompt, task)
         # (Assembler tasks with resolvable units never reach here — they're bound
         # by the engine at the top of this method, before the mode dispatch.)
         raw_response = self._run_agent_call(
@@ -5114,6 +5301,11 @@ class Orchestrator:
                 producer_role, target_agent_id=task.assigned_agent_id,
             ),
         )
+        patch_convention = self._convention_block_for(task)
+        if patch_convention:
+            # EDIT mode revises within the same sealed convention the
+            # GENERATE pass built to.
+            prompt = prompt + "\n\n" + patch_convention
         raw_response = self._run_agent_call(
             task.assigned_agent_id, producer_role, prompt
         )
@@ -5237,6 +5429,11 @@ class Orchestrator:
                 target_agent_id=task.assigned_agent_id,
             ),
         )
+        diff_convention = self._convention_block_for(task)
+        if diff_convention:
+            # DIFF mode edits within the same sealed convention as every
+            # other producer path.
+            prompt = prompt + "\n\n" + diff_convention
         raw_response = self._run_agent_call(
             task.assigned_agent_id, producer_role, prompt
         )
@@ -6105,7 +6302,7 @@ class Orchestrator:
             "operator gate."
         )
 
-    def _with_producer_runbook(self, prompt: str) -> str:
+    def _with_producer_runbook(self, prompt: str, task: "Task | None" = None) -> str:
         """Prepend the producer runbook (the always-on bar-commit spine) to a
         producer's task prompt — the producer analog of the leader-runbook
         injection at converse. The generic discipline rides EVERY producer task;
@@ -6113,8 +6310,16 @@ class Orchestrator:
         (no duplication). Overridable via the producer-runbook seed/override,
         engine default otherwise. This is what makes a thinking-OFF producer a
         rigorous one — the procedural scaffold reasoning would otherwise supply,
-        at fixed prompt cost instead of churning context with reasoning tokens."""
+        at fixed prompt cost instead of churning context with reasoning tokens.
+
+        When ``task`` is a contract-bound code task, the sealed convention
+        block rides between the runbook and the prompt (fail-closed — see
+        ``_convention_block_for``)."""
         runbook = self._prompt("producer-runbook", _PRODUCER_RUNBOOK)
+        convention = self._convention_block_for(task) if task is not None else ""
+        if convention:
+            return (runbook.rstrip() + "\n\n---\n\n" + convention
+                    + "\n\n---\n\n" + prompt)
         return runbook.rstrip() + "\n\n---\n\n" + prompt
 
     def _autonomy_block(self) -> str:
@@ -7213,7 +7418,7 @@ class Orchestrator:
             )
         # The producer runbook rides at the very HEAD — read first, every time —
         # ahead of the skill guidance and the task (the always-on bar-commit spine).
-        prompt = self._with_producer_runbook(prompt)
+        prompt = self._with_producer_runbook(prompt, task)
 
         artifacts_root = self._artifacts_root()
         transcript_path = artifacts_root / "tool_calls" / f"{task.id.lower()}.jsonl"
@@ -8101,6 +8306,13 @@ class Orchestrator:
         # tools (run_shell, http_get, etc.) while reasoning, then emits
         # the standard JSON verdict as final content. Same parsing path
         # downstream — the verdict shape is unchanged.
+        # The sealed convention block rides the FORMATTED prompt (a template
+        # slot would be silently dropped by skill-file overrides) — QC judges
+        # against the same rendered truth the producer built to.
+        qc_convention = self._convention_block_for(task)
+        if qc_convention:
+            prompt = prompt + "\n\n" + qc_convention
+
         qc_tool_skill = self._qc_tool_loadout_skill(task.qc_agent_id)
         if image_att is not None:
             # Appended to the FORMATTED prompt (a template slot would be
@@ -9722,6 +9934,23 @@ class Orchestrator:
             # which path re-entered (redispatch, recovery, goal-redo).
             self._resume_decompose_mint(t, summary)
             return
+        plan_refusal = self._task_plan_dispatch_refusal(t)
+        if plan_refusal is not None:
+            # The goal's task-plan witness does not authorize this task —
+            # an uncommittable prepared plan, a task outside the manifest,
+            # or a drifted projection. Zero producer work; visible wedge.
+            t.transitions.append(
+                StateTransition(
+                    from_state=t.status.value,
+                    to_state=TaskStatus.BLOCKED.value,
+                    actor="orchestrator",
+                    rationale=f"dispatch refused: {plan_refusal}",
+                )
+            )
+            t.status = TaskStatus.BLOCKED
+            summary.errors.append(f"{t.id}: {plan_refusal}")
+            self._ticket_for_failed_task(t, plan_refusal)
+            return
         corrective_notes = initial_corrective_notes
         last_qc: tuple[AssertionEvidence, str] | None = None  # (verdict, notes)
         rescue_defect_type: str | None = None  # #81: last QC defect class for the witness
@@ -10490,6 +10719,11 @@ class Orchestrator:
             standards=_format_standards_block(domain_standards),
             body=body,
         )
+        convention = self._convention_block_for(t)
+        if convention:
+            # A repair edits within the sealed convention — it can never
+            # invent a second one.
+            prompt = prompt + "\n\n" + convention
         raw = self._run_agent_call(t.qc_agent_id, "qc", prompt, task_id=t.id)
         return self._persist_qc_authored(t, draft_path, raw)
 
@@ -10509,6 +10743,11 @@ class Orchestrator:
             defects=defects,
             standards=_format_standards_block(domain_standards),
         )
+        convention = self._convention_block_for(t)
+        if convention:
+            # Authoring from the contract still builds inside the sealed
+            # convention — same rendered truth as the producer path.
+            prompt = prompt + "\n\n" + convention
         raw = self._run_agent_call(t.qc_agent_id, "qc", prompt, task_id=t.id)
         return self._persist_qc_authored(t, draft_path, raw)
 
@@ -10994,6 +11233,9 @@ class Orchestrator:
                 retry_count=t.retry_count,
                 output_path=(str(raw_path).strip() if raw_path else None),
                 decompose_depth=t.decompose_depth + 1,
+                # Immutable birth field: a re-decompose INHERITS the parent's
+                # sealed convention authority, never derives a new one.
+                convention_contract_id=t.convention_contract_id,
                 status=TaskStatus.PENDING,
             ))
         if len(children) > self._MAX_DECOMPOSE_WIDTH:
@@ -12062,6 +12304,21 @@ class Orchestrator:
                 f"engine-run pytest (ADVISORY — the suite requires its own "
                 f"conftest.py to run, so the engine could not verify it "
                 f"hook-free; cwd: {repo_root}) — " + _snip(res_cf))
+        # Ecosystem conformance smoke, independent of every producer-authored
+        # artifact: import each sealed contract's declared module from its
+        # declared layout. Producer code and tests that consistently use a
+        # WRONG name stay self-consistently green above — only importing the
+        # DECLARED name proves the modules form the planned component. A
+        # README (or any file) merely mentioning the name proves nothing.
+        smoke = self._convention_import_smoke(tasks, run_shell)
+        if smoke is not None:
+            smoke_state, smoke_report = smoke
+            if smoke_state is None:
+                return None, smoke_report
+            reports.append(smoke_report)
+            if not smoke_state:
+                return False, "\n\n".join(reports)
+
         if not any_tests:
             # Suite roots existed but not one engine-discoverable test file —
             # no green evidence to show, same as no suite at all (RED).
@@ -12075,6 +12332,57 @@ class Orchestrator:
                 "that producer code did not influence the result. Treat it as "
                 "evidence, not a tamper-proof attestation.")
         return all_green, "\n\n".join(reports)
+
+    def _convention_import_smoke(
+        self, tasks: "list[Task]", run_shell,
+    ) -> "tuple[bool | None, str] | None":
+        """Import each sealed convention contract's declared module from its
+        declared layout, through the same sandboxed ``run_shell`` the pytest
+        gate uses. ``None`` = no applicable contract (no witnessed package
+        claim to check); ``(None, reason)`` = could not run (UNAVAILABLE);
+        ``(False, report)`` = the declared component does not import —
+        conformance RED regardless of producer test results."""
+        contracts = []
+        for gid in sorted({t.goal_id for t in tasks}):
+            goal = store.get_goal(
+                self.project.code, gid, run_id=self.project.run_id)
+            if goal is None:
+                continue
+            contracts.extend(
+                c for c in goal.convention_contracts
+                if c.state == "resolved" and c.layout != "standalone")
+        if not contracts:
+            return None
+        root = self._shared_artifacts_root()
+        oks: "list[str]" = []
+        for c in contracts:
+            component = root / c.component_root if c.component_root else root
+            search = "src" if c.layout == "src" else "."
+            # import_name is a validated Python identifier (sealed at
+            # derivation) — safe to interpolate into the command line.
+            cmd = (
+                f"python3 -c 'import sys; sys.path.insert(0, \"{search}\"); "
+                f"import {c.import_name}'"
+            )
+            try:
+                result = run_shell.call(
+                    cmd=cmd, profile="full", cwd=str(component), timeout=60.0)
+            except (RuntimeError, ValueError, OSError) as exc:
+                return None, f"convention import smoke could not run: {exc}"
+            head = result.split("\n", 1)[0]
+            try:
+                code = int(head.removeprefix("exit_code:").strip())
+            except ValueError:
+                return None, (
+                    "unparseable shell result in the convention import smoke")
+            if code != 0:
+                return False, (
+                    f"convention import smoke is RED — `import "
+                    f"{c.import_name}` from the declared {c.layout} layout "
+                    f"failed; the produced modules do not form the sealed "
+                    f"component:\n\n{result[-1500:]}")
+            oks.append(f"import {c.import_name} ({c.layout} layout) OK")
+        return True, "convention import smoke — " + "; ".join(oks)
 
     #: Files that CONTROL pytest collection/selection — a change to any of
     #: these can hide a red test. conftest.py is included by exact name.
@@ -13523,6 +13831,19 @@ class Orchestrator:
             artifacts_root=artifacts_root,
             deliverables="\n".join(deliverable_lines) or "(none on disk)",
         )
+        # The goal's sealed convention contracts ride the fix prompt too —
+        # a goal-level repair edits within the same rendered truth every
+        # producer and QC prompt carried; it can never invent a second
+        # convention. Appended to the formatted prompt (a template slot
+        # would be dropped by prompt overrides).
+        from modulatio import conventions as _conv
+        fix_convention_blocks = [
+            _conv.render_contract_block(c)
+            for c in goal.convention_contracts
+            if c.state == "resolved"
+        ]
+        if fix_convention_blocks:
+            prompt = prompt + "\n\n" + "\n\n".join(fix_convention_blocks)
         # H3: audit transcript under the RUN dir — outside the model-writable
         # artifacts tree the fix lane's exec/write tools are rooted at.
         transcript_path = (
@@ -16080,6 +16401,16 @@ class Orchestrator:
                 self._reject_task_plan(g, tasks, exc.reason, summary)
                 continue
 
+            # Convention sealing: one settled naming/layout authority per
+            # component BEFORE any dispatch decision. Unresolved components,
+            # root-incompatible targets, and re-plan authority drift all
+            # reject the whole plan here — zero producers.
+            try:
+                self._seal_convention_contracts(g, tasks)
+            except (_PlanError, ConventionContractConflict) as exc:
+                self._reject_task_plan(g, tasks, str(exc), summary)
+                continue
+
             # Tactical dispatch step. Pure Python — no extra LLM calls.
             # `plan_dispatch` classifies the task against the registry
             # + roster into MATCHED / NO_CONSTRAINT
@@ -16207,6 +16538,16 @@ class Orchestrator:
                             f"{prior}; {note}" if prior else note
                         )
 
+            # The prepared plan manifest precedes every task save, so a
+            # crash mid-persistence leaves a witness recovery can check the
+            # partial set against — an incomplete plan is observationally
+            # DIFFERENT from a legitimately smaller one.
+            try:
+                self._prepare_task_plan(g, tasks)
+            except _PlanError as exc:
+                self._reject_task_plan(g, tasks, str(exc), summary)
+                continue
+
             for t in tasks:
                 if t.status is TaskStatus.BLOCKED:
                     # Ticketed by the dispatch step above. Persist the
@@ -16233,6 +16574,16 @@ class Orchestrator:
                 t.status = TaskStatus.DISPATCHED
                 store.save_task(self.project.code, t, run_id=self.project.run_id)
                 summary.tasks.append(t)
+
+            # Commit barrier: the exact expected set + projections verify
+            # by readback, then the Goal flips to the committed dispatch
+            # authority. A dropped/failed/altered task record refuses the
+            # commit — the plan stays prepared and zero producers start.
+            try:
+                self._commit_task_plan(g)
+            except _PlanError as exc:
+                self._reject_task_plan(g, tasks, str(exc), summary)
+                continue
 
             # Execution loop runs in topological order (tasks list is
             # already sorted). Each task checks dep statuses against
