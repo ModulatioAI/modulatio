@@ -849,3 +849,32 @@ def capability_card_rows(snapshot: CapabilitySnapshot) -> tuple:
             detail = f" — {f.detail}" if f.detail else ""
             lines.append(f"  {f.state}: {f.request_class} {f.resource}{detail}")
     return tuple(lines)
+
+
+def parity_verdict(observed: dict, exceptions=PARITY_EXCEPTIONS) -> str:
+    """Derive the parity badge from OBSERVED cross-backend outcomes plus the
+    declared exception ledger — never hand-selected. ``observed`` maps a
+    parity-group name to ``{backend: outcome}``.
+
+    A group whose outcomes differ without a ledger entry raises (an
+    undeclared divergence must fail the claim, not downgrade it); a ledger
+    entry whose group's outcomes AGREE raises (a stale exception must be
+    removed, not quietly kept); any applicable exception yields
+    ``"reduced"`` — a full badge is impossible while one exists."""
+    declared = {resource for _src, _cls, resource, _detail in exceptions}
+    reduced = False
+    for group, outcomes in sorted(observed.items()):
+        differs = len(set(outcomes.values())) > 1
+        if differs and group not in declared:
+            raise ValueError(
+                f"undeclared parity divergence in group {group!r}: {outcomes}")
+        if not differs and group in declared:
+            raise ValueError(
+                f"stale parity exception {group!r}: outcomes agree {outcomes}")
+        if differs:
+            reduced = True
+    unobserved = declared - set(observed)
+    if unobserved:
+        raise ValueError(
+            f"declared exceptions never observed: {sorted(unobserved)}")
+    return "reduced" if reduced else "full"
