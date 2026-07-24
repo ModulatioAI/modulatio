@@ -470,7 +470,7 @@ def test_once_grant_covers_exactly_one_tool_call(env):
 # answer lands in BOTH stores. The runner's second independent pass dies.
 
 
-def _coordinator_env(tmp_path, prompt_fn, mode=None):
+def _coordinator_env(tmp_path, prompt_fn, mode=None, transaction_state=None):
     from modulatio import permissions as perm
 
     ws = tmp_path / "ws"
@@ -483,7 +483,8 @@ def _coordinator_env(tmp_path, prompt_fn, mode=None):
         sandbox_available=lambda: True,
     )
     coord = perm.build_authorization_coordinator(
-        gate=gate, root=ws, prompt_fn=prompt_fn, broker=broker)
+        gate=gate, root=ws, prompt_fn=prompt_fn, broker=broker,
+        transaction_state=transaction_state)
     return coord, gate, broker, ws
 
 
@@ -966,6 +967,161 @@ def test_rollback_latch_clears_after_successful_reconcile(
     broken["on"] = False                     # the store heals
     assert coord("http_get", {"url": "https://leak.example/a"}) is True
     assert len(prompts) == 2                 # latched call never prompted
+
+
+def _leaky_bundle(coord, gate, broker, tmp_path, monkeypatch):
+    """Approve a two-root ALWAYS bundle, fail the capability durable write,
+    then fail the gate restore — leaving durable gate authority owed."""
+    from modulatio import permissions as perm
+
+    args, o1, o2 = _two_outside_files_call(tmp_path)
+    monkeypatch.setattr(
+        perm.GrantStore, "_write_always",
+        lambda self: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(
+        gate, "restore_grants",
+        lambda snap: (_ for _ in ()).throw(OSError("gate store broken")))
+    assert coord("run_shell", args) is False
+    return args, o1, o2
+
+
+def test_rollback_debt_survives_a_rebuilt_coordinator(
+        env, tmp_path, monkeypatch):
+    """The debt belongs to the AUTHORITY STORES, not to one coordinator
+    closure: production rebuilds the coordinator every turn over the same
+    cached gate/broker, so a second coordinator must stay latched and deny
+    a call the leaked durable root would otherwise cover."""
+    from modulatio import permissions as perm
+
+    prompts = []
+
+    def prompt_fn(req):
+        prompts.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_ALWAYS)
+
+    shared = perm.AuthorizationTransactionState()
+    coord, gate, broker, ws = _coordinator_env(
+        tmp_path, prompt_fn, transaction_state=shared)
+    args, o1, o2 = _leaky_bundle(coord, gate, broker, tmp_path, monkeypatch)
+    assert len(prompts) == 1
+
+    # A NEW coordinator over the SAME cached authorities — the per-turn
+    # rebuild production performs.
+    coord2 = perm.build_authorization_coordinator(
+        gate=gate, root=ws, prompt_fn=prompt_fn, broker=broker,
+        transaction_state=shared)
+    assert coord2("read_file", {"path": str(o1 / "a.md")}) is False
+    assert len(prompts) == 1        # denied by the debt, never prompted
+
+
+def test_rollback_debt_heals_and_restores_the_exact_snapshot(
+        env, tmp_path, monkeypatch):
+    """Healing the restore seam lets a LATER coordinator reconcile: the
+    captured snapshot restores (leaked durable roots gone) and normal
+    authorization resumes."""
+    from modulatio import permissions as perm
+
+    prompts = []
+
+    def prompt_fn(req):
+        prompts.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_ALWAYS)
+
+    shared = perm.AuthorizationTransactionState()
+    coord, gate, broker, ws = _coordinator_env(
+        tmp_path, prompt_fn, transaction_state=shared)
+    real_restore = lg.LeaderPermissionGate.restore_grants
+    args, o1, o2 = _leaky_bundle(coord, gate, broker, tmp_path, monkeypatch)
+    leaked = lp.load_grants(CODE, lp.REQUEST_CLASS_PATH)
+    assert leaked, "the probe must actually leak durable authority"
+
+    # Heal both seams, then a fresh coordinator reconciles before serving.
+    monkeypatch.setattr(perm.GrantStore, "_write_always", lambda self: None)
+    monkeypatch.setattr(
+        gate, "restore_grants",
+        lambda snap: real_restore(gate, snap))
+    coord2 = perm.build_authorization_coordinator(
+        gate=gate, root=ws, prompt_fn=prompt_fn, broker=broker,
+        transaction_state=shared)
+    assert coord2("read_file", {"path": str(o1 / "a.md")}) is True
+    assert shared.outstanding() == 0          # debt discharged
+    # The LEAK is gone: the exec authority the failed bundle left behind is
+    # restored away, and the second leaked root is not silently covered —
+    # it asks again. (The o1 path grant now present is the honest ALWAYS
+    # answer to THIS call's prompt, not the leak.)
+    assert lp.load_grants(CODE, "exec") == []
+    assert len(prompts) == 2                  # the reconciled call asked
+    assert coord2("read_file", {"path": str(o2 / "b.md")}) is True
+    assert len(prompts) == 3                  # o2 re-asked: never covered
+
+
+def test_rollback_debt_survives_a_rebuilt_broker_wrapper(
+        env, tmp_path, monkeypatch):
+    """Broker debt binds to the shared state too: rebuilding the
+    PermissionBroker WRAPPER over the same cached GrantStore leaves the
+    next coordinator latched."""
+    from modulatio import permissions as perm
+
+    prompts = []
+
+    def prompt_fn(req):
+        prompts.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_ALWAYS)
+
+    shared = perm.AuthorizationTransactionState()
+    coord, gate, broker, ws = _coordinator_env(
+        tmp_path, prompt_fn, transaction_state=shared)
+    monkeypatch.setattr(
+        perm.GrantStore, "_write_always",
+        lambda self: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(
+        broker.grants, "restore",
+        lambda snap: (_ for _ in ()).throw(OSError("still broken")))
+    assert coord("http_get", {"url": "https://leak.example/a"}) is False
+
+    rebuilt = perm.PermissionBroker(
+        mode=perm.RunMode.DEFAULT, grants=broker.grants, ask=None,
+        sandbox_available=lambda: True)
+    coord2 = perm.build_authorization_coordinator(
+        gate=gate, root=ws, prompt_fn=prompt_fn, broker=rebuilt,
+        transaction_state=shared)
+    assert coord2("http_get", {"url": "https://leak.example/a"}) is False
+    assert len(prompts) == 1
+
+
+def test_concurrent_authorizations_cannot_pass_one_outstanding_debt(
+        env, tmp_path, monkeypatch):
+    """Two threads racing one outstanding debt: neither passes, the debt
+    is not double-popped, and no half-reconciled state is observable."""
+    import threading
+
+    from modulatio import permissions as perm
+
+    def prompt_fn(req):
+        return lg.ScopedDecision(scope=lp.SCOPE_ALWAYS)
+
+    shared = perm.AuthorizationTransactionState()
+    coord, gate, broker, ws = _coordinator_env(
+        tmp_path, prompt_fn, transaction_state=shared)
+    _leaky_bundle(coord, gate, broker, tmp_path, monkeypatch)
+
+    results: list = []
+    barrier = threading.Barrier(2)
+
+    def _attempt():
+        barrier.wait(timeout=5)
+        coord2 = perm.build_authorization_coordinator(
+            gate=gate, root=ws, prompt_fn=prompt_fn, broker=broker,
+            transaction_state=shared)
+        results.append(coord2("http_get", {"url": "https://x.example/a"}))
+
+    threads = [threading.Thread(target=_attempt) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    assert results == [False, False]
+    assert shared.outstanding() == 1        # one debt, popped by nobody
 
 
 def test_bundle_gate_restore_failure_still_restores_broker(

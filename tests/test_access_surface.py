@@ -95,6 +95,41 @@ def test_undeclared_capability_kind_cannot_be_constructed():
     assert perm.Capability(kind="tool:web_search", label="x")
 
 
+def test_every_mapped_tool_emits_exactly_its_mapped_kind():
+    """The table is AUTHORITATIVE for dispatch: every mapped tool's real
+    capability carries exactly the mapped kind — a mapping that does not
+    route cannot sit in the table unnoticed."""
+    for tool_name, kind in perm.CAPABILITY_KIND_BY_TOOL.items():
+        assert perm.capability_for(tool_name, {}).kind == kind
+
+
+def test_dispatch_validation_passes_on_the_real_table():
+    perm.validate_capability_dispatch()
+
+
+def test_mapped_entry_that_stops_emitting_a_fixed_kind_fails_fast(
+    monkeypatch,
+):
+    """The table cannot be updated alongside the inventory while the
+    emitter still returns the dynamic ``tool:<name>`` capability —
+    production validation raises."""
+    monkeypatch.setitem(
+        perm.CAPABILITY_BUILDERS, "phantom_probe_tool",
+        lambda name, args: perm.Capability(
+            f"tool:{name}", "phantom", "",
+            _scoped={"once": f"tool:{name}", "session": f"tool:{name}",
+                     "always": f"tool:{name}"}))
+    with pytest.raises(ValueError):
+        perm.validate_capability_dispatch()
+
+
+def test_unmapped_tool_still_gets_the_dynamic_capability():
+    """Tools outside the table legitimately fall through — the dynamic
+    family is the default, not a dispatch failure."""
+    cap = perm.capability_for("some_unmapped_tool", {})
+    assert cap.kind == "tool:some_unmapped_tool"
+
+
 def test_capability_kinds_exact_against_dispatch_range(tmp_path):
     """The declared kinds equal what production DISPATCH emits — a kind no
     rule produces (the old stale ``secret``) fails as stale."""

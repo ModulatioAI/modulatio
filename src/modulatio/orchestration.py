@@ -7023,6 +7023,30 @@ class Orchestrator:
             bypass=_sandbox.is_bypass_requested(),
         )
 
+    def _authorization_transaction_state(self):
+        """Rollback debt for the cached authority stores, cached BESIDE
+        them: the coordinator is rebuilt every converse turn, so a debt
+        living in one coordinator's closure would die with it and the next
+        turn would silently accept whatever a failed restore left behind."""
+        cached = getattr(self, "_auth_txn_state_cache", None)
+        if cached is None:
+            from modulatio import permissions as _perm
+            cached = _perm.AuthorizationTransactionState()
+            self._auth_txn_state_cache = cached
+        return cached
+
+    def _build_turn_permission_callback(self, *, prompt_fn, broker):
+        """THE per-turn authorization coordinator seam: one coordinator per
+        converse turn over the CACHED gate/grant store, sharing this
+        project's long-lived rollback debt so an unreconciled failure
+        binds every later turn too."""
+        from modulatio.permissions import build_authorization_coordinator
+        return build_authorization_coordinator(
+            gate=self.leader_gate(), root=self._leader_workspace(),
+            prompt_fn=prompt_fn, broker=broker,
+            transaction_state=self._authorization_transaction_state(),
+        )
+
     def _permission_grants(self):
         """The broker's GrantStore, cached on the Orchestrator so SESSION grants
         survive across converse turns (ALWAYS grants persist to an engine-owned
@@ -7126,11 +7150,8 @@ class Orchestrator:
         # explicit permission_callback (tests/embedders) keeps the legacy
         # two-arm compose.
         if prompt_fn is not None and permission_callback is None:
-            from modulatio.permissions import build_authorization_coordinator
-            permission_callback = build_authorization_coordinator(
-                gate=self.leader_gate(), root=self._leader_workspace(),
-                prompt_fn=prompt_fn, broker=permission_broker,
-            )
+            permission_callback = self._build_turn_permission_callback(
+                prompt_fn=prompt_fn, broker=permission_broker)
             permission_broker = None
         # Serialize the whole turn so two concurrent operator sessions on one
         # project can't interleave the durable log or race on shared state.

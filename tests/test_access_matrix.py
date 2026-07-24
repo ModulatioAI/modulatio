@@ -740,6 +740,52 @@ def test_runtime_card_completeness_tracks_descriptor(project_orch):
     assert set(snap.sources) == set(perm.CAPABILITY_AUTHORITY_SOURCES)
 
 
+def test_turn_lifecycle_carries_rollback_debt_across_turns(
+    project_orch, tmp_path, monkeypatch,
+):
+    """The PRODUCTION per-turn seam, twice: turn 1's failed rollback owes a
+    restore; turn 2 builds a fresh coordinator over the same cached
+    authorities and must stay denied — the debt belongs to the project's
+    stores, not to one turn's closure."""
+    from modulatio import leader_gate as lg
+    from modulatio import permissions as perm
+
+    prompts = []
+
+    def prompt_fn(req):
+        prompts.append(req)
+        return lg.ScopedDecision(scope="always")
+
+    broker = project_orch._build_permission_broker(perm.RunMode.DEFAULT, None)
+    turn1 = project_orch._build_turn_permission_callback(
+        prompt_fn=prompt_fn, broker=broker)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "a.md").write_text("x", encoding="utf-8")
+
+    # A capability ask answered ALWAYS: the durable write fails, then the
+    # rollback restore fails too — leaving a debt owed on the project's
+    # cached grant store.
+    monkeypatch.setattr(
+        perm.GrantStore, "_write_always",
+        lambda self: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(
+        project_orch._permission_grants(), "restore",
+        lambda snap: (_ for _ in ()).throw(OSError("grant store broken")))
+    assert turn1("http_get", {"url": "https://leak.example/a"}) is False
+    assert len(prompts) == 1
+    assert project_orch._authorization_transaction_state().outstanding() == 1
+
+    # Turn 2: a NEW coordinator AND a rebuilt broker wrapper — exactly what
+    # a real turn builds — over the same cached gate + grant store.
+    turn2 = project_orch._build_turn_permission_callback(
+        prompt_fn=prompt_fn,
+        broker=project_orch._build_permission_broker(
+            perm.RunMode.DEFAULT, None))
+    assert turn2("http_get", {"url": "https://leak.example/a"}) is False
+    assert len(prompts) == 1          # denied by the debt, never prompted
+
+
 def test_live_snapshot_shows_once_grant_until_next_call(project_orch):
     """A ONCE grant is LIVE authority: the runtime snapshot renders it as
     'Allowed this call' and it vanishes the moment the next tool call

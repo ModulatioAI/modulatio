@@ -27,6 +27,7 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
+from modulatio import access_surface as _axs
 from modulatio import leader_permissions as lp
 
 SCOPE_ONCE = lp.SCOPE_ONCE
@@ -360,7 +361,8 @@ def extract_tool_requests(tool_name: str, args: dict, *, root) -> list[SecurityR
         label = server.name if server is not None else f"{server_id} (unknown server)"
         return [SecurityRequest(
             action="mcp-tool", resource=f"{server_id}:{mcp_tool}",
-            request_class="mcp", why=f"MCP tool {label}:{mcp_tool}")]
+            request_class=_axs.CLASS_MCP,
+            why=f"MCP tool {label}:{mcp_tool}")]
     if tool_name not in _GATED_TOOLS:
         return []
     if tool_name in _PATH_ACTION_BY_TOOL:

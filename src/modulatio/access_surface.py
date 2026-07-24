@@ -23,11 +23,20 @@ from __future__ import annotations
 #: family and ride the ``capability`` request class.
 CAPABILITY_KINDS = ("network", "file-write", "shell")
 
+#: Engine-emitted request classes — consumed BY NAME at their emit sites
+#: (MCP tool extraction, the coordinator's capability-only ask, the
+#: snapshot's substrate posture fact), so no emitter carries a hand-copied
+#: literal the inventory could drift from.
+CLASS_MCP = "mcp"
+CLASS_CAPABILITY = "capability"
+CLASS_SUBSTRATE = "substrate"
+
 #: Resource/request classes the authorization chokepoint classifies. The
 #: filesystem axis (path/exec), the capability kinds, MCP-origin calls,
 #: the broker's capability-only ask surface, and the substrate posture.
 REQUEST_CLASSES = (
-    "path", "exec", *CAPABILITY_KINDS, "mcp", "capability", "substrate",
+    "path", "exec", *CAPABILITY_KINDS,
+    CLASS_MCP, CLASS_CAPABILITY, CLASS_SUBSTRATE,
 )
 
 #: Surface identity constants — each approval bridge stamps ITSELF with

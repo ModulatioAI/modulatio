@@ -44,6 +44,8 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
 
+from modulatio import access_surface as _axs_classes
+
 
 # ── modes ──────────────────────────────────────────────────────────────────
 class RunMode(enum.Enum):
@@ -239,62 +241,106 @@ def _registrable_domain(host: str) -> str:
     return ""
 
 
-#: Tool → fixed capability kind: THE dispatch table ``capability_for``
-#: routes through. The declared kind inventory derives from its VALUES, so
-#: a kind no dispatch rule emits cannot stay declared, and a new rule's
-#: kind fails completeness until the inventory maps it. Tools absent here
-#: get the dynamic ``tool:<name>`` capability.
-CAPABILITY_KIND_BY_TOOL = {
-    "http_get": "network",
-    "web_search": "network",
-    "run_shell": "shell",
-    "write_artifact": "file-write",
+def _network_capability(name: str, args: dict) -> "Capability":
+    url = str(args.get("url") or "").strip()
+    host = _host_of(url)
+    domain = _registrable_domain(host) if host else ""
+    scoped = {"once": f"network:url={url or args.get('query','')}"}
+    if host:
+        scoped["session"] = f"network:host={host}"
+    if domain:
+        scoped["always"] = f"network:domain={domain}"
+    return Capability(
+        "network", "access the internet",
+        (url or str(args.get("query", "")))[:120],
+        requires_sandbox=False, _scoped=scoped)
+
+
+def _shell_capability(name: str, args: dict) -> "Capability":
+    cmd = str(args.get("cmd", "")).strip()
+    profile = str(args.get("profile", "passive")).strip() or "passive"
+    # profile is part of the key — passive→full is an escalation, not the same grant
+    scoped = {
+        "once": f"shell:argv={cmd[:200]}",
+        "session": f"shell:profile={profile}",
+        "always": f"shell:profile={profile}",
+    }
+    return Capability(
+        "shell", "run a command on your computer", cmd[:120],
+        requires_sandbox=True, _scoped=scoped)
+
+
+def _file_write_capability(name: str, args: dict) -> "Capability":
+    # writes inside the work folder are low-risk; keyed by the tool itself.
+    key = "file-write:artifacts"
+    return Capability(
+        "file-write", "write a file in the work folder",
+        str(args.get("path", ""))[:120], requires_sandbox=False,
+        _scoped={"once": key, "session": key, "always": key})
+
+
+#: Tool → its capability BUILDER: THE dispatch table ``capability_for``
+#: routes through. The table holds the real handlers, so a "mapped but
+#: unhandled" entry cannot exist — and the declared kind inventory is
+#: derived by INVOKING these handlers, so a mapping that stopped emitting
+#: its kind fails validation instead of quietly returning ``tool:<name>``.
+#: Tools absent here get the dynamic ``tool:<name>`` capability.
+CAPABILITY_BUILDERS = {
+    "http_get": _network_capability,
+    "web_search": _network_capability,
+    "run_shell": _shell_capability,
+    "write_artifact": _file_write_capability,
 }
 
-#: The fixed kinds production actually emits — derived, never hand-listed.
+#: Tool → fixed kind, DERIVED by invoking each real builder (never a
+#: hand-written parallel map).
+CAPABILITY_KIND_BY_TOOL = {
+    name: builder(name, {}).kind
+    for name, builder in CAPABILITY_BUILDERS.items()
+}
+
+#: The fixed kinds production actually emits — derived from the same
+#: invocation, so a declared kind with no emitting handler cannot appear.
 PRODUCTION_CAPABILITY_KINDS = tuple(
     sorted(set(CAPABILITY_KIND_BY_TOOL.values())))
+
+
+def validate_capability_dispatch() -> None:
+    """Fail fast when the dispatch table stops being authoritative: every
+    builder must emit a FIXED declared kind (never the dynamic
+    ``tool:<name>`` family), and every mapped tool's live capability must
+    still carry exactly the kind the table derived from it."""
+    from modulatio import access_surface as _axs
+
+    for name, builder in CAPABILITY_BUILDERS.items():
+        emitted = builder(name, {}).kind
+        if emitted not in _axs.CAPABILITY_KINDS:
+            raise ValueError(
+                f"capability builder for {name!r} emits {emitted!r}, which "
+                f"is not a declared fixed kind {_axs.CAPABILITY_KINDS} — a "
+                f"mapped tool must never fall through to the dynamic "
+                f"'tool:' family")
+        live = capability_for(name, {}).kind
+        if live != emitted:
+            raise ValueError(
+                f"capability dispatch for {name!r} returns {live!r} but the "
+                f"table derived {emitted!r}")
 
 
 def capability_for(tool_name: str, args: "dict | None" = None) -> Capability:
     """Map a tool call to its typed, scope-aware Capability (§6.B).
 
-    ``Capability.label``/``detail`` are the HUMAN utterance a surface speaks in the
-    Leader's voice ("access the internet"), never the policy key — the key is the
-    typed ``scoped_key``. ``args`` is defensively
-    coerced to a dict so a direct/public call can't crash. Fixed kinds come
-    from ``CAPABILITY_KIND_BY_TOOL`` — the branch bodies build the scoped
-    keys; the KIND is always the table's."""
+    ``Capability.label``/``detail`` are the HUMAN utterance a surface speaks
+    in the Leader's voice ("access the internet"), never the policy key —
+    the key is the typed ``scoped_key``. ``args`` is defensively coerced to
+    a dict so a direct/public call can't crash. Dispatch goes THROUGH
+    ``CAPABILITY_BUILDERS``: the table is the handler set, so the declared
+    kinds and the emitted kinds cannot drift apart."""
     args = args if isinstance(args, dict) else {}
     name = (tool_name or "").strip()
-    if name in ("http_get", "web_search"):
-        url = str(args.get("url") or "").strip()
-        host = _host_of(url)
-        domain = _registrable_domain(host) if host else ""
-        scoped = {"once": f"network:url={url or args.get('query','')}"}
-        if host:
-            scoped["session"] = f"network:host={host}"
-        if domain:
-            scoped["always"] = f"network:domain={domain}"
-        return Capability(CAPABILITY_KIND_BY_TOOL[name], "access the internet", (url or str(args.get("query", "")))[:120],
-                          requires_sandbox=False, _scoped=scoped)
-    if name == "run_shell":
-        cmd = str(args.get("cmd", "")).strip()
-        profile = str(args.get("profile", "passive")).strip() or "passive"
-        # profile is part of the key — passive→full is an escalation, not the same grant
-        scoped = {
-            "once": f"shell:argv={cmd[:200]}",
-            "session": f"shell:profile={profile}",
-            "always": f"shell:profile={profile}",
-        }
-        return Capability(CAPABILITY_KIND_BY_TOOL[name], "run a command on your computer", cmd[:120],
-                          requires_sandbox=True, _scoped=scoped)
-    if name == "write_artifact":
-        # writes inside the work folder are low-risk; keyed by the tool itself.
-        return Capability(CAPABILITY_KIND_BY_TOOL[name], "write a file in the work folder",
-                          str(args.get("path", ""))[:120], requires_sandbox=False,
-                          _scoped={"once": "file-write:artifacts", "session": "file-write:artifacts",
-                                   "always": "file-write:artifacts"})
+    builder = CAPABILITY_BUILDERS.get(name)
+    if builder is not None:
+        return builder(name, args)
     key = f"tool:{name}"
     return Capability(f"tool:{name}", f"use the {name!r} tool", "", requires_sandbox=False,
                       _scoped={"once": key, "session": key, "always": key})
@@ -321,7 +367,55 @@ def ask_via_prompt_fn(prompt_fn):
     return ask
 
 
-def build_authorization_coordinator(*, gate, root, prompt_fn, broker):
+class AuthorizationTransactionState:
+    """Rollback debt owed by the AUTHORITY STORES, not by one coordinator.
+
+    Production rebuilds the coordinator every converse turn while reusing
+    the cached gate and grant store, so a debt held in a coordinator's own
+    closure would vanish with it and the next turn would silently accept
+    whatever a failed restore left behind. This state is long-lived
+    (cached beside those stores), shared by every coordinator over them,
+    and lock-serialized so concurrent authorizations can neither pass an
+    outstanding debt nor double-pop or half-reconcile one."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._debts: list = []
+
+    def owe(self, kind: str, snapshot) -> None:
+        """Record a restore that FAILED — its exact pre-transaction
+        snapshot is still owed to the store."""
+        with self._lock:
+            self._debts.append((kind, snapshot))
+
+    def outstanding(self) -> int:
+        with self._lock:
+            return len(self._debts)
+
+    def reconcile(self, *, gate, broker) -> bool:
+        """Retry every owed restore under the lock. True when the stores
+        are verified clean (nothing owed); False while any debt stands —
+        the caller must deny. Restoring the captured SNAPSHOT preserves
+        pre-existing authority exactly; it is never a blind revoke."""
+        with self._lock:
+            while self._debts:
+                kind, snap = self._debts[-1]
+                try:
+                    if kind == "gate":
+                        gate.restore_grants(snap)
+                    elif broker is not None:
+                        broker.grants.restore(snap)
+                    else:
+                        return False  # no store to restore into: stay owed
+                except Exception:  # noqa: BLE001 — still unverified
+                    return False
+                self._debts.pop()
+            return True
+
+
+def build_authorization_coordinator(
+    *, gate, root, prompt_fn, broker, transaction_state=None,
+):
     """ONE authorization coordinator: compose the
     filesystem axis (``LeaderPermissionGate``) and the capability axis
     (``PermissionBroker``) into a single ``authorize(name, args) -> bool``
@@ -336,42 +430,30 @@ def build_authorization_coordinator(*, gate, root, prompt_fn, broker):
     """
     from modulatio import leader_gate as lg
 
-    #: Rollback-health latch: restores that FAILED, as (kind, snapshot)
-    #: still owed. While any is outstanding the authority stores are
-    #: unverified — every call is denied until the exact pre-transaction
-    #: snapshots restore successfully (the authoritative reconcile).
-    pending_reconcile: list = []
-
-    def _reconcile() -> bool:
-        while pending_reconcile:
-            kind, snap = pending_reconcile[-1]
-            try:
-                if kind == "gate":
-                    gate.restore_grants(snap)
-                else:
-                    broker.grants.restore(snap)
-            except Exception:  # noqa: BLE001 — still unverified, stay latched
-                return False
-            pending_reconcile.pop()
-        return True
+    #: Rollback debt shared with every other coordinator over these same
+    #: authority stores (a fresh one when the caller supplies none — a
+    #: standalone coordinator owns its own debt).
+    debt = (transaction_state if transaction_state is not None
+            else AuthorizationTransactionState())
 
     def _restore_both(gate_snap, broker_snap) -> None:
         """Attempt each restore INDEPENDENTLY — one failure never skips the
-        other — and latch whatever could not be restored."""
+        other — and record whatever could not be restored as owed."""
         try:
             gate.restore_grants(gate_snap)
-        except Exception:  # noqa: BLE001 — latch, deny onward
-            pending_reconcile.append(("gate", gate_snap))
+        except Exception:  # noqa: BLE001 — owed, deny onward
+            debt.owe("gate", gate_snap)
         if broker_snap is not None:
             try:
                 broker.grants.restore(broker_snap)
-            except Exception:  # noqa: BLE001 — latch, deny onward
-                pending_reconcile.append(("broker", broker_snap))
+            except Exception:  # noqa: BLE001 — owed, deny onward
+                debt.owe("broker", broker_snap)
 
     def authorize(name: str, args: dict) -> bool:
-        # An unreconciled rollback means the grant stores are unverified:
-        # deny everything until the pre-transaction snapshots restore.
-        if pending_reconcile and not _reconcile():
+        # An unreconciled rollback means the authority stores are
+        # unverified: deny — before the once-slate resets or any silent
+        # grant resolves — until the pre-transaction snapshots restore.
+        if debt.outstanding() and not debt.reconcile(gate=gate, broker=broker):
             return False
         # A new tool call starts a fresh once-slate (same contract as
         # build_permission_callback).
@@ -460,16 +542,17 @@ def build_authorization_coordinator(*, gate, root, prompt_fn, broker):
             decision = Decision.coerce(
                 getattr(prompt_fn(lg.SecurityRequest(
                     action="capability", resource=cap.label,
-                    request_class="capability", why=cap.detail,
+                    request_class=_axs_classes.CLASS_CAPABILITY,
+                    why=cap.detail,
                 )), "scope", None))
             try:
                 return broker.record_ask_decision(cap, decision, strict=True)
             except Exception:  # noqa: BLE001 — restore, fail closed
                 try:
                     broker.grants.restore(broker_snap)
-                except Exception:  # noqa: BLE001 — unverified store: latch,
-                    # deny this and every later call until it reconciles.
-                    pending_reconcile.append(("broker", broker_snap))
+                except Exception:  # noqa: BLE001 — unverified store: owe it,
+                    # denying this and every later call until it reconciles.
+                    debt.owe("broker", broker_snap)
                 return False
         return True
 
@@ -955,7 +1038,7 @@ def effective_capability_snapshot(
 
     # mode — whether capability asks auto-grant.
     facts.append(CapabilityFact(
-        "mode", "capability", "capability asks",
+        "mode", _axs_classes.CLASS_CAPABILITY, "capability asks",
         STATE_ALWAYS if mode.auto_grants_capabilities else STATE_ASKS,
         f"autonomy mode: {mode.value}" if hasattr(mode, "value") else ""))
 
@@ -965,7 +1048,7 @@ def effective_capability_snapshot(
         mode, sandbox_available=sandbox_available, profile=profile,
         bypass=bypass)
     facts.append(CapabilityFact(
-        "substrate", "substrate", "run_shell sandbox",
+        "substrate", _axs_classes.CLASS_SUBSTRATE, "run_shell sandbox",
         STATE_REFUSED if (not sandbox_available and not bypass
                           and profile != "off") else STATE_AVAILABLE,
         sandbox_row))
