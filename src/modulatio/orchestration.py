@@ -7192,8 +7192,7 @@ class Orchestrator:
                     # his own functions (run_job, team_status, …) for the loop.
                     # _run_chat_loop reads via _active_tool_registry(), which
                     # honors this thread-local override.
-                    augmented = dict(self._leader_tool_registry())
-                    augmented.update(self._leader_function_tools())
+                    augmented = self._leader_converse_registry()
                     self._tls.tool_registry_override = augmented
                     # B5 (converse): grant a Clay leader its harness home so its
                     # native file tools see what the litellm leader's rebound
@@ -8873,6 +8872,14 @@ class Orchestrator:
 
         return _config.folder_grant_roots()
 
+    def _leader_converse_registry(self) -> "dict[str, tools.Tool]":
+        """THE Leader converse loadout — his scoped tool registry plus his
+        own functions — assembled in ONE place so the converse turn and the
+        live capability card can never tell different loadout stories."""
+        augmented = dict(self._leader_tool_registry())
+        augmented.update(self._leader_function_tools())
+        return augmented
+
     def runtime_capability_snapshot(self):
         """The LIVE effective-capability snapshot for this run: the current
         autonomy mode, the gate's live session AND once grants, the broker's
@@ -8893,11 +8900,16 @@ class Orchestrator:
         broker_view = self._permission_grants().grants_view()
         corrupt: list = []
         folders = tuple(_config.list_folders(on_corrupt=corrupt.append))
-        # The ACTIVE registry at the render context — honoring a thread-
-        # local override — never a base registry the current context has
-        # replaced; the Leader's own function tools ride alongside.
-        loadout = tuple(sorted(self._leader_function_tools()) + sorted(
-            set(self._active_tool_registry())))
+        # The loadout the card reports: a thread-local override active ON
+        # THIS THREAD wins (the render context replaced its registry);
+        # otherwise the Leader CONVERSE registry — the same one-place
+        # assembly converse() installs — never the generic producer
+        # registry (thread-local state on a worker thread is not
+        # observable here and is never claimed).
+        override = getattr(self._tls, "tool_registry_override", None)
+        loadout = tuple(sorted(
+            override if override is not None
+            else self._leader_converse_registry()))
         servers = tuple(
             {"name": sid, "trust": s.trust, "transport": s.transport}
             for sid, s in _mcp.enabled_servers().items())

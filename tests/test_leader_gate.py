@@ -902,6 +902,99 @@ def test_capability_only_restore_failure_fails_closed(
     assert coord("http_get", {"url": "https://x.example/a"}) is False
 
 
+def test_failed_rollback_cannot_grant_the_next_call(
+        env, tmp_path, monkeypatch):
+    """Recording failure PLUS restore failure: the first call is denied AND
+    the authority is contained — no session/always key survives in memory,
+    and the next identical call is denied by the rollback-health latch
+    instead of silently riding a phantom grant."""
+    from modulatio import permissions as perm
+
+    prompts = []
+
+    def prompt_fn(req):
+        prompts.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_ALWAYS)
+
+    coord, gate, broker, ws = _coordinator_env(tmp_path, prompt_fn)
+    monkeypatch.setattr(
+        perm.GrantStore, "_write_always",
+        lambda self: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(
+        broker.grants, "restore",
+        lambda snap: (_ for _ in ()).throw(OSError("still broken")))
+
+    assert coord("http_get", {"url": "https://leak.example/a"}) is False
+    view = broker.grants.grants_view()
+    assert view == {"session": [], "always": []}   # no phantom authority
+    # The second identical call: latched unhealthy → denied WITHOUT a new
+    # prompt and WITHOUT riding any remembered grant.
+    assert coord("http_get", {"url": "https://leak.example/a"}) is False
+    assert len(prompts) == 1
+
+
+def test_rollback_latch_clears_after_successful_reconcile(
+        env, tmp_path, monkeypatch):
+    """The latch survives calls while the store cannot reconcile and clears
+    ONLY after the pre-transaction snapshot restores successfully — then
+    authorization resumes normally."""
+    from modulatio import permissions as perm
+
+    prompts = []
+
+    def prompt_fn(req):
+        prompts.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_ALWAYS)
+
+    coord, gate, broker, ws = _coordinator_env(tmp_path, prompt_fn)
+    monkeypatch.setattr(
+        perm.GrantStore, "_write_always",
+        lambda self: (_ for _ in ()).throw(OSError("disk full")))
+    real_restore = broker.grants.restore
+    broken = {"on": True}
+
+    def _flaky_restore(snap):
+        if broken["on"]:
+            raise OSError("still broken")
+        return real_restore(snap)
+
+    monkeypatch.setattr(broker.grants, "restore", _flaky_restore)
+    assert coord("http_get", {"url": "https://leak.example/a"}) is False
+    assert coord("http_get", {"url": "https://leak.example/a"}) is False
+    monkeypatch.setattr(
+        perm.GrantStore, "_write_always", lambda self: None, raising=True)
+    broken["on"] = False                     # the store heals
+    assert coord("http_get", {"url": "https://leak.example/a"}) is True
+    assert len(prompts) == 2                 # latched call never prompted
+
+
+def test_bundle_gate_restore_failure_still_restores_broker(
+        env, tmp_path, monkeypatch):
+    """The two restores are independent: a gate-restore failure cannot
+    skip broker restoration (and vice versa the latch covers the rest)."""
+    from modulatio import permissions as perm
+
+    def prompt_fn(req):
+        return lg.ScopedDecision(scope=lp.SCOPE_ALWAYS)
+
+    coord, gate, broker, ws = _coordinator_env(tmp_path, prompt_fn)
+    args, o1, o2 = _two_outside_files_call(tmp_path)
+    broker_restores = []
+    real_restore = broker.grants.restore
+    monkeypatch.setattr(
+        broker.grants, "restore",
+        lambda snap: broker_restores.append(True) or real_restore(snap))
+    monkeypatch.setattr(
+        perm.GrantStore, "_write_always",
+        lambda self: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(
+        gate, "restore_grants",
+        lambda snap: (_ for _ in ()).throw(OSError("gate store broken")))
+    assert coord("run_shell", args) is False
+    assert broker_restores == [True]         # broker restore still ran
+    assert broker.grants.grants_view() == {"session": [], "always": []}
+
+
 def test_bundle_restore_failure_fails_closed(env, tmp_path, monkeypatch):
     """Same no-leak rule on the bundle path: recording fails, the restore
     fails too — False, never an escaped exception."""

@@ -484,3 +484,10 @@ def get_actor(project_code: str, *, stub: bool = False) -> OrchestratorActor:
         if actor is None:
             actor = _actors[project_code] = OrchestratorActor(project_code, stub=stub)
         return actor
+
+# ApprovalBroker IS this surface's approval bridge — surface identity stamped from
+# the declared inventory so the completeness guard enumerates surfaces
+# from the real bridge objects.
+from modulatio import access_surface as _axs  # noqa: E402 — leaf module
+
+ApprovalBroker.approval_surface = _axs.SURFACE_WEB

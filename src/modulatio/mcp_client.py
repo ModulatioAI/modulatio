@@ -428,15 +428,26 @@ def build_mcp_tools() -> dict[str, tools.Tool]:
                     "input schema", sid, _safe_field(spec.name, server))
                 continue
             desc = (getattr(spec, "description", "") or f"{sid}:{spec.name}")
-            out[name] = tools.Tool(
-                name=name,
-                description=desc[:_MAX_DESC_CHARS],
-                call=_make_call(sid, spec.name),
-                params_schema=schema,
-                cost_class=cost,
-                origin=f"mcp-{server.trust}",
+            out[name] = build_server_tool(
+                name=name, description=desc, schema=schema, cost=cost,
+                server=server, call=_make_call(sid, spec.name),
             )
     return out
+
+
+def build_server_tool(*, name, description, schema, cost, server, call):
+    """Construct one served MCP tool — THE builder that stamps the
+    ``mcp-<trust>`` origin from the server record, factored out so the
+    origin-completeness guard can enumerate origins from this real
+    constructor rather than from expected strings."""
+    return tools.Tool(
+        name=name,
+        description=description[:_MAX_DESC_CHARS],
+        call=call,
+        params_schema=schema,
+        cost_class=cost,
+        origin=f"mcp-{server.trust}",
+    )
 
 
 def _schema_ok(schema) -> bool:

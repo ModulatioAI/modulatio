@@ -440,3 +440,10 @@ def run_acp_server(*, project_code: str, stub: bool = False,
 
 
 __all__ = ["ACPServer", "run_acp_server", "PROTOCOL_VERSION"]
+
+# ACPServer IS this surface's approval bridge — surface identity stamped from
+# the declared inventory so the completeness guard enumerates surfaces
+# from the real bridge objects.
+from modulatio import access_surface as _axs  # noqa: E402 — leaf module
+
+ACPServer.approval_surface = _axs.SURFACE_ACP

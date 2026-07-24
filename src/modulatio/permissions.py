@@ -239,13 +239,32 @@ def _registrable_domain(host: str) -> str:
     return ""
 
 
+#: Tool → fixed capability kind: THE dispatch table ``capability_for``
+#: routes through. The declared kind inventory derives from its VALUES, so
+#: a kind no dispatch rule emits cannot stay declared, and a new rule's
+#: kind fails completeness until the inventory maps it. Tools absent here
+#: get the dynamic ``tool:<name>`` capability.
+CAPABILITY_KIND_BY_TOOL = {
+    "http_get": "network",
+    "web_search": "network",
+    "run_shell": "shell",
+    "write_artifact": "file-write",
+}
+
+#: The fixed kinds production actually emits — derived, never hand-listed.
+PRODUCTION_CAPABILITY_KINDS = tuple(
+    sorted(set(CAPABILITY_KIND_BY_TOOL.values())))
+
+
 def capability_for(tool_name: str, args: "dict | None" = None) -> Capability:
     """Map a tool call to its typed, scope-aware Capability (§6.B).
 
     ``Capability.label``/``detail`` are the HUMAN utterance a surface speaks in the
     Leader's voice ("access the internet"), never the policy key — the key is the
     typed ``scoped_key``. ``args`` is defensively
-    coerced to a dict so a direct/public call can't crash."""
+    coerced to a dict so a direct/public call can't crash. Fixed kinds come
+    from ``CAPABILITY_KIND_BY_TOOL`` — the branch bodies build the scoped
+    keys; the KIND is always the table's."""
     args = args if isinstance(args, dict) else {}
     name = (tool_name or "").strip()
     if name in ("http_get", "web_search"):
@@ -257,7 +276,7 @@ def capability_for(tool_name: str, args: "dict | None" = None) -> Capability:
             scoped["session"] = f"network:host={host}"
         if domain:
             scoped["always"] = f"network:domain={domain}"
-        return Capability("network", "access the internet", (url or str(args.get("query", "")))[:120],
+        return Capability(CAPABILITY_KIND_BY_TOOL[name], "access the internet", (url or str(args.get("query", "")))[:120],
                           requires_sandbox=False, _scoped=scoped)
     if name == "run_shell":
         cmd = str(args.get("cmd", "")).strip()
@@ -268,11 +287,11 @@ def capability_for(tool_name: str, args: "dict | None" = None) -> Capability:
             "session": f"shell:profile={profile}",
             "always": f"shell:profile={profile}",
         }
-        return Capability("shell", "run a command on your computer", cmd[:120],
+        return Capability(CAPABILITY_KIND_BY_TOOL[name], "run a command on your computer", cmd[:120],
                           requires_sandbox=True, _scoped=scoped)
     if name == "write_artifact":
         # writes inside the work folder are low-risk; keyed by the tool itself.
-        return Capability("file-write", "write a file in the work folder",
+        return Capability(CAPABILITY_KIND_BY_TOOL[name], "write a file in the work folder",
                           str(args.get("path", ""))[:120], requires_sandbox=False,
                           _scoped={"once": "file-write:artifacts", "session": "file-write:artifacts",
                                    "always": "file-write:artifacts"})
@@ -317,7 +336,43 @@ def build_authorization_coordinator(*, gate, root, prompt_fn, broker):
     """
     from modulatio import leader_gate as lg
 
+    #: Rollback-health latch: restores that FAILED, as (kind, snapshot)
+    #: still owed. While any is outstanding the authority stores are
+    #: unverified — every call is denied until the exact pre-transaction
+    #: snapshots restore successfully (the authoritative reconcile).
+    pending_reconcile: list = []
+
+    def _reconcile() -> bool:
+        while pending_reconcile:
+            kind, snap = pending_reconcile[-1]
+            try:
+                if kind == "gate":
+                    gate.restore_grants(snap)
+                else:
+                    broker.grants.restore(snap)
+            except Exception:  # noqa: BLE001 — still unverified, stay latched
+                return False
+            pending_reconcile.pop()
+        return True
+
+    def _restore_both(gate_snap, broker_snap) -> None:
+        """Attempt each restore INDEPENDENTLY — one failure never skips the
+        other — and latch whatever could not be restored."""
+        try:
+            gate.restore_grants(gate_snap)
+        except Exception:  # noqa: BLE001 — latch, deny onward
+            pending_reconcile.append(("gate", gate_snap))
+        if broker_snap is not None:
+            try:
+                broker.grants.restore(broker_snap)
+            except Exception:  # noqa: BLE001 — latch, deny onward
+                pending_reconcile.append(("broker", broker_snap))
+
     def authorize(name: str, args: dict) -> bool:
+        # An unreconciled rollback means the grant stores are unverified:
+        # deny everything until the pre-transaction snapshots restore.
+        if pending_reconcile and not _reconcile():
+            return False
         # A new tool call starts a fresh once-slate (same contract as
         # build_permission_callback).
         gate.begin_tool_call()
@@ -388,14 +443,7 @@ def build_authorization_coordinator(*, gate, root, prompt_fn, broker):
                             cap, Decision.coerce(scope), strict=True):
                         raise RuntimeError("capability recording refused")
             except Exception:  # noqa: BLE001 — restore, fail closed
-                try:
-                    gate.restore_grants(gate_snap)
-                    if broker_snap is not None:
-                        broker.grants.restore(broker_snap)
-                except Exception:  # noqa: BLE001 — restore itself failed:
-                    # the deny stands either way; an authorization must
-                    # never leak an unclassified exception.
-                    pass
+                _restore_both(gate_snap, broker_snap)
                 return False
             return True
 
@@ -419,9 +467,9 @@ def build_authorization_coordinator(*, gate, root, prompt_fn, broker):
             except Exception:  # noqa: BLE001 — restore, fail closed
                 try:
                     broker.grants.restore(broker_snap)
-                except Exception:  # noqa: BLE001 — restore itself failed;
-                    # the deny stands.
-                    pass
+                except Exception:  # noqa: BLE001 — unverified store: latch,
+                    # deny this and every later call until it reconciles.
+                    pending_reconcile.append(("broker", broker_snap))
                 return False
         return True
 
@@ -545,9 +593,20 @@ class GrantStore:
             with self._lock:
                 self._session.add(cap.scoped_key(decision))
         elif decision is Decision.ALLOW_ALWAYS:
+            key = cap.scoped_key(decision)
             with self._lock:
-                self._always.add(cap.scoped_key(decision))
-            self._save(strict=strict)
+                already = key in self._always
+                self._always.add(key)
+            try:
+                self._save(strict=strict)
+            except OSError:
+                # Transactional publish: a failed durable write must not
+                # leave the LIVE set advertising authority the disk never
+                # accepted — the next call would silently ride it.
+                if not already:
+                    with self._lock:
+                        self._always.discard(key)
+                raise
 
     def grants_view(self) -> dict:
         """Plain view of what's granted (for the JT 'show its grants' display)."""

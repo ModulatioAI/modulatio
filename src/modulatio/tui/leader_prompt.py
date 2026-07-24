@@ -59,3 +59,10 @@ def make_modal_prompt_fn(app):
 
 
 __all__ = ["make_modal_prompt_fn"]
+
+# This callable IS the TUI approval bridge — it stamps its surface
+# identity from the declared inventory so the completeness guard
+# enumerates surfaces from the real bridge objects.
+from modulatio import access_surface as _axs  # noqa: E402 — leaf module
+
+make_modal_prompt_fn.approval_surface = _axs.SURFACE_TUI

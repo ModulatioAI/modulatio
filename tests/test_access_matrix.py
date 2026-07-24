@@ -379,7 +379,6 @@ _REQUEST_CLASS_COVERAGE = {
     "network": "executed: network cell (public) + network-local fence test",
     "shell": "executed: exec cells raise the sandbox-requiring shell cap",
     "file-write": "executed: write_artifact rides the path axis",
-    "secret": "executed: secret-dotfile fence test (below-root floor)",
     "mcp": "executed: mcp-gated / mcp-trusted cells",
     "capability": "executed: network cell is a pure capability ask",
     "substrate": "executed: substrate axis + linux black-box tier",

@@ -1981,6 +1981,14 @@ def run_llm_with_tools(
     )
 
 
+# The engine's own function-calling loop IS the tool-loop execution
+# backend — stamped from the declared inventory so the completeness guard
+# enumerates backends from the real production builders.
+from modulatio import access_surface as _axs_backend  # noqa: E402 — leaf module
+
+run_llm_with_tools.execution_backend = _axs_backend.BACKEND_TOOL_LOOP  # type: ignore[attr-defined]
+
+
 # GPT-5.5 (Codex) defaults to very high reasoning effort on the ChatGPT backend,
 # which produces massive reasoning-token bloat — slow, over-long runs (e.g. a
 # producer over-researching a task). Default Codex seats to MEDIUM; a preset can
@@ -2116,6 +2124,12 @@ def _build_claude_cli_chat_runner(
     # Callers enforcing a durable tool budget read this marker and refuse or
     # fall back rather than run an unbudgeted internal loop.
     run.runs_native_tool_loop = True  # type: ignore[attr-defined]
+    # One Clay runner serves BOTH seat postures — the per-call confined
+    # contextvar decides which — so it registers both backends; the
+    # completeness guard enumerates these from the real built runner.
+    from modulatio import access_surface as _axs
+    run.execution_backends = (  # type: ignore[attr-defined]
+        _axs.BACKEND_CLAY_CONFINED, _axs.BACKEND_CLAY_INTERACTIVE)
     return run
 
 

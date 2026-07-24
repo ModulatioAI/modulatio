@@ -16,10 +16,12 @@ signature at import).
 """
 from __future__ import annotations
 
-#: Capability kinds the broker asks about — each is also a request class.
-#: Dynamic per-tool capabilities use the ``tool:<name>`` prefix family and
-#: ride the ``capability`` request class.
-CAPABILITY_KINDS = ("network", "file-write", "shell", "secret")
+#: Capability kinds the broker asks about — each is also a request class,
+#: and each MUST have a real dispatch rule in
+#: ``permissions.CAPABILITY_KIND_BY_TOOL`` (the guard compares the two by
+#: exact set). Dynamic per-tool capabilities use the ``tool:<name>`` prefix
+#: family and ride the ``capability`` request class.
+CAPABILITY_KINDS = ("network", "file-write", "shell")
 
 #: Resource/request classes the authorization chokepoint classifies. The
 #: filesystem axis (path/exec), the capability kinds, MCP-origin calls,
@@ -28,13 +30,21 @@ REQUEST_CLASSES = (
     "path", "exec", *CAPABILITY_KINDS, "mcp", "capability", "substrate",
 )
 
+#: Surface identity constants — each approval bridge stamps ITSELF with
+#: one of these at its definition site (``approval_surface`` attribute),
+#: so the guard enumerates registrations from the real bridge objects.
+SURFACE_TUI = "tui"
+SURFACE_WEB = "web"
+SURFACE_ACP = "acp"
+
 #: Operator surfaces mapped to their REAL approval bridge (module, attr).
-#: The guard resolves every entry — a surface whose bridge does not import
-#: or lacks the attr fails; the bridge-conformance suite witnesses each.
+#: The guard resolves every entry AND reads each bridge's self-stamped
+#: ``approval_surface`` marker — the produced set is the markers on the
+#: real objects, never this map echoed back at itself.
 SURFACE_BRIDGES = {
-    "tui": ("modulatio.tui.leader_prompt", "make_modal_prompt_fn"),
-    "web": ("modulatio.web.actors", "ApprovalBroker"),
-    "acp": ("modulatio.acp.server", "ACPServer"),
+    SURFACE_TUI: ("modulatio.tui.leader_prompt", "make_modal_prompt_fn"),
+    SURFACE_WEB: ("modulatio.web.actors", "ApprovalBroker"),
+    SURFACE_ACP: ("modulatio.acp.server", "ACPServer"),
 }
 OPERATOR_SURFACES = tuple(SURFACE_BRIDGES)
 
