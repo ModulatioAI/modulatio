@@ -885,20 +885,31 @@ class AuthorizationTransactionState:
         held by one instance is exactly what survives another instance's
         revoke, so the epoch is what expires it.
 
+        The whole operation is ONE linearization point: recovery, the
+        epoch read, cache invalidation, and debt reconciliation all run
+        under a single project transaction. Split across separate
+        acquisitions, a revoke could complete after the epoch was read and
+        before the caches were invalidated, leaving this state serving
+        authority the revoke had already removed.
+
         False means the caller must deny."""
-        if not self.recover_durable(gate=gate, broker=broker):
-            return False
+        transaction = (contextlib.nullcontext() if self.journal is None
+                       else self.journal.transaction())
         try:
-            current = 0 if self.journal is None else self.journal.read_epoch()
+            with transaction:
+                if not self._recover_durable_locked(gate=gate, broker=broker):
+                    return False
+                current = (0 if self.journal is None
+                           else self.journal.read_epoch())
+                if current != self._observed_epoch:
+                    gate.forget_live_grants()
+                    if broker is not None:
+                        broker.grants.forget_live_grants()
+                    self._observed_epoch = current
+                return self._reconcile_locked(gate=gate, broker=broker)
         except AuthorizationRecoveryError as exc:
             self._recovery_error = str(exc)
             return False
-        if current != self._observed_epoch:
-            gate.forget_live_grants()
-            if broker is not None:
-                broker.grants.forget_live_grants()
-            self._observed_epoch = current
-        return self.reconcile(gate=gate, broker=broker)
 
     def recover_durable(self, *, gate, broker) -> bool:
         """Replay any journaled transaction — the restart/second-instance
@@ -913,45 +924,55 @@ class AuthorizationTransactionState:
             # approval event reaches the operator — instead of prompting
             # and then discovering it cannot commit.
             with self.journal.transaction():
-                owed = self.journal.pending()
-                if owed is None:
-                    self._recovery_error = None
-                    return True
-                # An owed capability side cannot be resolved without its
-                # store: refuse BEFORE either store mutates and before the
-                # record is cleared, so a retry with the live store can
-                # still finish the restore or the revoke.
-                if owed["broker"] is not None and broker is None:
-                    self._recovery_error = (
-                        f"the pending recovery record {self.journal.path} "
-                        f"covers the capability store, but none was "
-                        f"supplied — neither authority was changed; retry "
-                        f"with the project's live stores")
-                    return False
-                if owed["kind"] == self.journal.KIND_REVOKE:
-                    # An interrupted revoke recovers FORWARD: finish
-                    # clearing both stores. Replaying the recorded
-                    # snapshots would hand back exactly what the operator
-                    # revoked — and so would any debt this state still
-                    # holds, since every one of them predates the revoke.
-                    if broker is not None:
-                        broker.grants.revoke_all()
-                    gate.revoke_all()
-                    self.journal.advance_epoch()
-                    with self._lock:
-                        self._debts.clear()
-                else:
-                    gate.restore_grants(owed["gate"])
-                    if broker is not None and owed["broker"] is not None:
-                        broker.grants.restore(owed["broker"])
-                self.journal.clear()
+                return self._recover_durable_locked(gate=gate, broker=broker)
+        except AuthorizationRecoveryError as exc:
+            self._recovery_error = str(exc)
+            return False
+
+    def _recover_durable_locked(self, *, gate, broker) -> bool:
+        """The recovery body, with the project transaction already held."""
+        if self.journal is None:
+            return True
+        try:
+            owed = self.journal.pending()
+            if owed is None:
+                self._recovery_error = None
+                return True
+            # An owed capability side cannot be resolved without its
+            # store: refuse BEFORE either store mutates and before the
+            # record is cleared, so a retry with the live store can
+            # still finish the restore or the revoke.
+            if owed["broker"] is not None and broker is None:
+                self._recovery_error = (
+                    f"the pending recovery record {self.journal.path} "
+                    f"covers the capability store, but none was "
+                    f"supplied — neither authority was changed; retry "
+                    f"with the project's live stores")
+                return False
+            if owed["kind"] == self.journal.KIND_REVOKE:
+                # An interrupted revoke recovers FORWARD: finish
+                # clearing both stores. Replaying the recorded
+                # snapshots would hand back exactly what the operator
+                # revoked — and so would any debt this state still
+                # holds, since every one of them predates the revoke.
+                if broker is not None:
+                    broker.grants.revoke_all()
+                gate.revoke_all()
+                self.journal.advance_epoch()
+                with self._lock:
+                    self._debts.clear()
+            else:
+                gate.restore_grants(owed["gate"])
+                if broker is not None and owed["broker"] is not None:
+                    broker.grants.restore(owed["broker"])
+            self.journal.clear()
         except AuthorizationRecoveryError as exc:
             self._recovery_error = str(exc)
             return False
         except Exception as exc:  # noqa: BLE001 — stores still unverified
             self._recovery_error = (
-                f"authorization recovery could not restore the journaled "
-                f"snapshots ({type(exc).__name__}: {exc})")
+            f"authorization recovery could not restore the journaled "
+            f"snapshots ({type(exc).__name__}: {exc})")
             return False
         self._recovery_error = None
         return True

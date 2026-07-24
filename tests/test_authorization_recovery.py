@@ -1174,6 +1174,67 @@ def test_production_coordinator_denies_stale_authority_after_a_revoke(
         "a denied answer records nothing")
 
 
+def test_readiness_is_one_linearization_point_against_revoke(tmp_path):
+    """Readiness must be ONE transaction. A revoke starting after another
+    state has read its epoch view cannot slip between that read and the
+    cache invalidation: it either completes first (so the epoch is
+    observed and the caches expire) or waits until the authorization is
+    ordered ahead of it. Either way the caller never serves stale live
+    authority."""
+    import threading
+
+    answers: list = []
+
+    def deny_fn(req):
+        answers.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_DENY)
+
+    coord_a, gate_a, broker_a, state_a, ws = _authority(tmp_path, deny_fn)
+    folder = _seed_both_axes(tmp_path, broker_a)
+    (folder / "f.txt").write_text("f")
+    gate_a._session.setdefault("path", []).append(
+        {"resource": str(folder), "actions": ["read", "edit", "write"]})
+    gate_a._once.setdefault("path", []).append(str(folder))
+    broker_a.grants.record(
+        perm.capability_for("http_get", {"url": "https://weather.gov/x"}),
+        perm.Decision.ALLOW_SESSION)
+
+    coord_b, gate_b, broker_b, state_b, _ws = _authority(tmp_path, _always)
+    inside = threading.Event()
+    revoke_done = threading.Event()
+    real_read = state_a.journal.read_epoch
+
+    def _pause_after_epoch_view():
+        value = real_read()
+        inside.set()                  # A holds the transaction here
+        time.sleep(0.4)               # B's revoke must not slip in
+        return value
+
+    state_a.journal.read_epoch = _pause_after_epoch_view  # type: ignore
+
+    def _revoke():
+        inside.wait(timeout=5)
+        state_b.revoke_authority(gate=gate_b, broker=broker_b)
+        revoke_done.set()
+
+    worker = threading.Thread(target=_revoke)
+    worker.start()
+    allowed = coord_a("read_file", {"path": str(folder / "f.txt")})
+    ordered_before_revoke = not revoke_done.is_set()
+    worker.join(timeout=15)
+    state_a.journal.read_epoch = real_read  # type: ignore
+
+    if not ordered_before_revoke:
+        # The revoke won the lock: A must have observed it.
+        assert allowed is False
+    # Either way, A's next real coordinator call denies BOTH axes without
+    # rebuilding A, and its live caches are empty.
+    assert coord_a("read_file", {"path": str(folder / "f.txt")}) is False
+    assert coord_a("http_get", {"url": "https://weather.gov/x"}) is False
+    assert gate_a._session == {} and gate_a._once == {}
+    assert broker_a.grants.grants_view() == {"session": [], "always": []}
+
+
 def test_reconcile_and_revoke_serialize_on_the_project_lock(tmp_path):
     """A revoke landing while another state reconciles must not interleave:
     whichever order the lock grants, the durable stores end empty, the debt
