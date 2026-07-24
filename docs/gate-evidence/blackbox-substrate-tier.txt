@@ -1,9 +1,9 @@
 # Designated Linux gate — black-box substrate tier
 
 ## Provenance (captured BEFORE the run, from the clean commit under test)
-git rev-parse HEAD : 187d95ac033212cf6c8e0340e641364ee8be823c
+git rev-parse HEAD : d511a9eab8eda9975f08f42d903d6e31062451a5
 git status --porcelain: <empty — clean worktree>
-run-started-utc     : 2026-07-24T21:52:05Z
+run-started-utc     : 2026-07-24T22:10:57Z
 
 ## Host
 uname -srm: Linux 7.0.0-28-generic x86_64
@@ -27,4 +27,4 @@ tests/test_access_sandbox_blackbox.py::test_black_box_states_cover_every_substra
 ============================== 6 passed in 0.50s ===============================
 ```
 
-run-finished-utc: 2026-07-24T21:52:06Z
+run-finished-utc: 2026-07-24T22:10:58Z
