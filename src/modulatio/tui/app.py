@@ -1266,17 +1266,11 @@ class ModulatioApp(App):
                 "No live conversation yet — there are no Leader grants to "
                 "revoke.")
             return
-        # SERIALIZED with the authorization transaction: an approval that
-        # is mid-flight cannot commit or roll back over this revocation.
-        state = orch._authorization_transaction_state()
-        if not state.revoke_authority(gate=orch.leader_gate()):
-            self._set_response(
-                f"Revoke did NOT complete — the Leader's grants may still "
-                f"stand. {state.recovery_error() or ''}".strip())
-            return
-        self._set_response(
-            "All Leader permissions revoked — back to the workspace floor."
-        )
+        # ONE engine seam owns the serialized revocation (superseding any
+        # older recovery record); the surface only renders its answer, so
+        # it can never claim a revoke the engine did not make.
+        _ok, message = orch.revoke_leader_permissions()
+        self._set_response(message)
 
     def _leader_work_here(self, raw_path: str) -> None:
         """`/work <path>` — proactively prompt the operator to widen the Leader

@@ -7042,6 +7042,23 @@ class Orchestrator:
             self._auth_txn_state_cache = cached
         return cached
 
+    def revoke_leader_permissions(self) -> "tuple[bool, str]":
+        """THE engine seam for the operator's ``/rp``: revoke every Leader
+        grant, superseding any older recovery record, and report
+        truthfully. Returns ``(ok, message)`` — surfaces render the
+        message and never assert a revocation the engine did not make.
+        Transaction and recovery assembly stay inside the engine."""
+        state = self._authorization_transaction_state()
+        ok = state.revoke_authority(
+            gate=self.leader_gate(), broker=self._build_permission_broker(
+                self._session_mode, None))
+        if ok:
+            return True, (
+                "All Leader permissions revoked — back to the workspace "
+                "floor.")
+        return False, (
+            f"Revoke did NOT complete. {state.recovery_error() or ''}".strip())
+
     def _build_turn_permission_callback(self, *, prompt_fn, broker):
         """THE per-turn authorization coordinator seam: one coordinator per
         converse turn over the CACHED gate/grant store, sharing this

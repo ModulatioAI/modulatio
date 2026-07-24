@@ -374,19 +374,15 @@ def ask_via_prompt_fn(prompt_fn):
     return ask
 
 
-def _fsync_dir(path: "Path") -> None:
-    """Make a directory ENTRY durable (rename/unlink), best-effort — the
-    same posture as the vault's atomic writer: POSIX local disks get the
-    guarantee, exotic mounts degrade instead of failing the write."""
+def _fsync_dir_strict(path: "Path") -> None:
+    """Make a directory ENTRY durable (rename/unlink) and RAISE if it
+    cannot be. The authorization WAL is not a place for best-effort: a
+    lost recovery record alongside a retained grant is exactly the
+    failure the journal exists to prevent, so publication denies and
+    removal fails the commit rather than degrading silently."""
+    dir_fd = os.open(str(path), os.O_RDONLY)
     try:
-        dir_fd = os.open(str(path), os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        try:
-            os.fsync(dir_fd)
-        except OSError:
-            pass          # read-only mount / unsupported FS
+        os.fsync(dir_fd)
     finally:
         os.close(dir_fd)
 
@@ -473,12 +469,16 @@ class AuthorizationRecoveryJournal:
         # A UNIQUE, exclusively-created temp: a predictable name reopened
         # with O_TRUNC lets a pre-planted file or symlink capture the
         # write. O_EXCL refuses to follow or reuse anything already there.
-        tmp = Path(tempfile.mkstemp(
+        fd, tmp_name = tempfile.mkstemp(
             dir=str(self.path.parent), prefix=self.path.name + ".",
-            suffix=".tmp")[1])
+            suffix=".tmp")
+        tmp = Path(tmp_name)
         try:
-            os.chmod(tmp, 0o600)
-            with open(tmp, "wb") as fh:
+            # Own the descriptor mkstemp handed us — reopening the name
+            # would leak this one and re-race the path.
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                fd = -1                      # fdopen owns it now
                 fh.write(payload)
                 fh.flush()
                 os.fsync(fh.fileno())
@@ -486,8 +486,13 @@ class AuthorizationRecoveryJournal:
             # The directory entry must be durable BEFORE the first
             # authority mutation — otherwise a power loss can lose the WAL
             # while keeping the grant it was meant to roll back.
-            _fsync_dir(self.path.parent)
+            _fsync_dir_strict(self.path.parent)
         except BaseException:
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             try:
                 tmp.unlink()
             except FileNotFoundError:
@@ -536,7 +541,7 @@ class AuthorizationRecoveryJournal:
             self.path.unlink()
         except FileNotFoundError:
             return
-        _fsync_dir(self.path.parent)
+        _fsync_dir_strict(self.path.parent)
 
     @contextlib.contextmanager
     def transaction(self, *, timeout: "float | None" = None):
@@ -606,20 +611,33 @@ class AuthorizationTransactionState:
             sort_keys=True).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
 
-    def revoke_authority(self, *, gate) -> bool:
-        """The ``/rp`` escape hatch, SERIALIZED: revoke every grant inside
-        the project transaction so no in-flight approval can interleave —
-        and report truthfully. False means the revocation did NOT take;
-        ``recovery_error()`` says why."""
+    def revoke_authority(self, *, gate, broker=None) -> bool:
+        """The ``/rp`` escape hatch, SERIALIZED and SUPERSEDING.
+
+        Revocation is the operator's NEWEST decision, so it must outrank
+        every older recovery record — a pending journal or an owed
+        in-memory restore would otherwise replay afterwards and hand back
+        exactly what was revoked. Under one project lock, in order:
+
+        1. restore the BROKER side of any pending journal (a crashed
+           bundle may owe capability recovery; clearing the record
+           without this would strand a leaked capability grant);
+        2. resolve owed in-memory BROKER debts the same way;
+        3. revoke the gate;
+        4. durably clear the journal;
+        5. discard gate-restoring debts — they are superseded, not owed.
+
+        Returns True only after that whole sequence is durable. False
+        names, via ``recovery_error()``, which authority may still stand.
+        """
         try:
             if self.journal is None:
-                gate.revoke_all()
+                self._revoke_locked(gate=gate, broker=broker)
             else:
                 with self.journal.transaction():
-                    gate.revoke_all()
+                    self._revoke_locked(gate=gate, broker=broker)
         except AuthorizationRecoveryError as exc:
-            self._recovery_error = (
-                f"revoke refused: {exc}")
+            self._recovery_error = f"revoke refused: {exc}"
             return False
         except Exception as exc:  # noqa: BLE001 — never claim a revoke that
             # did not happen
@@ -630,6 +648,55 @@ class AuthorizationTransactionState:
             return False
         self._recovery_error = None
         return True
+
+    def _revoke_locked(self, *, gate, broker) -> None:
+        """The revocation sequence, run with the project lock held. Each
+        stage names precisely what may still stand if it fails."""
+        try:
+            owed = None if self.journal is None else self.journal.pending()
+        except AuthorizationRecoveryError:
+            raise
+        except Exception as exc:
+            raise AuthorizationRecoveryError(
+                f"could not read the recovery record before revoking "
+                f"({type(exc).__name__}: {exc}) — NOTHING was revoked; the "
+                f"Leader's grants all still stand") from exc
+        # 1 + 2: the broker side is RESTORED (capability authority the
+        # crashed transaction leaked must not survive the revoke), while
+        # the gate side is superseded by the revocation below.
+        if broker is not None:
+            try:
+                if owed is not None:
+                    broker.grants.restore(owed["broker"])
+                with self._lock:
+                    for kind, snap in list(self._debts):
+                        if kind == "broker":
+                            broker.grants.restore(snap)
+            except Exception as exc:  # noqa: BLE001
+                raise AuthorizationRecoveryError(
+                    f"could not restore the capability store before "
+                    f"revoking ({type(exc).__name__}: {exc}) — NOTHING was "
+                    f"revoked; both the Leader's folder grants and any "
+                    f"leaked capability grants still stand") from exc
+        try:
+            gate.revoke_all()                               # 3
+        except Exception as exc:  # noqa: BLE001
+            raise AuthorizationRecoveryError(
+                f"the revoke itself failed ({type(exc).__name__}: {exc}) — "
+                f"the Leader's folder grants still stand") from exc
+        if self.journal is not None:                        # 4
+            try:
+                self.journal.clear()
+            except Exception as exc:  # noqa: BLE001
+                raise AuthorizationRecoveryError(
+                    f"the folder grants WERE revoked, but the recovery "
+                    f"record {self.journal.path} could not be cleared "
+                    f"({type(exc).__name__}: {exc}) — it may replay and "
+                    f"restore the revoked grants; remove it once you have "
+                    f"verified the project's permission files") from exc
+        with self._lock:                                    # 5
+            self._debts = [
+                d for d in self._debts if d[0] not in ("gate", "broker")]
 
     def owe(self, kind: str, snapshot) -> None:
         """Record a restore that FAILED — its exact pre-transaction

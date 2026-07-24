@@ -433,7 +433,214 @@ def test_revoke_authority_reports_failure_truthfully(tmp_path, monkeypatch):
     assert state.recovery_error() and "revoke" in state.recovery_error().lower()
 
 
+# ── revocation supersedes every older recovery record ───────────────────────
+
+
+def _seed_pending_wal_and_mutation(tmp_path):
+    """A crashed transaction's leftovers: a WAL holding the pre-transaction
+    snapshot, plus durable authority mutated after it."""
+    prior = tmp_path / "prior"
+    prior.mkdir(exist_ok=True)
+    (prior / "p.txt").write_text("p")
+    lp.add_grant(CODE, request_class=lp.REQUEST_CLASS_PATH,
+                 resource=str(prior), actions=["read"])
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    store = perm.GrantStore(tmp_path / "grants.json")
+    journal = perm.AuthorizationRecoveryJournal(tmp_path / "auth_recovery.json")
+    journal.begin(gate_snapshot=gate.snapshot_grants(),
+                  broker_snapshot=store.snapshot())
+    later = tmp_path / "later"
+    later.mkdir(exist_ok=True)
+    lp.add_grant(CODE, request_class=lp.REQUEST_CLASS_PATH,
+                 resource=str(later), actions=["read"])
+    return prior
+
+
+def test_revocation_supersedes_a_pending_wal(tmp_path):
+    """`/rp` is the NEWEST decision: a journal written before it must never
+    replay its older gate snapshot afterwards."""
+    prior = _seed_pending_wal_and_mutation(tmp_path)
+    asked: list = []
+
+    def deny_fn(req):
+        asked.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_DENY)
+
+    coord, gate, broker, state, ws = _authority(tmp_path, deny_fn)
+    assert state.revoke_authority(gate=gate, broker=broker) is True
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == []
+
+    # The next authorization must NOT resurrect the pre-/rp grant.
+    assert coord("read_file", {"path": str(prior / "p.txt")}) is False
+    assert len(asked) == 1, "the revoked root must be asked for again"
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == []
+    assert not (tmp_path / "auth_recovery.json").exists(), (
+        "the superseded journal must be resolved, not left to replay")
+
+
+def test_revocation_supersedes_an_in_memory_gate_debt(tmp_path):
+    """The same rule for an owed in-process restore: `reconcile()` must not
+    hand back what `/rp` just revoked."""
+    prior = tmp_path / "prior"
+    prior.mkdir()
+    (prior / "p.txt").write_text("p")
+    lp.add_grant(CODE, request_class=lp.REQUEST_CLASS_PATH,
+                 resource=str(prior), actions=["read"])
+    asked: list = []
+
+    def deny_fn(req):
+        asked.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_DENY)
+
+    coord, gate, broker, state, ws = _authority(tmp_path, deny_fn)
+    state.owe("gate", gate.snapshot_grants())      # an owed pre-/rp restore
+    assert state.revoke_authority(gate=gate, broker=broker) is True
+
+    assert coord("read_file", {"path": str(prior / "p.txt")}) is False
+    assert len(asked) == 1
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == []
+
+
+def test_revocation_restores_the_broker_side_of_a_crashed_bundle(tmp_path):
+    """A crashed BUNDLED transaction owes broker recovery too: `/rp`
+    revokes gate authority while restoring the capability store to its
+    exact pre-transaction snapshot — clearing the WAL blindly would strand
+    the leaked capability grant."""
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    store = perm.GrantStore(tmp_path / "grants.json")
+    journal = perm.AuthorizationRecoveryJournal(tmp_path / "auth_recovery.json")
+    journal.begin(gate_snapshot=gate.snapshot_grants(),
+                  broker_snapshot=store.snapshot())
+    # The crashed transaction left BOTH sides mutated.
+    leak_dir = tmp_path / "leaked"
+    leak_dir.mkdir()
+    lp.add_grant(CODE, request_class=lp.REQUEST_CLASS_PATH,
+                 resource=str(leak_dir), actions=["read"])
+    store.record(
+        perm.capability_for("http_get", {"url": "https://leak.example/x"}),
+        perm.Decision.ALLOW_ALWAYS)
+    assert store.grants_view()["always"], "the probe must leak a capability"
+
+    coord, gate2, broker2, state, _ws = _authority(tmp_path, _always)
+    assert state.revoke_authority(gate=gate2, broker=broker2) is True
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == []   # gate revoked
+    assert broker2.grants.grants_view() == {"session": [], "always": []}, (
+        "the broker side must be restored to its pre-transaction snapshot")
+
+
+def test_revocation_wins_after_discarding_every_object(tmp_path):
+    """No process-local marker is required: a wholly fresh stack revokes
+    and the older WAL still cannot replay."""
+    prior = _seed_pending_wal_and_mutation(tmp_path)
+    coord, gate, broker, state, ws = _authority(tmp_path, _always)
+    assert state.revoke_authority(gate=gate, broker=broker) is True
+
+    asked: list = []
+
+    def deny_fn(req):
+        asked.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_DENY)
+
+    coord2, *_r = _authority(tmp_path, deny_fn)     # another fresh stack
+    assert coord2("read_file", {"path": str(prior / "p.txt")}) is False
+    assert len(asked) == 1
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == []
+
+
+def test_revocation_failure_names_what_may_still_stand(tmp_path, monkeypatch):
+    coord, gate, broker, state, ws = _authority(tmp_path, _always)
+    _seed_pending_wal_and_mutation(tmp_path)
+    monkeypatch.setattr(
+        perm.AuthorizationRecoveryJournal, "clear",
+        lambda self: (_ for _ in ()).throw(OSError("unlink denied")))
+    assert state.revoke_authority(gate=gate, broker=broker) is False
+    reason = state.recovery_error() or ""
+    assert "recovery record" in reason or "journal" in reason.lower()
+
+
 # ── WAL cleanup + publication durability ────────────────────────────────────
+
+
+def test_strict_publish_fsync_failure_denies_before_mutation(
+    tmp_path, monkeypatch,
+):
+    """An authority WAL cannot degrade to best-effort: if the directory
+    entry cannot be made durable, publication FAILS and nothing mutates."""
+    prompts: list = []
+
+    def prompt_fn(req):
+        prompts.append(req)
+        return _always(req)
+
+    coord, gate, broker, state, ws = _authority(tmp_path, prompt_fn)
+    outside = tmp_path / "kappa"
+    outside.mkdir()
+    (outside / "k.txt").write_text("k")
+
+    real_fsync = os.fsync
+
+    def _dir_fsync_fails(fd):
+        if os.fstat(fd).st_mode & 0o040000:      # a directory descriptor
+            raise OSError("dir fsync unsupported")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", _dir_fsync_fails)
+    assert coord("read_file", {"path": str(outside / "k.txt")}) is False
+    monkeypatch.undo()
+    assert all(g["resource"] != str(outside)
+               for g in lp.load_grants(CODE, lp.REQUEST_CLASS_PATH))
+
+
+def test_strict_removal_fsync_failure_fails_the_commit(tmp_path, monkeypatch):
+    """A removal that cannot be made durable is not a commit: deny, with
+    the contained rollback, and no exception escape."""
+    published: dict = {}
+    real_fsync = os.fsync
+
+    def _fail_after_publish(fd):
+        is_dir = bool(os.fstat(fd).st_mode & 0o040000)
+        if is_dir and published.get("done"):
+            raise OSError("dir fsync unsupported")
+        if is_dir:
+            published["done"] = True
+        return real_fsync(fd)
+
+    coord, gate, broker, state, ws = _authority(tmp_path, _always)
+    outside = tmp_path / "lambda"
+    outside.mkdir()
+    (outside / "l.txt").write_text("l")
+    monkeypatch.setattr(os, "fsync", _fail_after_publish)
+    assert coord("read_file", {"path": str(outside / "l.txt")}) is False
+    monkeypatch.undo()
+    assert all(g["resource"] != str(outside)
+               for g in lp.load_grants(CODE, lp.REQUEST_CLASS_PATH))
+
+
+def test_journal_publication_leaks_no_descriptors(tmp_path):
+    """Repeated publish/clear cycles must not leak the temporary file's
+    descriptor."""
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    store = perm.GrantStore(tmp_path / "grants.json")
+    journal = perm.AuthorizationRecoveryJournal(tmp_path / "j.json")
+    gate_snap, broker_snap = gate.snapshot_grants(), store.snapshot()
+
+    def _open_fds() -> int:
+        return len(os.listdir("/proc/self/fd"))
+
+    for _ in range(3):                       # warm any lazy allocation
+        journal.begin(gate_snapshot=gate_snap, broker_snapshot=broker_snap)
+        journal.clear()
+    before = _open_fds()
+    for _ in range(12):
+        journal.begin(gate_snapshot=gate_snap, broker_snapshot=broker_snap)
+        journal.clear()
+    assert _open_fds() <= before + 1
 
 
 def test_clear_failure_after_recording_denies_without_leaking(

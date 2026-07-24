@@ -45,12 +45,21 @@ class _SpyGate:
 
 
 class _SpyOrch:
-    def __init__(self):
+    def __init__(self, revoke_result=None):
         self._gate = _SpyGate()
         self.converse_kwargs = None
+        #: The engine's public revocation seam — the surface calls THIS,
+        #: not private transaction/gate internals.
+        self._revoke_result = revoke_result
 
     def leader_gate(self):
         return self._gate
+
+    def revoke_leader_permissions(self):
+        if self._revoke_result is not None:
+            return self._revoke_result
+        self._gate.revoke_all()
+        return True, "All Leader permissions revoked — back to the workspace floor."
 
     def converse(self, text, **kwargs):
         self.converse_kwargs = kwargs
@@ -61,17 +70,32 @@ def test_rp_side_effect_revokes_gate(monkeypatch):
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     spy = _SpyOrch()
     app._conv_orch = spy
-    # swallow the response render (no mounted widgets without a running app)
-    monkeypatch.setattr(app, "_set_response", lambda *a, **k: None)
+    shown: list = []
+    monkeypatch.setattr(app, "_set_response", lambda msg, *a, **k: shown.append(msg))
     app._apply_side_effect("leader_revoke_permissions")
     assert spy._gate.revoked is True
+    assert shown and "revoked" in shown[0]
+
+
+def test_rp_side_effect_reports_a_failed_revoke(monkeypatch):
+    """A revoke the engine could NOT complete renders its reason — the
+    surface never prints unconditional success."""
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    app._conv_orch = _SpyOrch(
+        revoke_result=(False, "Revoke did NOT complete. journal unreadable"))
+    shown: list = []
+    monkeypatch.setattr(app, "_set_response", lambda msg, *a, **k: shown.append(msg))
+    app._apply_side_effect("leader_revoke_permissions")
+    assert shown and "did NOT complete" in shown[0]
 
 
 def test_rp_side_effect_safe_with_no_orchestrator(monkeypatch):
     """`/rp` before any conversation must not crash (nothing to revoke)."""
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
-    monkeypatch.setattr(app, "_set_response", lambda *a, **k: None)
+    shown: list = []
+    monkeypatch.setattr(app, "_set_response", lambda msg, *a, **k: shown.append(msg))
     app._apply_side_effect("leader_revoke_permissions")  # must not raise
+    assert shown and "No live conversation" in shown[0]
 
 
 def test_work_here_missing_path_is_reported(monkeypatch):
