@@ -434,6 +434,7 @@ def build_mcp_tools() -> dict[str, tools.Tool]:
                 call=_make_call(sid, spec.name),
                 params_schema=schema,
                 cost_class=cost,
+                origin=f"mcp-{server.trust}",
             )
     return out
 

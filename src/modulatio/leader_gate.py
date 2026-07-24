@@ -52,6 +52,14 @@ class SecurityRequest:
     cap_unit: str | None = None           # magnitude axis: "$" / "seconds" / …
     cap_value: float | None = None
 
+    def __post_init__(self) -> None:
+        # The emitter consumes the declared access inventory: a request
+        # class outside it cannot be constructed, so a new class fails
+        # HERE until it is added to the inventory + matrix coverage —
+        # never silently escaping the completeness guards.
+        from modulatio import access_surface as _axs
+        _axs.validate_request_class(self.request_class)
+
 
 @dataclass(frozen=True)
 class ScopedDecision:

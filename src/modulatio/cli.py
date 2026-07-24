@@ -1085,6 +1085,7 @@ def doctor_access_snapshot(code: "str | None"):
         folders=folders,
         folder_reachable=_config.probe_folder,
         gate_session={},
+        gate_once={},   # the configured view carries no live once-slate
         gate_durable=durable,
         broker_grants=broker_view,
         tool_loadout=loadout,

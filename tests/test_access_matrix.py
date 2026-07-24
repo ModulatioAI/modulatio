@@ -734,7 +734,53 @@ def test_runtime_card_reflects_live_mode_and_session_grants(
 
 
 def test_runtime_card_completeness_tracks_descriptor(project_orch):
-    """The live snapshot's sources equal the production descriptor — a new
-    authority source fails the live view too, not only doctor."""
+    """The live snapshot's sources equal the signature-derived inventory —
+    a new assembler input fails the live view too, not only doctor."""
+    from modulatio import permissions as perm
     snap = project_orch.runtime_capability_snapshot()
-    assert set(snap.sources) == set(axs.CAPABILITY_SOURCES)
+    assert set(snap.sources) == set(perm.CAPABILITY_AUTHORITY_SOURCES)
+
+
+def test_live_snapshot_shows_once_grant_until_next_call(project_orch):
+    """A ONCE grant is LIVE authority: the runtime snapshot renders it as
+    'Allowed this call' and it vanishes the moment the next tool call
+    begins its fresh once-slate."""
+    from modulatio import permissions as perm
+    gate = project_orch.leader_gate()
+    gate._once.setdefault("path", []).append("/tmp/once-root")
+    snap = project_orch.runtime_capability_snapshot()
+    once_facts = [f for f in snap.facts if f.state == perm.STATE_ONCE]
+    assert any("/tmp/once-root" in f.resource for f in once_facts)
+    gate.begin_tool_call()                       # the fresh once-slate
+    snap2 = project_orch.runtime_capability_snapshot()
+    assert not [f for f in snap2.facts if f.state == perm.STATE_ONCE]
+
+
+def test_live_snapshot_honors_registry_override(project_orch):
+    """The loadout comes from the ACTIVE registry at render time — a
+    thread-local override is what the surface shows, never the replaced
+    base registry."""
+    from modulatio import tools as tools_mod
+    sentinel = {"sentinel_probe_tool": tools_mod.Tool(
+        name="sentinel_probe_tool", description="d", call=lambda: "ok")}
+    project_orch._tls.tool_registry_override = sentinel
+    try:
+        snap = project_orch.runtime_capability_snapshot()
+        loadout = {f.resource for f in snap.facts if f.source == "tool_loadout"}
+        assert "sentinel_probe_tool" in loadout
+        assert "run_shell" not in loadout        # the replaced base registry
+    finally:
+        project_orch._tls.tool_registry_override = None
+
+
+def test_inactive_clay_emits_no_clay_authority(project_orch, monkeypatch):
+    """An install with no Clay backend gets NO clay facts — a snapshot
+    never claims tools Available for a backend that cannot run; activating
+    the backend adds the facts."""
+    from modulatio import oauth_helpers as oauth
+    monkeypatch.setattr(oauth, "find_claude_binary", lambda: None)
+    snap = project_orch.runtime_capability_snapshot()
+    assert not [f for f in snap.facts if f.resource.startswith("clay:")]
+    monkeypatch.setattr(oauth, "find_claude_binary", lambda: "/usr/bin/claude")
+    snap2 = project_orch.runtime_capability_snapshot()
+    assert [f for f in snap2.facts if f.resource.startswith("clay:")]

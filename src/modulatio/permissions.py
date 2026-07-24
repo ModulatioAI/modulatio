@@ -35,6 +35,7 @@ Design: ``docs/design/operator-permissions-and-autonomy.md``. The §6 invariants
 from __future__ import annotations
 
 import enum
+import inspect
 import json
 import os
 import threading
@@ -136,6 +137,12 @@ class Capability:
     label: str                     # plain-language ask
     detail: str = ""               # specifics shown to the operator
     requires_sandbox: bool = False  # §6.A: needs the bwrap substrate to run
+
+    def __post_init__(self) -> None:
+        # The constructor consumes the declared inventory — an undeclared
+        # kind cannot be asked about (see access_surface).
+        from modulatio import access_surface as _axs
+        _axs.validate_capability_kind(self.kind)
     _scoped: dict = field(default_factory=dict, compare=False)  # scope→key
 
     def scoped_key(self, scope: Decision) -> str:
@@ -381,25 +388,40 @@ def build_authorization_coordinator(*, gate, root, prompt_fn, broker):
                             cap, Decision.coerce(scope), strict=True):
                         raise RuntimeError("capability recording refused")
             except Exception:  # noqa: BLE001 — restore, fail closed
-                gate.restore_grants(gate_snap)
-                if broker_snap is not None:
-                    broker.grants.restore(broker_snap)
+                try:
+                    gate.restore_grants(gate_snap)
+                    if broker_snap is not None:
+                        broker.grants.restore(broker_snap)
+                except Exception:  # noqa: BLE001 — restore itself failed:
+                    # the deny stands either way; an authorization must
+                    # never leak an unclassified exception.
+                    pass
                 return False
             return True
 
-        # Capability-only ask (no path prompt carried it): same surface,
-        # same restore-on-failure posture around the single recording.
+        # Capability-only ask (no path prompt carried it): same rules as
+        # the bundle path — snapshot BEFORE the prompt (a snapshot read
+        # error denies with zero prompts, and prompt-time mutation stays
+        # inside the rollback baseline), restore on recording failure,
+        # and never leak an exception out of an authorization.
         if state == "ask":
+            try:
+                broker_snap = broker.grants.snapshot()
+            except OSError:
+                return False
             decision = Decision.coerce(
                 getattr(prompt_fn(lg.SecurityRequest(
                     action="capability", resource=cap.label,
                     request_class="capability", why=cap.detail,
                 )), "scope", None))
-            broker_snap = broker.grants.snapshot()
             try:
                 return broker.record_ask_decision(cap, decision, strict=True)
             except Exception:  # noqa: BLE001 — restore, fail closed
-                broker.grants.restore(broker_snap)
+                try:
+                    broker.grants.restore(broker_snap)
+                except Exception:  # noqa: BLE001 — restore itself failed;
+                    # the deny stands.
+                    pass
                 return False
         return True
 
@@ -716,16 +738,38 @@ __all__ = [
 #: Every authority source the snapshot represents. The assembler takes one
 #: REQUIRED argument per source — an unrepresented source is a TypeError at
 #: the call site, never a silently thinner card.
-CAPABILITY_AUTHORITY_SOURCES = (
-    "mode", "substrate", "workspace", "standing_roots", "folders",
-    "gate_grants", "broker_grants", "tool_loadout", "clay_confinement",
-    "mcp_servers",
-)
+#: Which snapshot-assembler parameter feeds which authority source — THE
+#: one declaration. The source inventory derives from it, and an
+#: import-time check pins it to ``effective_capability_snapshot``'s actual
+#: signature: adding or removing an assembler parameter breaks import
+#: until it is mapped here, so no second source tuple can go stale.
+_SOURCE_BY_PARAM = {
+    "mode": "mode",
+    "sandbox_available": "substrate",
+    "profile": "substrate",
+    "bypass": "substrate",
+    "workspace": "workspace",
+    "standing_roots": "standing_roots",
+    "folders": "folders",
+    "folder_reachable": "folders",
+    "corrupt_folders": "folders",
+    "gate_session": "gate_grants",
+    "gate_once": "gate_grants",
+    "gate_durable": "gate_grants",
+    "broker_grants": "broker_grants",
+    "tool_loadout": "tool_loadout",
+    "clay_confined_tools": "clay_confinement",
+    "clay_disallowed_tools": "clay_confinement",
+    "clay_active": "clay_confinement",
+    "mcp_servers": "mcp_servers",
+}
+
+CAPABILITY_AUTHORITY_SOURCES = tuple(dict.fromkeys(_SOURCE_BY_PARAM.values()))
 
 #: Canonical operator-facing grant states — one meaning each. ONCE grants
-#: never appear in a snapshot (they are recorded nowhere durable and expire
-#: with the call they covered); "Allowed this call" exists only in live
-#: prompt scopes.
+#: are recorded nowhere durable: the CONFIGURED (doctor) view never carries
+#: them, while a LIVE surface supplies the in-flight once-slate and renders
+#: it as "Allowed this call" until the next tool call clears it.
 STATE_ALWAYS = "Always allowed"
 STATE_SESSION = "Allowed this session"
 STATE_ASKS = "Asks first"
@@ -737,10 +781,19 @@ STATE_AVAILABLE = "Available"
 STATE_REDUCED = "Reduced/non-parity"
 STATE_UNREACHABLE = "Unreachable (cause unknown)"
 
+#: Live-only state: a ONCE grant covers exactly the in-flight call and is
+#: recorded nowhere durable — it appears ONLY on the live operator surface
+#: and vanishes when the next tool call begins.
+STATE_ONCE = "Allowed this call"
+
 _GRANT_STATES = frozenset({
     STATE_ALWAYS, STATE_SESSION, STATE_ASKS, STATE_REFUSED,
     STATE_AVAILABLE, STATE_REDUCED, STATE_UNREACHABLE,
 })
+
+#: The full canonical fact vocabulary — validated at CapabilityFact
+#: construction so no surface can invent state wording.
+CAPABILITY_STATES = frozenset(_GRANT_STATES | {STATE_ONCE})
 
 #: The declared parity-exception ledger: capability differences between the
 #: engine tool loop and other execution backends that are ACCEPTED and
@@ -780,6 +833,19 @@ class CapabilityFact:
     state: str
     detail: str = ""
 
+    def __post_init__(self) -> None:
+        # Facts consume the derived source inventory and the state canon —
+        # a fact from an unmapped source or with invented state vocabulary
+        # cannot be assembled.
+        if self.source not in CAPABILITY_AUTHORITY_SOURCES:
+            raise ValueError(
+                f"capability fact source {self.source!r} is not a derived "
+                f"authority source {CAPABILITY_AUTHORITY_SOURCES}")
+        if self.state not in CAPABILITY_STATES:
+            raise ValueError(
+                f"capability fact state {self.state!r} is not in the "
+                f"canonical state vocabulary {CAPABILITY_STATES}")
+
 
 @dataclass(frozen=True)
 class CapabilitySnapshot:
@@ -802,6 +868,7 @@ def effective_capability_snapshot(
     folders: tuple,
     folder_reachable: "Callable[[str], bool]",
     gate_session: dict,
+    gate_once: dict,
     gate_durable: dict,
     broker_grants: dict,
     tool_loadout: tuple,
@@ -882,6 +949,15 @@ def effective_capability_snapshot(
                 "gate_grants", cls, g["resource"], STATE_SESSION,
                 f"actions: {', '.join(g.get('actions', []))}"))
 
+    # once grants — LIVE-ONLY authority: they cover exactly the in-flight
+    # tool call and vanish when the next call begins, so only a live
+    # surface ever supplies them (the configured/doctor view passes {}).
+    for cls, roots in sorted(gate_once.items()):
+        for root in roots:
+            facts.append(CapabilityFact(
+                "gate_grants", cls, str(root), STATE_ONCE,
+                "covers exactly the in-flight tool call"))
+
     # broker grants — remembered capability keys.
     for key in broker_grants.get("always", []):
         facts.append(CapabilityFact(
@@ -898,14 +974,18 @@ def effective_capability_snapshot(
 
     # clay confinement — the confined seat's native tool set: the allowlist
     # is available inside its bound roots, the ban list can never load.
-    for name in clay_confined_tools:
-        facts.append(CapabilityFact(
-            "clay_confinement", "tool", f"clay:{name}", STATE_AVAILABLE,
-            "confined seat allowlist"))
-    for name in clay_disallowed_tools:
-        facts.append(CapabilityFact(
-            "clay_confinement", "tool", f"clay:{name}", STATE_REFUSED,
-            "confined seat ban"))
+    # ONLY when the backend is actually present: an install with no Clay
+    # emits no clay facts at all — a snapshot never invents authority for
+    # a backend that cannot run.
+    if clay_active:
+        for name in clay_confined_tools:
+            facts.append(CapabilityFact(
+                "clay_confinement", "tool", f"clay:{name}", STATE_AVAILABLE,
+                "confined seat allowlist"))
+        for name in clay_disallowed_tools:
+            facts.append(CapabilityFact(
+                "clay_confinement", "tool", f"clay:{name}", STATE_REFUSED,
+                "confined seat ban"))
 
     # mcp — per-server trust AND transport authority (a stdio server runs
     # outside the engine sandbox; the transport is part of the authority).
@@ -928,6 +1008,19 @@ def effective_capability_snapshot(
 
     return CapabilitySnapshot(
         facts=tuple(facts), sources=CAPABILITY_AUTHORITY_SOURCES)
+
+
+# Import-time witness that the parameter→source map IS the assembler's
+# signature: an added/removed parameter breaks import until mapped, so the
+# derived source inventory can never drift from the assembler's required
+# fields.
+_SNAPSHOT_PARAMS = set(
+    inspect.signature(effective_capability_snapshot).parameters)
+if _SNAPSHOT_PARAMS != set(_SOURCE_BY_PARAM):
+    raise RuntimeError(
+        "effective_capability_snapshot parameters and _SOURCE_BY_PARAM "
+        f"disagree: {sorted(_SNAPSHOT_PARAMS ^ set(_SOURCE_BY_PARAM))} — "
+        "map every assembler parameter to its authority source")
 
 
 def capability_card_rows(snapshot: CapabilitySnapshot) -> tuple:

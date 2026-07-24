@@ -156,6 +156,12 @@ def _handle_reload(args: list[str]) -> CommandResult:
     )
 
 
+def _handle_access(args: list[str]) -> CommandResult:
+    """Render the LIVE effective-capability card (mode, grants including
+    the in-flight once-slate, active loadout, substrate)."""
+    return CommandResult(output="", side_effect="show_access_card")
+
+
 def _handle_restart(args: list[str]) -> CommandResult:
     """Signal to the app to restart (re-exec)."""
     return CommandResult(
@@ -352,6 +358,13 @@ COMMANDS: tuple[Command, ...] = (
         description="Apply model/config changes to live services — no restart.",
         category="System",
         handler=_handle_reload,
+    ),
+    Command(
+        shortcut="/access",
+        name="Access card",
+        description="Live effective-capability card — mode, grants, loadout, substrate.",
+        category="System",
+        handler=_handle_access,
     ),
     Command(
         shortcut="/restart",

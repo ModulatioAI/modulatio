@@ -820,3 +820,103 @@ def test_bundle_snapshot_read_error_denies_before_prompt(
     assert prompts == []          # denied before the prompt
     assert cap_pf.exists()        # the unreadable store was not deleted
     assert gate._session == {}
+
+
+def test_capability_only_snapshot_error_denies_before_prompt(
+        env, tmp_path, monkeypatch):
+    """The capability-only branch obeys the same rule as the bundle path:
+    a snapshot read error denies the call with ZERO prompts and zero
+    mutation — prompting first would make prompt-time mutation part of
+    the rollback baseline."""
+    prompts = []
+
+    def prompt_fn(req):
+        prompts.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_SESSION)
+
+    coord, gate, broker, ws = _coordinator_env(tmp_path, prompt_fn)
+    cap_pf = tmp_path / "grants.json"
+    before = cap_pf.read_bytes() if cap_pf.exists() else None
+
+    for exc in (PermissionError("EACCES"), OSError("io error")):
+        monkeypatch.setattr(
+            broker.grants, "snapshot",
+            lambda _e=exc: (_ for _ in ()).throw(_e))
+        assert coord("http_get", {"url": "https://x.example/a"}) is False
+        assert prompts == []
+        after = cap_pf.read_bytes() if cap_pf.exists() else None
+        assert after == before
+
+
+def test_capability_only_prompt_mutation_rolls_back_on_record_failure(
+        env, tmp_path, monkeypatch):
+    """A prompt callback that itself mutates the capability store, followed
+    by a recording failure: rollback restores the exact PRE-PROMPT bytes —
+    the snapshot was taken before the prompt, so prompt-time mutation is
+    inside the rollback."""
+    from modulatio import permissions as perm
+    from modulatio.permissions import Decision, capability_for
+
+    coordbox = {}
+
+    def prompt_fn(req):
+        # Mutation during the prompt: an unrelated session-scope grant.
+        coordbox["broker"].record_ask_decision(
+            capability_for("web_search", {"query": "x"}),
+            Decision.ALLOW_SESSION)
+        return lg.ScopedDecision(scope=lp.SCOPE_ALWAYS)
+
+    coord, gate, broker, ws = _coordinator_env(tmp_path, prompt_fn)
+    coordbox["broker"] = broker
+    cap_pf = tmp_path / "grants.json"
+    before = cap_pf.read_bytes() if cap_pf.exists() else None
+    before_view = broker.grants.grants_view()
+
+    def _boom(self):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(perm.GrantStore, "_write_always", _boom)
+    assert coord("http_get", {"url": "https://x.example/a"}) is False
+    after = cap_pf.read_bytes() if cap_pf.exists() else None
+    assert after == before
+    assert broker.grants.grants_view() == before_view  # prompt mutation gone
+
+
+def test_capability_only_restore_failure_fails_closed(
+        env, tmp_path, monkeypatch):
+    """Recording fails AND the restore fails: the call still returns False —
+    an authorization can never leak an unclassified exception."""
+    from modulatio import permissions as perm
+
+    def prompt_fn(req):
+        return lg.ScopedDecision(scope=lp.SCOPE_ALWAYS)
+
+    coord, gate, broker, ws = _coordinator_env(tmp_path, prompt_fn)
+
+    monkeypatch.setattr(
+        perm.GrantStore, "_write_always",
+        lambda self: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(
+        broker.grants, "restore",
+        lambda snap: (_ for _ in ()).throw(OSError("still broken")))
+    assert coord("http_get", {"url": "https://x.example/a"}) is False
+
+
+def test_bundle_restore_failure_fails_closed(env, tmp_path, monkeypatch):
+    """Same no-leak rule on the bundle path: recording fails, the restore
+    fails too — False, never an escaped exception."""
+    from modulatio import permissions as perm
+
+    def prompt_fn(req):
+        return lg.ScopedDecision(scope=lp.SCOPE_ALWAYS)
+
+    coord, gate, broker, ws = _coordinator_env(tmp_path, prompt_fn)
+    args, o1, o2 = _two_outside_files_call(tmp_path)
+
+    monkeypatch.setattr(
+        perm.GrantStore, "_write_always",
+        lambda self: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(
+        gate, "restore_grants",
+        lambda snap: (_ for _ in ()).throw(OSError("still broken")))
+    assert coord("run_shell", args) is False

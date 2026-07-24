@@ -1,78 +1,145 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
-"""Drift guards: every access descriptor is bound to the production
-constructor it describes. A new request class, operator surface, execution
-backend, tool origin, substrate state, or capability source in production
-fails the matching guard until it is added to the descriptor — so it cannot
-silently escape the conformance matrix or the capability card.
+"""Drift guards: the access inventory and production constructors bind in
+BOTH directions. Production consumes the inventory at construction (an
+undeclared class/origin/kind cannot be emitted — the constructor raises),
+and every guard here compares the inventory to production-enumerated
+values with EXACT set equality — a stale inventory extra fails just as a
+new unmapped production value does.
 """
 from __future__ import annotations
+
+import importlib
+
+import pytest
 
 from modulatio import access_surface as axs
 from modulatio import claude_cli
 from modulatio import permissions as perm
 from modulatio import sandbox
+from modulatio import tools as tools_mod
 
 
-def test_request_classes_cover_production_gate_classes():
-    """Every class the gate/broker actually emit is a declared descriptor."""
+def _production_request_classes() -> set:
+    """Enumerate request classes from the PRODUCTION constants that emit
+    them — the gate's filesystem classes, the broker's capability kinds,
+    plus the three engine-emitted classes (mcp extraction, the broker's
+    capability-only ask, the substrate posture fact)."""
     from modulatio import leader_gate as lg
-    from modulatio import leader_permissions as lp
 
-    produced = set(lg._FS_CLASSES)              # path, exec
-    produced.add("mcp")                          # extract_tool_requests mcp class
-    produced.add("capability")                   # the broker's ask surface
-    produced.add("substrate")                    # the sandbox posture fact
-    # capability KINDS map onto network/file-write/shell/secret.
-    for kind in ("network", "shell", "file-write", "secret"):
-        produced.add(kind)
-    assert lp.REQUEST_CLASS_PATH in axs.REQUEST_CLASSES
-    assert produced <= set(axs.REQUEST_CLASSES)
+    produced = set(lg._FS_CLASSES)
+    produced.update(axs.CAPABILITY_KINDS)
+    produced.update({"mcp", "capability", "substrate"})
+    return produced
+
+
+def test_request_classes_exact_set_against_production():
+    stale, unmapped = axs.inventory_diff(
+        axs.REQUEST_CLASSES, _production_request_classes())
+    assert stale == () and unmapped == ()
+
+
+def test_stale_inventory_value_fails_exact_validation():
+    """A descriptor-only value that no production constructor emits is
+    caught — subset checks would let it pass forever."""
+    stale, unmapped = axs.inventory_diff(
+        axs.REQUEST_CLASSES + ("teleport",), _production_request_classes())
+    assert stale == ("teleport",)
+
+
+def test_new_production_class_fails_exact_validation():
+    """A production constructor emitting a new class fails completeness
+    until the inventory maps it."""
+    produced = _production_request_classes() | {"quantum"}
+    stale, unmapped = axs.inventory_diff(axs.REQUEST_CLASSES, produced)
+    assert unmapped == ("quantum",)
+
+
+def test_undeclared_request_class_cannot_be_constructed():
+    """The emitter itself refuses an undeclared class — drift cannot even
+    reach the store, let alone the matrix."""
+    from modulatio import leader_gate as lg
+
+    with pytest.raises(ValueError):
+        lg.SecurityRequest(
+            action="a", resource="r", request_class="quantum", why="w")
+
+
+def test_undeclared_tool_origin_cannot_be_constructed():
+    with pytest.raises(ValueError):
+        tools_mod.Tool(
+            name="x", description="d", call=lambda: "ok", origin="alien")
+
+
+def test_undeclared_capability_kind_cannot_be_constructed():
+    with pytest.raises(ValueError):
+        perm.Capability(kind="psychic", label="x")
+    # the dynamic per-tool family stays constructible
+    assert perm.Capability(kind="tool:web_search", label="x")
+
+
+def test_registered_tool_origins_are_exact_inventory(tmp_path):
+    """Origins enumerated from PRODUCTION-registered tools (builtin
+    registry + the two MCP trust postures + the service family) equal the
+    inventory exactly."""
+    from modulatio import mcp_config
+
+    registry = tools_mod.build_registry(
+        artifacts_root=tmp_path, tool_calls_dir=tmp_path / "tc")
+    produced = {t.origin for t in registry.values()}
+    produced.update(f"mcp-{trust}" for trust in mcp_config._TRUST)
+    produced.add("service")            # service_tools stamps this family
+    stale, unmapped = axs.inventory_diff(axs.TOOL_ORIGINS, produced)
+    assert stale == () and unmapped == ()
 
 
 def test_substrate_states_equal_production_enforcement():
-    """The substrate descriptors equal the EnforcementState values plus the
-    operator off-profile — a new enforcement state fails here."""
     enforcement = {s.value for s in sandbox.EnforcementState}
-    assert enforcement <= set(axs.SUBSTRATE_STATES)
-    assert "off" in axs.SUBSTRATE_STATES        # the bypass profile
-    # every non-off descriptor is a real EnforcementState value
-    assert set(axs.SUBSTRATE_STATES) - {"off"} == enforcement
+    stale, unmapped = axs.inventory_diff(
+        axs.SUBSTRATE_STATES, enforcement | {"off"})
+    assert stale == () and unmapped == ()
 
 
-def test_tool_origins_cover_production_families():
-    """builtin + the media/service families + the two MCP trust postures."""
-    from modulatio import mcp_config
-    assert "builtin" in axs.TOOL_ORIGINS
-    assert "service" in axs.TOOL_ORIGINS
-    # MCP trust postures are exactly the origin split.
-    assert set(mcp_config._TRUST) == {"gated", "trusted"}
-    assert {"mcp-gated", "mcp-trusted"} <= set(axs.TOOL_ORIGINS)
+def test_capability_sources_derive_from_assembler_signature():
+    """The source inventory is DERIVED from the assembler's parameter→
+    source map, and import-time validation pins that map to the live
+    signature — no second tuple exists to go stale. Every declared source
+    is fed by at least one real parameter."""
+    import inspect
+
+    params = set(inspect.signature(
+        perm.effective_capability_snapshot).parameters)
+    assert params == set(perm._SOURCE_BY_PARAM)
+    assert set(perm.CAPABILITY_AUTHORITY_SOURCES) == set(
+        perm._SOURCE_BY_PARAM.values())
 
 
-def test_capability_sources_track_the_snapshot_constant():
-    """The descriptor's capability-source set equals the snapshot's own
-    source tuple — so snapshot completeness is measured against a production
-    descriptor, not a constant the snapshot returns about itself."""
-    assert set(axs.CAPABILITY_SOURCES) == set(perm.CAPABILITY_AUTHORITY_SOURCES)
+def test_unmapped_fact_source_cannot_be_assembled():
+    with pytest.raises(ValueError):
+        perm.CapabilityFact(
+            source="astrology", request_class="capability",
+            resource="x", state=perm.STATE_AVAILABLE)
 
 
-def test_execution_backends_named():
-    """The tool loop plus the two Clay seat postures. Clay's confined seat
-    is the ``--safe-mode`` producer/QC lane; the interactive seat is the
-    full-loadout Leader."""
+def test_invented_state_vocabulary_cannot_be_assembled():
+    with pytest.raises(ValueError):
+        perm.CapabilityFact(
+            source="mode", request_class="capability",
+            resource="x", state="Sort of allowed")
+
+
+def test_execution_backends_are_named_constants():
+    """Emitters consume the SAME constants the matrix enumerates."""
     assert set(axs.EXECUTION_BACKENDS) == {
-        "modulatio-tool-loop", "clay-confined", "clay-interactive"}
-    # the confined backend's allowlist is the claude_cli constant
-    assert claude_cli._ALLOWED_CONFINED_TOOLS  # confined seat exists
+        axs.BACKEND_TOOL_LOOP, axs.BACKEND_CLAY_CONFINED,
+        axs.BACKEND_CLAY_INTERACTIVE}
+    assert claude_cli._ALLOWED_CONFINED_TOOLS  # the confined seat exists
 
 
-def test_operator_surfaces_have_bridges():
-    """Every declared surface has a real approval bridge module — the
-    bridge-conformance suite witnesses the wiring."""
-    import importlib
-    # TUI modal, Web broker, ACP server — the three bridge implementations.
-    assert importlib.import_module("modulatio.tui.leader_prompt")
-    assert importlib.import_module("modulatio.web.actors")
-    assert importlib.import_module("modulatio.acp.server")
-    assert set(axs.OPERATOR_SURFACES) == {"tui", "web", "acp"}
+def test_operator_surfaces_resolve_their_real_bridges():
+    """Every surface maps to a resolvable (module, attr) bridge; the set
+    of surfaces IS the bridge map's keys — no parallel list."""
+    assert axs.OPERATOR_SURFACES == tuple(axs.SURFACE_BRIDGES)
+    for surface, (module_path, attr) in axs.SURFACE_BRIDGES.items():
+        module = importlib.import_module(module_path)
+        assert hasattr(module, attr), (surface, module_path, attr)

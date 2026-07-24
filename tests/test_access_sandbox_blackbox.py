@@ -30,6 +30,27 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _bwrap_functional() -> "tuple[bool, str]":
+    """Binary-present is NOT sandbox-functional: probe an actual confined
+    child (namespaces + die-with-parent) the way the policy does. Returns
+    (functional, evidence) so a required cell can FAIL with the real
+    prerequisite named — never skip-green on a host whose bwrap exists but
+    cannot confine (no user namespaces, nested-sandbox hosts)."""
+    import subprocess
+    try:
+        probe = subprocess.run(
+            ["bwrap", "--unshare-all", "--die-with-parent",
+             "--ro-bind", "/", "/", "true"],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"bwrap probe could not run: {exc}"
+    if probe.returncode != 0:
+        return False, (
+            f"bwrap present but cannot confine (rc {probe.returncode}): "
+            f"{probe.stderr.strip()[:200]}")
+    return True, "bwrap confines (namespace probe succeeded)"
+
+
 @pytest.fixture
 def art(tmp_path):
     a = tmp_path / "artifacts"
@@ -67,7 +88,16 @@ def _break_bwrap(monkeypatch, tmp_path):
 def test_state_sandboxed_full_runs_confined(art, monkeypatch):
     """Real bwrap present + standard profile → SANDBOXED_FULL, a child runs,
     and the parent env is stripped (a secret set in the parent is invisible
-    to the confined child — a real confinement signal, not a lambda)."""
+    to the confined child — a real confinement signal, not a lambda).
+
+    REQUIRED on the designated Linux gate: a host whose bwrap binary exists
+    but cannot confine FAILS here with the prerequisite named — the cell
+    never skips green."""
+    functional, evidence = _bwrap_functional()
+    assert functional, (
+        f"designated-gate prerequisite unmet — {evidence}; the "
+        f"SANDBOXED_FULL observation requires a host with functional "
+        f"bubblewrap/user namespaces")
     assert sandbox.enforcement_state() == sandbox.EnforcementState.SANDBOXED_FULL
     monkeypatch.setenv("MODULATIO_LEAK_CANARY", "sekret")
     rs = tools.make_run_shell(art)

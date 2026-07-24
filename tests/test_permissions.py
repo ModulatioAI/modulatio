@@ -497,6 +497,7 @@ def _snapshot_kwargs(**overrides):
         folder_reachable=lambda path: path != "/proj",
         gate_session={"path": [{"resource": "/tmp/s",
                                 "actions": ["read", "edit", "write"]}]},
+        gate_once={},
         gate_durable={"exec": [{"resource": "/tmp/e",
                                 "actions": ["exec"]}]},
         broker_grants={"session": ["network:host=api.example.com"],

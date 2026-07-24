@@ -604,6 +604,7 @@ def build_service_tools(
             if all(s.free_tier for s in all_svcs.values())
             else "paid-cloud"
         ),
+        origin="service",
     )
     caps: "dict[str, tuple[str, str | None, Callable[..., str], dict]]" = {}
     root = artifacts_root if artifacts_root is not None else Path(".")
@@ -658,5 +659,6 @@ def build_service_tools(
                 "artifacts tree and returned as a filename."
             ),
             call=fn, params_schema=schema, cost_class=cost,
+            origin="service",
         )
     return out

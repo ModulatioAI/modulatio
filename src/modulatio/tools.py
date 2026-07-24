@@ -141,6 +141,14 @@ class Tool:
     #: arbitrary URL/body/endpoint), read only its own key from env, and never
     #: return secrets to the model. See ``comptroller.authorize_metered_tool``.
     cost_class: str | None = None
+    #: How this tool entered the registry — validated against the declared
+    #: access inventory at construction, so an unmapped origin cannot ship
+    #: (the conformance matrix enumerates origins from registered tools).
+    origin: str = "builtin"
+
+    def __post_init__(self) -> None:
+        from modulatio import access_surface as _axs
+        _axs.validate_tool_origin(self.origin)
 
 
 # ── builtin: http_get ──────────────────────────────────────────────────────

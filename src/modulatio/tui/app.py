@@ -1223,6 +1223,9 @@ class ModulatioApp(App):
             ok, msg = self.reload_services()
             self.notify(msg, severity="information" if ok else "warning")
             return
+        if side_effect == "show_access_card":
+            self._show_access_card()
+            return
         if side_effect == "restart_tui":
             self.exit(return_code=42)
             return
@@ -1230,6 +1233,26 @@ class ModulatioApp(App):
         # pass-through hints for the user — no automatic shell action
         # this slice. CLI launching of the wizard from inside the TUI
         # arrives in Phase 3 polish.
+
+    def _show_access_card(self) -> None:
+        """`/access` — the LIVE effective-capability card, rendered from the
+        conversation orchestrator's runtime snapshot through the one shared
+        renderer: current mode, gate/broker grants (including the in-flight
+        once-slate as "Allowed this call"), the ACTIVE tool loadout, and the
+        substrate posture. No live conversation yet → point at the
+        configured view instead of inventing live state."""
+        orch = getattr(self, "_conv_orch", None)
+        if orch is None:
+            self._set_response(
+                "No live conversation yet — run `modulatio doctor` for the "
+                "configured capability card.")
+            return
+        try:
+            lines = orch.capability_card()
+        except Exception as exc:  # noqa: BLE001 — surface the failure, don't crash the TUI
+            self._set_response(f"Could not assemble the live card: {exc}")
+            return
+        self._set_response("\n".join(lines))
 
     # ── Leader permission widen (/work, /rp) ────────────────────────────
     def _leader_revoke_all(self) -> None:

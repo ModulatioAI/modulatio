@@ -8893,8 +8893,11 @@ class Orchestrator:
         broker_view = self._permission_grants().grants_view()
         corrupt: list = []
         folders = tuple(_config.list_folders(on_corrupt=corrupt.append))
+        # The ACTIVE registry at the render context — honoring a thread-
+        # local override — never a base registry the current context has
+        # replaced; the Leader's own function tools ride alongside.
         loadout = tuple(sorted(self._leader_function_tools()) + sorted(
-            set(self._leader_tool_registry())))
+            set(self._active_tool_registry())))
         servers = tuple(
             {"name": sid, "trust": s.trust, "transport": s.transport}
             for sid, s in _mcp.enabled_servers().items())
@@ -8908,6 +8911,7 @@ class Orchestrator:
             folders=folders,
             folder_reachable=_config.probe_folder,
             gate_session=dict(gate._session),
+            gate_once=dict(gate._once),
             gate_durable={cls: lp.load_grants(self.project.code, cls)
                           for cls in ("path", "exec", "network")
                           if lp.load_grants(self.project.code, cls)},
