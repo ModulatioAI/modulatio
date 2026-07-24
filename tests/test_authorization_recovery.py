@@ -1199,35 +1199,48 @@ def test_readiness_is_one_linearization_point_against_revoke(tmp_path):
         perm.capability_for("http_get", {"url": "https://weather.gov/x"}),
         perm.Decision.ALLOW_SESSION)
 
-    coord_b, gate_b, broker_b, state_b, _ws = _authority(tmp_path, _always)
-    inside = threading.Event()
-    revoke_done = threading.Event()
+    # B refuses to wait for the lock at all, so whether its revoke lands is
+    # direct evidence of whether A held the transaction across its epoch
+    # view — the ordering is decided by the lock, never by scheduling.
+    coord_b, gate_b, broker_b, state_b, _ws = _authority(
+        tmp_path, _always, lock_timeout=0)
+    at_epoch_view = threading.Event()
+    first_attempt_done = threading.Event()
+    retry_allowed = threading.Event()
+    outcome: dict = {}
     real_read = state_a.journal.read_epoch
 
-    def _pause_after_epoch_view():
+    def _pause_at_epoch_view():
         value = real_read()
-        inside.set()                  # A holds the transaction here
-        time.sleep(0.4)               # B's revoke must not slip in
+        at_epoch_view.set()
+        first_attempt_done.wait(timeout=15)
         return value
 
-    state_a.journal.read_epoch = _pause_after_epoch_view  # type: ignore
+    state_a.journal.read_epoch = _pause_at_epoch_view  # type: ignore
 
     def _revoke():
-        inside.wait(timeout=5)
-        state_b.revoke_authority(gate=gate_b, broker=broker_b)
-        revoke_done.set()
+        at_epoch_view.wait(timeout=15)
+        outcome["first"] = state_b.revoke_authority(
+            gate=gate_b, broker=broker_b)
+        first_attempt_done.set()
+        retry_allowed.wait(timeout=15)
+        outcome["retry"] = state_b.revoke_authority(
+            gate=gate_b, broker=broker_b)
 
     worker = threading.Thread(target=_revoke)
     worker.start()
     allowed = coord_a("read_file", {"path": str(folder / "f.txt")})
-    ordered_before_revoke = not revoke_done.is_set()
-    worker.join(timeout=15)
     state_a.journal.read_epoch = real_read  # type: ignore
+    retry_allowed.set()
+    worker.join(timeout=30)
 
-    if not ordered_before_revoke:
-        # The revoke won the lock: A must have observed it.
-        assert allowed is False
-    # Either way, A's next real coordinator call denies BOTH axes without
+    # A owned the transaction across its epoch view, so the revoke could
+    # not land inside it: A is ordered first and legitimately allowed.
+    assert outcome.get("first") is False
+    assert allowed is True
+    # The same real revoke succeeds once A releases the transaction.
+    assert outcome.get("retry") is True
+    # A's next real coordinator call now denies BOTH axes without
     # rebuilding A, and its live caches are empty.
     assert coord_a("read_file", {"path": str(folder / "f.txt")}) is False
     assert coord_a("http_get", {"url": "https://weather.gov/x"}) is False
