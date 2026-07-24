@@ -439,7 +439,9 @@ class AuthorizationRecoveryJournal:
         )
 
     @staticmethod
-    def _encode_broker(snapshot: tuple) -> dict:
+    def _encode_broker(snapshot: "tuple | None") -> "dict | None":
+        if snapshot is None:
+            return None          # no capability store on this transaction
         session, always, token = snapshot
         out = {"session": sorted(session), "always": sorted(always),
                "token": token[0], "bytes_b64": None}
@@ -448,7 +450,9 @@ class AuthorizationRecoveryJournal:
         return out
 
     @staticmethod
-    def _decode_broker(raw: dict) -> tuple:
+    def _decode_broker(raw: "dict | None") -> "tuple | None":
+        if raw is None:
+            return None
         kind = raw["token"]
         if kind == "bytes":
             token = ("bytes", base64.b64decode(raw["bytes_b64"]))
@@ -457,11 +461,20 @@ class AuthorizationRecoveryJournal:
         return set(raw["session"]), set(raw["always"]), token
 
     # ── the record ───────────────────────────────────────────────────────
-    def begin(self, *, gate_snapshot, broker_snapshot) -> None:
+    #: What an outstanding record means. ``transaction`` owes a RESTORE of
+    #: the recorded snapshots; ``revoke`` owes the completion of a
+    #: revoke-all that had begun — recovery must finish clearing both
+    #: stores and must never replay the older snapshots.
+    KIND_TRANSACTION = "transaction"
+    KIND_REVOKE = "revoke"
+
+    def begin(self, *, gate_snapshot, broker_snapshot,
+              kind: str = KIND_TRANSACTION) -> None:
         """Persist the pre-transaction snapshots. Raises (denying the call
         before any mutation) when the record cannot be written."""
         payload = json.dumps({
             "version": self.VERSION,
+            "kind": kind,
             "gate": self._encode_gate(gate_snapshot),
             "broker": self._encode_broker(broker_snapshot),
         }, indent=2).encode("utf-8")
@@ -524,6 +537,7 @@ class AuthorizationRecoveryJournal:
                 f"until an operator resolves it with a matching build")
         try:
             return {
+                "kind": raw.get("kind", self.KIND_TRANSACTION),
                 "gate": self._decode_gate(raw["gate"]),
                 "broker": self._decode_broker(raw["broker"]),
             }
@@ -650,8 +664,13 @@ class AuthorizationTransactionState:
         return True
 
     def _revoke_locked(self, *, gate, broker) -> None:
-        """The revocation sequence, run with the project lock held. Each
-        stage names precisely what may still stand if it fails."""
+        """The revoke-all sequence over BOTH authority axes, run with the
+        project lock held. Each stage names precisely what may still stand
+        if it fails.
+
+        A durable revoke INTENT is published before either store is
+        touched, so a crash mid-sequence recovers forward (finish
+        clearing) instead of replaying the older snapshots."""
         try:
             owed = None if self.journal is None else self.journal.pending()
         except AuthorizationRecoveryError:
@@ -661,40 +680,58 @@ class AuthorizationTransactionState:
                 f"could not read the recovery record before revoking "
                 f"({type(exc).__name__}: {exc}) — NOTHING was revoked; the "
                 f"Leader's grants all still stand") from exc
-        # 1 + 2: the broker side is RESTORED (capability authority the
-        # crashed transaction leaked must not survive the revoke), while
-        # the gate side is superseded by the revocation below.
-        if broker is not None:
+        # An owed record with a capability side cannot be resolved without
+        # the store it belongs to: refuse rather than clear the record and
+        # silently skip that axis.
+        if broker is None and owed is not None:
+            raise AuthorizationRecoveryError(
+                "a pending recovery record covers the capability store, "
+                "but no capability store was supplied — NOTHING was "
+                "revoked; retry the revoke with the project's live stores")
+        # 1: the revoke intent, durable BEFORE either store mutates.
+        if self.journal is not None:
             try:
-                if owed is not None:
-                    broker.grants.restore(owed["broker"])
-                with self._lock:
-                    for kind, snap in list(self._debts):
-                        if kind == "broker":
-                            broker.grants.restore(snap)
+                self.journal.begin(
+                    gate_snapshot=gate.snapshot_grants(),
+                    broker_snapshot=(None if broker is None
+                                     else broker.grants.snapshot()),
+                    kind=self.journal.KIND_REVOKE)
             except Exception as exc:  # noqa: BLE001
                 raise AuthorizationRecoveryError(
-                    f"could not restore the capability store before "
-                    f"revoking ({type(exc).__name__}: {exc}) — NOTHING was "
-                    f"revoked; both the Leader's folder grants and any "
-                    f"leaked capability grants still stand") from exc
+                    f"could not record the revoke intent "
+                    f"({type(exc).__name__}: {exc}) — NOTHING was revoked; "
+                    f"all the Leader's grants still stand") from exc
+        # 2: the capability axis.
+        if broker is not None:
+            try:
+                broker.grants.revoke_all()
+            except Exception as exc:  # noqa: BLE001
+                raise AuthorizationRecoveryError(
+                    f"the capability store could not be cleared "
+                    f"({type(exc).__name__}: {exc}) — remembered "
+                    f"capability grants may still stand; the folder grants "
+                    f"were not touched") from exc
+        # 3: the folder axis.
         try:
-            gate.revoke_all()                               # 3
+            gate.revoke_all()
         except Exception as exc:  # noqa: BLE001
             raise AuthorizationRecoveryError(
-                f"the revoke itself failed ({type(exc).__name__}: {exc}) — "
-                f"the Leader's folder grants still stand") from exc
-        if self.journal is not None:                        # 4
+                f"the folder grants could not be revoked "
+                f"({type(exc).__name__}: {exc}) — they still stand; the "
+                f"capability grants were cleared") from exc
+        # 4: the intent is discharged.
+        if self.journal is not None:
             try:
                 self.journal.clear()
             except Exception as exc:  # noqa: BLE001
                 raise AuthorizationRecoveryError(
-                    f"the folder grants WERE revoked, but the recovery "
-                    f"record {self.journal.path} could not be cleared "
-                    f"({type(exc).__name__}: {exc}) — it may replay and "
-                    f"restore the revoked grants; remove it once you have "
-                    f"verified the project's permission files") from exc
-        with self._lock:                                    # 5
+                    f"both stores WERE cleared, but the recovery record "
+                    f"{self.journal.path} could not be removed "
+                    f"({type(exc).__name__}: {exc}) — recovery will finish "
+                    f"the revoke; remove the file once you have verified "
+                    f"the project's permission files") from exc
+        # 5: no older debt may restore what was just revoked.
+        with self._lock:
             self._debts = [
                 d for d in self._debts if d[0] not in ("gate", "broker")]
 
@@ -725,9 +762,18 @@ class AuthorizationTransactionState:
                 if owed is None:
                     self._recovery_error = None
                     return True
-                gate.restore_grants(owed["gate"])
-                if broker is not None:
-                    broker.grants.restore(owed["broker"])
+                if owed["kind"] == self.journal.KIND_REVOKE:
+                    # An interrupted revoke recovers FORWARD: finish
+                    # clearing both stores. Replaying the recorded
+                    # snapshots would hand back exactly what the operator
+                    # revoked.
+                    if broker is not None:
+                        broker.grants.revoke_all()
+                    gate.revoke_all()
+                else:
+                    gate.restore_grants(owed["gate"])
+                    if broker is not None and owed["broker"] is not None:
+                        broker.grants.restore(owed["broker"])
                 self.journal.clear()
         except AuthorizationRecoveryError as exc:
             self._recovery_error = str(exc)
@@ -1142,6 +1188,19 @@ class GrantStore:
             return session, always, ("bytes", self._persist_path.read_bytes())
         except FileNotFoundError:
             return session, always, ("absent",)
+
+    def revoke_all(self) -> None:
+        """Drop EVERY remembered capability — session and durable — and
+        publish the emptied store durably. Raises on any write/sync
+        failure so the caller can report an axis that may still stand;
+        an unpersisted revoke is never reported as done."""
+        with self._lock:
+            self._session.clear()
+            self._always.clear()
+        if not self._persist_path:
+            return
+        self._write_always()                      # publishes the empty set
+        _fsync_dir_strict(self._persist_path.parent)
 
     def restore(self, snapshot: tuple) -> None:
         """Reset both grant sets and the durable file to a prior

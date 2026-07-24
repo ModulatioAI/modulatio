@@ -562,6 +562,204 @@ def test_revocation_failure_names_what_may_still_stand(tmp_path, monkeypatch):
     assert "recovery record" in reason or "journal" in reason.lower()
 
 
+# ── /rp clears BOTH authority axes ──────────────────────────────────────────
+
+
+def _seed_both_axes(tmp_path, broker):
+    """A widened folder plus remembered capabilities on the other axis."""
+    folder = tmp_path / "widened"
+    folder.mkdir(exist_ok=True)
+    lp.add_grant(CODE, request_class=lp.REQUEST_CLASS_PATH,
+                 resource=str(folder), actions=["read"])
+    broker.grants.record(
+        perm.capability_for("http_get", {"url": "https://weather.gov/x"}),
+        perm.Decision.ALLOW_ALWAYS)
+    broker.grants.record(
+        perm.capability_for("run_shell", {"cmd": "ls"}),
+        perm.Decision.ALLOW_SESSION)
+    view = broker.grants.grants_view()
+    assert view["always"] and view["session"], "both scopes must be seeded"
+    return folder
+
+
+def test_revoke_clears_both_authority_stores(tmp_path):
+    """`/rp` means what it says: folder grants AND capability grants —
+    session and durable — are gone, and the durable file is empty."""
+    coord, gate, broker, state, ws = _authority(tmp_path, _always)
+    _seed_both_axes(tmp_path, broker)
+
+    assert state.revoke_authority(gate=gate, broker=broker) is True
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == []
+    assert broker.grants.grants_view() == {"session": [], "always": []}
+    persisted = tmp_path / "grants.json"
+    assert not persisted.exists() or json.loads(
+        persisted.read_text())["always_allow"] == []
+
+
+def test_revoked_capability_asks_again_in_a_fresh_process(tmp_path):
+    """A remembered capability must not survive `/rp` into a new process:
+    the next call ASKS rather than authorizing silently."""
+    coord, gate, broker, state, ws = _authority(tmp_path, _always)
+    _seed_both_axes(tmp_path, broker)
+    assert state.revoke_authority(gate=gate, broker=broker) is True
+
+    asked: list = []
+
+    def deny_fn(req):
+        asked.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_DENY)
+
+    coord2, _g2, broker2, _s2, _ws2 = _authority(tmp_path, deny_fn)
+    assert broker2.grants.grants_view() == {"session": [], "always": []}
+    assert coord2("http_get", {"url": "https://weather.gov/x"}) is False
+    assert len(asked) == 1
+
+
+def test_revoke_clears_a_capability_with_no_widened_folder(tmp_path):
+    """The capability axis is cleared on its own — no folder grant needed
+    for `/rp` to have work to do."""
+    coord, gate, broker, state, ws = _authority(tmp_path, _always)
+    broker.grants.record(
+        perm.capability_for("http_get", {"url": "https://weather.gov/x"}),
+        perm.Decision.ALLOW_ALWAYS)
+    assert broker.grants.grants_view()["always"]
+
+    assert state.revoke_authority(gate=gate, broker=broker) is True
+    assert broker.grants.grants_view() == {"session": [], "always": []}
+
+
+def test_revoke_over_a_pending_bundle_ends_with_nothing_granted(tmp_path):
+    """A pending journal holding an older LEGITIMATE capability snapshot
+    plus a leaked bundled grant: `/rp` ends with BOTH stores empty — the
+    recovery restore is an intermediate step, never the final state."""
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    gate0 = lg.LeaderPermissionGate(CODE, workspace=ws)
+    store0 = perm.GrantStore(tmp_path / "grants.json")
+    store0.record(
+        perm.capability_for("http_get", {"url": "https://legit.example/a"}),
+        perm.Decision.ALLOW_ALWAYS)                     # the legitimate prior
+    journal = perm.AuthorizationRecoveryJournal(tmp_path / "auth_recovery.json")
+    journal.begin(gate_snapshot=gate0.snapshot_grants(),
+                  broker_snapshot=store0.snapshot())
+    leaked = tmp_path / "leaked"
+    leaked.mkdir()
+    lp.add_grant(CODE, request_class=lp.REQUEST_CLASS_PATH,
+                 resource=str(leaked), actions=["read"])
+    store0.record(
+        perm.capability_for("http_get", {"url": "https://leak.example/a"}),
+        perm.Decision.ALLOW_ALWAYS)                     # the leaked one
+
+    coord, gate, broker, state, _ws = _authority(tmp_path, _always)
+    assert state.revoke_authority(gate=gate, broker=broker) is True
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == []
+    assert broker.grants.grants_view() == {"session": [], "always": []}
+
+
+@pytest.mark.parametrize("stage", ["intent", "broker", "gate", "wal"])
+def test_recovery_after_an_interrupted_revoke_converges_to_empty(
+    tmp_path, monkeypatch, stage,
+):
+    """Interrupt the revoke after each durable step; a fresh stack must
+    finish it — both stores empty — never replay the older snapshot."""
+    coord, gate, broker, state, ws = _authority(tmp_path, _always)
+    _seed_both_axes(tmp_path, broker)
+
+    boom = RuntimeError("interrupted")
+    if stage == "intent":
+        monkeypatch.setattr(
+            perm.GrantStore, "revoke_all",
+            lambda self: (_ for _ in ()).throw(boom))
+    elif stage == "broker":
+        monkeypatch.setattr(
+            lp, "revoke_all", lambda code: (_ for _ in ()).throw(boom))
+    elif stage == "gate":
+        monkeypatch.setattr(
+            perm.AuthorizationRecoveryJournal, "clear",
+            lambda self: (_ for _ in ()).throw(boom))
+    # "wal": no injection — the revoke completes; recovery must be a no-op.
+
+    if stage != "wal":
+        assert state.revoke_authority(gate=gate, broker=broker) is False
+    else:
+        assert state.revoke_authority(gate=gate, broker=broker) is True
+    monkeypatch.undo()
+
+    # A wholly fresh stack: recovery finishes whatever was interrupted.
+    asked: list = []
+
+    def deny_fn(req):
+        asked.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_DENY)
+
+    coord2, _g2, broker2, _s2, _ws2 = _authority(tmp_path, deny_fn)
+    assert coord2("http_get", {"url": "https://weather.gov/x"}) is False
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == []
+    assert broker2.grants.grants_view() == {"session": [], "always": []}
+
+
+def test_revoke_failure_on_the_capability_axis_is_truthful(
+    tmp_path, monkeypatch,
+):
+    """A capability store that cannot be cleared durably fails the revoke
+    and names that axis — never the unconditional success line."""
+    coord, gate, broker, state, ws = _authority(tmp_path, _always)
+    _seed_both_axes(tmp_path, broker)
+    monkeypatch.setattr(
+        perm.GrantStore, "_write_always",
+        lambda self: (_ for _ in ()).throw(OSError("disk full")))
+
+    assert state.revoke_authority(gate=gate, broker=broker) is False
+    reason = (state.recovery_error() or "").lower()
+    assert "capability" in reason
+
+
+def test_revoke_without_a_broker_refuses_when_capability_state_is_owed(
+    tmp_path,
+):
+    """The all-authority operation cannot silently skip an axis: a pending
+    broker-side record with no broker supplied REFUSES, and the recovery
+    record survives for the next attempt."""
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    gate0 = lg.LeaderPermissionGate(CODE, workspace=ws)
+    store0 = perm.GrantStore(tmp_path / "grants.json")
+    journal = perm.AuthorizationRecoveryJournal(tmp_path / "auth_recovery.json")
+    journal.begin(gate_snapshot=gate0.snapshot_grants(),
+                  broker_snapshot=store0.snapshot())
+
+    state = perm.AuthorizationTransactionState(journal=journal)
+    assert state.revoke_authority(gate=gate0, broker=None) is False
+    assert (tmp_path / "auth_recovery.json").exists(), (
+        "the recovery record must survive a refused revoke")
+    assert "capability" in (state.recovery_error() or "").lower()
+
+
+def test_access_card_shows_no_grants_after_revoke(tmp_path, monkeypatch):
+    """The operator-visible card agrees with the claim: after `/rp` no
+    session or persistent grant is rendered on either axis."""
+    from modulatio.orchestration import Orchestrator
+    from modulatio.types import Project
+
+    vault.init_run(CODE, "run-rp-001", "obj")
+    project = Project(
+        code=CODE, name="rp", objective="obj", leader_model="stub",
+        wiki_path=str(tmp_path / CODE.lower()))
+    runner = lambda prompt: "stub"  # noqa: E731 — test stub
+    orch = Orchestrator(project, runners=dict.fromkeys(
+        ("leader", "planner", "drafter", "qc"), runner))
+    _seed_both_axes(tmp_path, orch._build_permission_broker(
+        perm.RunMode.DEFAULT, None))
+    orch.leader_gate()._session.setdefault("path", []).append(
+        {"resource": "/tmp/session-root", "actions": ["read"]})
+
+    ok, message = orch.revoke_leader_permissions()
+    assert ok is True and "revoked" in message
+    card = "\n".join(orch.capability_card())
+    assert "/tmp/session-root" not in card
+    assert "weather.gov" not in card
+
+
 # ── WAL cleanup + publication durability ────────────────────────────────────
 
 
