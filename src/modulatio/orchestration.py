@@ -7031,7 +7031,14 @@ class Orchestrator:
         cached = getattr(self, "_auth_txn_state_cache", None)
         if cached is None:
             from modulatio import permissions as _perm
-            cached = _perm.AuthorizationTransactionState()
+            from modulatio import vault as _vault
+            # Backed by a project-scoped WAL: path grants are durable
+            # project files, so a failed rollback must be recoverable by a
+            # LATER PROCESS too, not only by this instance's memory.
+            cached = _perm.AuthorizationTransactionState(
+                journal=_perm.AuthorizationRecoveryJournal(
+                    _vault.project_dir(self.project.code)
+                    / "authorization_recovery.json"))
             self._auth_txn_state_cache = cached
         return cached
 

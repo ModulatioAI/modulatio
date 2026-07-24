@@ -31,7 +31,8 @@ def _production_request_classes() -> set:
 
     produced = set(lg._FS_CLASSES)
     produced.update(perm.PRODUCTION_CAPABILITY_KINDS)
-    produced.update({"mcp", "capability", "substrate"})
+    produced.update(
+        {axs.CLASS_MCP, axs.CLASS_CAPABILITY, axs.CLASS_SUBSTRATE})
     return produced
 
 
@@ -128,6 +129,44 @@ def test_unmapped_tool_still_gets_the_dynamic_capability():
     family is the default, not a dispatch failure."""
     cap = perm.capability_for("some_unmapped_tool", {})
     assert cap.kind == "tool:some_unmapped_tool"
+
+
+def test_both_capability_emitters_follow_the_named_constant(
+    tmp_path, monkeypatch,
+):
+    """Rebind the named class constant (and the inventory that validates
+    it): BOTH capability-ask emitters — the coordinator's own ask and the
+    ``ask_via_prompt_fn`` adapter the TUI/web bridges use — emit the
+    rebound value. Neither carries a hand-copied literal."""
+    from modulatio import leader_gate as lg
+
+    rebound = "capability-probe"
+    monkeypatch.setattr(axs, "CLASS_CAPABILITY", rebound)
+    monkeypatch.setattr(
+        axs, "REQUEST_CLASSES", axs.REQUEST_CLASSES + (rebound,))
+
+    seen: list = []
+
+    def prompt_fn(req):
+        seen.append(req.request_class)
+        return lg.ScopedDecision(scope="no")
+
+    # 1) the adapter used by the real approval bridges
+    perm.ask_via_prompt_fn(prompt_fn)(
+        perm.capability_for("http_get", {"url": "https://x.example"}))
+
+    # 2) the coordinator's own capability-only ask
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    gate = lg.LeaderPermissionGate("AXS", workspace=ws)
+    broker = perm.PermissionBroker(
+        mode=perm.RunMode.DEFAULT, grants=perm.GrantStore(None),
+        ask=None, sandbox_available=lambda: True)
+    coord = perm.build_authorization_coordinator(
+        gate=gate, root=ws, prompt_fn=prompt_fn, broker=broker)
+    coord("http_get", {"url": "https://x.example/a"})
+
+    assert seen == [rebound, rebound]
 
 
 def test_capability_kinds_exact_against_dispatch_range(tmp_path):

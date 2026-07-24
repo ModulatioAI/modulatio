@@ -34,11 +34,15 @@ Design: ``docs/design/operator-permissions-and-autonomy.md``. The §6 invariants
 """
 from __future__ import annotations
 
+import base64
+import contextlib
 import enum
+import fcntl
 import inspect
 import json
 import os
 import threading
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
@@ -360,11 +364,169 @@ def ask_via_prompt_fn(prompt_fn):
         from modulatio import leader_gate as lg
         decision = prompt_fn(lg.SecurityRequest(
             action="capability", resource=getattr(cap, "label", str(cap)),
-            request_class="capability", why=getattr(cap, "detail", ""),
+            request_class=_axs_classes.CLASS_CAPABILITY,
+            why=getattr(cap, "detail", ""),
         ))
         return Decision.coerce(getattr(decision, "scope", None))
 
     return ask
+
+
+class AuthorizationRecoveryError(RuntimeError):
+    """The durable authorization-recovery record could not be read or
+    trusted. Authorization fails closed until an operator resolves it —
+    the message names the file and what to do with it."""
+
+
+class AuthorizationRecoveryJournal:
+    """Project-scoped write-ahead record of an authorization transaction.
+
+    A failed rollback can leave DURABLE authority behind (path grants are
+    project files), so recovery has to be durable too: the exact
+    pre-transaction snapshots of BOTH stores are persisted before the
+    first mutation, cleared on a clean commit, and replayed by whatever
+    process next tries to authorize. An unwritable journal denies before
+    anything mutates; an unreadable one fails closed and says so.
+
+    ``transaction()`` takes an exclusive OS lock for the whole
+    begin→commit window, so two instances over one project serialize
+    instead of interleaving half-applied authority."""
+
+    VERSION = 1
+
+    def __init__(self, path: "Path | str", *, lock_timeout: float = 10.0) -> None:
+        self.path = Path(path)
+        self._lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        #: How long to wait for another instance's transaction before
+        #: refusing. Waiting is correct — the other instance may be
+        #: committing — but the wait is bounded so a wedged holder denies
+        #: rather than hanging the operator's surface.
+        self.lock_timeout = lock_timeout
+
+    # ── serialization: both snapshot shapes, byte-exact ──────────────────
+    @staticmethod
+    def _encode_gate(snapshot: tuple) -> dict:
+        session, once, durable = snapshot
+        return {
+            "session": {k: list(v) for k, v in session.items()},
+            "once": {k: list(v) for k, v in once.items()},
+            "durable_b64": (None if durable is None
+                            else base64.b64encode(durable).decode("ascii")),
+        }
+
+    @staticmethod
+    def _decode_gate(raw: dict) -> tuple:
+        durable = raw.get("durable_b64")
+        return (
+            {k: list(v) for k, v in raw["session"].items()},
+            {k: list(v) for k, v in raw["once"].items()},
+            None if durable is None else base64.b64decode(durable),
+        )
+
+    @staticmethod
+    def _encode_broker(snapshot: tuple) -> dict:
+        session, always, token = snapshot
+        out = {"session": sorted(session), "always": sorted(always),
+               "token": token[0], "bytes_b64": None}
+        if token[0] == "bytes":
+            out["bytes_b64"] = base64.b64encode(token[1]).decode("ascii")
+        return out
+
+    @staticmethod
+    def _decode_broker(raw: dict) -> tuple:
+        kind = raw["token"]
+        if kind == "bytes":
+            token = ("bytes", base64.b64decode(raw["bytes_b64"]))
+        else:
+            token = (kind,)
+        return set(raw["session"]), set(raw["always"]), token
+
+    # ── the record ───────────────────────────────────────────────────────
+    def begin(self, *, gate_snapshot, broker_snapshot) -> None:
+        """Persist the pre-transaction snapshots. Raises (denying the call
+        before any mutation) when the record cannot be written."""
+        payload = json.dumps({
+            "version": self.VERSION,
+            "gate": self._encode_gate(gate_snapshot),
+            "broker": self._encode_broker(broker_snapshot),
+        }, indent=2).encode("utf-8")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, self.path)
+        except BaseException:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+
+    def pending(self) -> "dict | None":
+        """The owed snapshots, or None when nothing is outstanding. A
+        present-but-unreadable record raises
+        :class:`AuthorizationRecoveryError` — never silently 'nothing
+        owed'."""
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            raise AuthorizationRecoveryError(
+                f"authorization recovery record {self.path} is unreadable "
+                f"({type(exc).__name__}: {exc}) — authorization is refused "
+                f"until it is restored from backup or removed by an "
+                f"operator who has verified the project's grant files"
+            ) from exc
+        try:
+            return {
+                "gate": self._decode_gate(raw["gate"]),
+                "broker": self._decode_broker(raw["broker"]),
+            }
+        except (KeyError, TypeError, ValueError) as exc:
+            raise AuthorizationRecoveryError(
+                f"authorization recovery record {self.path} is malformed "
+                f"({type(exc).__name__}) — authorization is refused until "
+                f"an operator removes or repairs it"
+            ) from exc
+
+    def clear(self) -> None:
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+
+    @contextlib.contextmanager
+    def transaction(self, *, timeout: "float | None" = None):
+        """Exclusive project-scoped transaction window. A second process
+        waits up to ``timeout`` and then raises, so an instance can never
+        authorize underneath another's half-applied transaction."""
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(self._lock_path), os.O_RDWR | os.O_CREAT, 0o600)
+        deadline = time.monotonic() + (
+            self.lock_timeout if timeout is None else timeout)
+        try:
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise AuthorizationRecoveryError(
+                            f"another instance holds the authorization "
+                            f"transaction for {self.path} — refusing to "
+                            f"authorize underneath it") from None
+                    time.sleep(0.05)
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 class AuthorizationTransactionState:
@@ -378,9 +540,18 @@ class AuthorizationTransactionState:
     and lock-serialized so concurrent authorizations can neither pass an
     outstanding debt nor double-pop or half-reconcile one."""
 
-    def __init__(self) -> None:
+    def __init__(self, journal: "AuthorizationRecoveryJournal | None" = None) -> None:
         self._lock = threading.Lock()
         self._debts: list = []
+        #: Durable counterpart: in-memory debt covers this process, the
+        #: journal covers restart and every other instance.
+        self.journal = journal
+        self._recovery_error: "str | None" = None
+
+    def recovery_error(self) -> "str | None":
+        """Operator-facing reason authorization is refused, when a durable
+        recovery record cannot be read/trusted."""
+        return self._recovery_error
 
     def owe(self, kind: str, snapshot) -> None:
         """Record a restore that FAILED — its exact pre-transaction
@@ -391,6 +562,38 @@ class AuthorizationTransactionState:
     def outstanding(self) -> int:
         with self._lock:
             return len(self._debts)
+
+    def recover_durable(self, *, gate, broker) -> bool:
+        """Replay any journaled transaction — the restart/second-instance
+        path. True when nothing is owed durably (or it restored cleanly);
+        False means deny, with ``recovery_error`` set when the record
+        itself is untrustworthy."""
+        if self.journal is None:
+            return True
+        try:
+            # The whole check runs INSIDE the project transaction: while
+            # another instance owns it, this one denies EARLY — before any
+            # approval event reaches the operator — instead of prompting
+            # and then discovering it cannot commit.
+            with self.journal.transaction():
+                owed = self.journal.pending()
+                if owed is None:
+                    self._recovery_error = None
+                    return True
+                gate.restore_grants(owed["gate"])
+                if broker is not None:
+                    broker.grants.restore(owed["broker"])
+                self.journal.clear()
+        except AuthorizationRecoveryError as exc:
+            self._recovery_error = str(exc)
+            return False
+        except Exception as exc:  # noqa: BLE001 — stores still unverified
+            self._recovery_error = (
+                f"authorization recovery could not restore the journaled "
+                f"snapshots ({type(exc).__name__}: {exc})")
+            return False
+        self._recovery_error = None
+        return True
 
     def reconcile(self, *, gate, broker) -> bool:
         """Retry every owed restore under the lock. True when the stores
@@ -410,6 +613,8 @@ class AuthorizationTransactionState:
                 except Exception:  # noqa: BLE001 — still unverified
                     return False
                 self._debts.pop()
+            if self.journal is not None:
+                self.journal.clear()      # debts discharged: nothing owed
             return True
 
 
@@ -436,6 +641,34 @@ def build_authorization_coordinator(
     debt = (transaction_state if transaction_state is not None
             else AuthorizationTransactionState())
 
+    @contextlib.contextmanager
+    def _durable_transaction(gate_snap, broker_snap):
+        """Hold the project-scoped transaction and persist the WAL BEFORE
+        the first mutation. Yields False when the record cannot be written
+        or another instance owns the transaction — the caller denies with
+        nothing mutated."""
+        if debt.journal is None:
+            yield True
+            return
+        try:
+            with debt.journal.transaction():
+                try:
+                    debt.journal.begin(
+                        gate_snapshot=gate_snap, broker_snapshot=broker_snap)
+                except Exception:  # noqa: BLE001 — deny before mutation
+                    yield False
+                    return
+                yield True
+        except AuthorizationRecoveryError:
+            # Another instance owns the transaction — never authorize
+            # underneath it.
+            yield False
+
+    def _commit_durable() -> None:
+        """A clean commit owes nothing: drop the WAL."""
+        if debt.journal is not None:
+            debt.journal.clear()
+
     def _restore_both(gate_snap, broker_snap) -> None:
         """Attempt each restore INDEPENDENTLY — one failure never skips the
         other — and record whatever could not be restored as owed."""
@@ -453,6 +686,10 @@ def build_authorization_coordinator(
         # An unreconciled rollback means the authority stores are
         # unverified: deny — before the once-slate resets or any silent
         # grant resolves — until the pre-transaction snapshots restore.
+        # DURABLE debt first (a journal outlives this process and every
+        # object here), then this process's own in-memory debt.
+        if not debt.recover_durable(gate=gate, broker=broker):
+            return False
         if debt.outstanding() and not debt.reconcile(gate=gate, broker=broker):
             return False
         # A new tool call starts a fresh once-slate (same contract as
@@ -517,17 +754,21 @@ def build_authorization_coordinator(
                 return False
             if scope not in askable:
                 return False  # invalid answer: fail closed, record nothing
-            try:
-                for req in pending:
-                    gate.record_prompted(req, answer)
-                if state == "ask":
-                    if not broker.record_ask_decision(
-                            cap, Decision.coerce(scope), strict=True):
-                        raise RuntimeError("capability recording refused")
-            except Exception:  # noqa: BLE001 — restore, fail closed
-                _restore_both(gate_snap, broker_snap)
-                return False
-            return True
+            with _durable_transaction(gate_snap, broker_snap) as opened:
+                if not opened:
+                    return False  # WAL unwritable: nothing has mutated
+                try:
+                    for req in pending:
+                        gate.record_prompted(req, answer)
+                    if state == "ask":
+                        if not broker.record_ask_decision(
+                                cap, Decision.coerce(scope), strict=True):
+                            raise RuntimeError("capability recording refused")
+                except Exception:  # noqa: BLE001 — restore, fail closed
+                    _restore_both(gate_snap, broker_snap)
+                    return False
+                _commit_durable()
+                return True
 
         # Capability-only ask (no path prompt carried it): same rules as
         # the bundle path — snapshot BEFORE the prompt (a snapshot read
@@ -536,6 +777,7 @@ def build_authorization_coordinator(
         # and never leak an exception out of an authorization.
         if state == "ask":
             try:
+                gate_snap = gate.snapshot_grants()
                 broker_snap = broker.grants.snapshot()
             except OSError:
                 return False
@@ -545,15 +787,21 @@ def build_authorization_coordinator(
                     request_class=_axs_classes.CLASS_CAPABILITY,
                     why=cap.detail,
                 )), "scope", None))
-            try:
-                return broker.record_ask_decision(cap, decision, strict=True)
-            except Exception:  # noqa: BLE001 — restore, fail closed
+            with _durable_transaction(gate_snap, broker_snap) as opened:
+                if not opened:
+                    return False  # WAL unwritable: nothing has mutated
                 try:
-                    broker.grants.restore(broker_snap)
-                except Exception:  # noqa: BLE001 — unverified store: owe it,
-                    # denying this and every later call until it reconciles.
-                    debt.owe("broker", broker_snap)
-                return False
+                    recorded = broker.record_ask_decision(
+                        cap, decision, strict=True)
+                except Exception:  # noqa: BLE001 — restore, fail closed
+                    try:
+                        broker.grants.restore(broker_snap)
+                    except Exception:  # noqa: BLE001 — unverified store: owe
+                        # it, denying every later call until it reconciles.
+                        debt.owe("broker", broker_snap)
+                    return False
+                _commit_durable()
+                return recorded
         return True
 
     return authorize
