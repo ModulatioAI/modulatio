@@ -742,6 +742,56 @@ def test_corrupt_record_raises_typed_never_overwritten(project_with_run):
     assert path.read_bytes() == corrupt
 
 
+def test_unknown_quarantine_state_never_authorizes_creation(
+    project_with_run, monkeypatch,
+):
+    """An OSError while DISCOVERING quarantine state is not absence: the
+    strict reader must fail typed, create nothing, and leave preserved
+    quarantine bytes alone — inability to prove genuine absence is never
+    permission to mint fresh authority."""
+    task = _saved_task("TBG-T-510")
+    path = _task_file("TBG-T-510")
+    quarantine = path.with_suffix(".broken.md")
+    path.rename(quarantine)                     # canonical gone, marker kept
+    preserved = quarantine.read_bytes()
+
+    real_glob = Path.glob
+
+    def _blind_glob(self, pattern):
+        if "TBG-T-510" in pattern:
+            raise PermissionError("EACCES")
+        return real_glob(self, pattern)
+
+    monkeypatch.setattr(Path, "glob", _blind_glob)
+    fresh = task.model_copy(deep=True)
+    fresh.tool_budget_sequence = 0
+    with pytest.raises(ToolBudgetConflict):
+        store_mod.create_task(PROJECT_CODE, fresh, run_id=RUN_ID)
+    monkeypatch.setattr(Path, "glob", real_glob)
+    assert not path.exists()                    # nothing minted
+    assert quarantine.read_bytes() == preserved
+
+
+def test_unknown_quarantine_state_fails_closed_without_sibling(
+    project_with_run, monkeypatch,
+):
+    """Same rule with NO quarantine sibling on disk and a generic OSError:
+    unknown is unknown — still a typed refusal, still nothing created."""
+    real_glob = Path.glob
+
+    def _blind_glob(self, pattern):
+        if "TBG-T-511" in pattern:
+            raise OSError("io error")
+        return real_glob(self, pattern)
+
+    monkeypatch.setattr(Path, "glob", _blind_glob)
+    with pytest.raises(ToolBudgetConflict):
+        store_mod.create_task(
+            PROJECT_CODE, _make_task("TBG-T-511"), run_id=RUN_ID)
+    monkeypatch.setattr(Path, "glob", real_glob)
+    assert not _task_file("TBG-T-511").exists()
+
+
 def test_create_task_is_the_only_creation_seam(project_with_run):
     """Explicit creation succeeds on genuine absence with a zeroed budget
     tuple; creation never overwrites an existing record; a non-zero

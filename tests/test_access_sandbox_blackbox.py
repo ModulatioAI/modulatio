@@ -149,6 +149,28 @@ def test_state_refused_denies_run(art, monkeypatch, tmp_path):
            profile="full", timeout=30.0)
 
 
+def test_convention_import_smoke_runs_genuinely_confined(art, monkeypatch):
+    """The convention import smoke's command shape, through the REAL
+    sandboxed run_shell on the designated gate: the declared module
+    imports green from its declared layout inside a confined child, and a
+    wrong-name component stays RED — the same witness the unit tier
+    proves deterministically without a substrate claim."""
+    functional, evidence = _bwrap_functional()
+    assert functional, f"designated-gate prerequisite unmet — {evidence}"
+    pkg = art / "webapp"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+    rs = tools.make_run_shell(art)
+    cmd = "python3 -c 'import sys; sys.path.insert(0, \".\"); import webapp'"
+    out = rs(cmd=cmd, profile="full", timeout=30.0)
+    assert out.startswith("exit_code: 0")
+    wrong = rs(
+        cmd="python3 -c 'import sys; sys.path.insert(0, \".\"); "
+            "import webapp2'",
+        profile="full", timeout=30.0)
+    assert not wrong.startswith("exit_code: 0")   # real failure stays RED
+
+
 def test_black_box_states_cover_every_substrate_descriptor():
     """The tier exercises every SUBSTRATE_STATES descriptor value (the three
     enforcement states plus the off bypass) as a real state, not a lambda."""

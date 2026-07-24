@@ -28,7 +28,7 @@ goal = Goal(id="SMK-G-001", project_id=proj.id, description="current summary",
 store.save_goal(proj.code, goal)
 task = Task(id="SMK-T-001", project_id=proj.id, goal_id=goal.id, description="d",
             output_path="doc.md", status=TaskStatus.COMPLETED, qc_authored_fix=False)
-store.save_task(proj.code, task)
+store.create_task(proj.code, task)
 
 calls = []
 def _leader(p):

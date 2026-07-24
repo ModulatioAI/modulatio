@@ -12298,11 +12298,18 @@ class Orchestrator:
                 "with no suite has no green evidence to show"
             )
         artifacts_root = self._shared_artifacts_root()
-        run_shell = tools.build_registry(
-            artifacts_root=artifacts_root,
-            tool_calls_dir=artifacts_root / "tool_calls",
-            project_code=self.project.code,
-        ).get("run_shell")
+        # Injectable execution seam: a unit tier supplies a deterministic
+        # runner (real exit codes, no substrate claim) so gate
+        # CLASSIFICATION is testable on any host; sandbox ENFORCEMENT is
+        # witnessed separately by the black-box integration tier on a host
+        # whose bubblewrap genuinely confines.
+        run_shell = getattr(self, "_pytest_gate_run_shell", None)
+        if run_shell is None:
+            run_shell = tools.build_registry(
+                artifacts_root=artifacts_root,
+                tool_calls_dir=artifacts_root / "tool_calls",
+                project_code=self.project.code,
+            ).get("run_shell")
         if run_shell is None:
             return None, "run_shell tool unavailable (no artifacts root bound)"
 

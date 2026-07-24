@@ -687,6 +687,28 @@ def _enforceable_sandbox(monkeypatch):
     monkeypatch.setattr(sandbox, "current_profile", lambda: "standard")
 
 
+class _DeterministicRunShell:
+    """Execution seam for the gate's CLASSIFICATION tier: runs the fixture
+    command for real (fixture code is test-authored) and returns the
+    run_shell result shape with the true exit code — deterministic on any
+    host, claiming nothing about bubblewrap. Real confinement is witnessed
+    by the black-box integration tier on the designated gate host."""
+
+    def call(self, *, cmd, profile, cwd, timeout):
+        import os
+        import subprocess
+        import sys
+        env = dict(os.environ)
+        env["PATH"] = (
+            str(Path(sys.executable).parent) + os.pathsep
+            + env.get("PATH", ""))
+        proc = subprocess.run(
+            cmd, shell=True, cwd=cwd, env=env, capture_output=True,
+            text=True, timeout=timeout)
+        return (f"exit_code: {proc.returncode}\n"
+                f"{proc.stdout}{proc.stderr}")
+
+
 def _gate_suite(root):
     (root / "pyproject.toml").write_text(
         '[project]\nname = "webapp"\nversion = "0"\n', encoding="utf-8")
@@ -706,7 +728,8 @@ def test_import_smoke_green_for_declared_layout(project, monkeypatch):
     root = orch._shared_artifacts_root()
     assert (root / "webapp" / "__init__.py").exists()
     _gate_suite(root)
-    _enforceable_sandbox(monkeypatch)
+    _enforceable_sandbox(monkeypatch)   # passes the gate's substrate guard…
+    orch._pytest_gate_run_shell = _DeterministicRunShell()  # …execution seam
     monkeypatch.setattr(Orchestrator, "_goal_pytest_gate", _REAL_PYTEST_GATE)
     state, report = orch._goal_pytest_gate(tasks)
     assert state is True
@@ -730,7 +753,8 @@ def test_import_smoke_red_when_package_name_diverges(project, monkeypatch):
     # A README naming the expected package proves nothing.
     (root / "README.md").write_text("webapp package\n", encoding="utf-8")
     _gate_suite(root)
-    _enforceable_sandbox(monkeypatch)
+    _enforceable_sandbox(monkeypatch)   # passes the gate's substrate guard…
+    orch._pytest_gate_run_shell = _DeterministicRunShell()  # …execution seam
     monkeypatch.setattr(Orchestrator, "_goal_pytest_gate", _REAL_PYTEST_GATE)
     state, report = orch._goal_pytest_gate(tasks)
     assert state is False

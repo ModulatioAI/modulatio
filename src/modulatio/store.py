@@ -820,8 +820,15 @@ def _read_canonical_task_authority(
     except FileNotFoundError:
         try:
             quarantined = any(path.parent.glob(f"{path.stem}.broken.*"))
-        except OSError:
-            quarantined = False
+        except OSError as exc:
+            # Inability to DISCOVER quarantine state is not absence —
+            # unknown fails closed; only a proven-clean scan permits the
+            # caller to treat the record as genuinely absent.
+            raise ToolBudgetConflict(
+                f"task {task_id}: could not determine quarantine state "
+                f"({type(exc).__name__}: {exc}) — unknown authority is "
+                f"never treated as genuine absence", canonical=None,
+            ) from exc
         if quarantined:
             raise ToolBudgetConflict(
                 f"task {task_id}: canonical record is quarantined as "

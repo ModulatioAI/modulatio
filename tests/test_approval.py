@@ -284,10 +284,24 @@ def test_decline_reopens_affected_goal(project: Project):
 
 def test_decline_reopens_affected_task(project: Project):
     """Symmetric to goal: an affected_task_id on a denied ticket flips
-    the task back to PENDING with the note in the transition log."""
+    the task back to PENDING with the note in the transition log — and
+    the decline transaction preserves the task's EXACT tool-budget tuple
+    (it runs inside the store lock; a nested lock acquisition would hang,
+    so the call runs under a bounded guard that fails instead of wedging
+    the suite)."""
+    import threading
+
     from modulatio.types import TaskStatus
     goal = _create_goal(project)
     task = _create_task(project, goal.id, status=TaskStatus.QC_REJECTED)
+    # A nonzero authority tuple: two same-fingerprint consumes + a strike
+    # → (sequence 3, attempted 2, "same", streak 2, strikes 1).
+    store.consume_tool_call_budget(
+        project.code, task.id, expected_sequence=0, fingerprint="same")
+    store.consume_tool_call_budget(
+        project.code, task.id, expected_sequence=1, fingerprint="same")
+    store.consume_tool_call_budget(
+        project.code, task.id, expected_sequence=2, record_strike=True)
     ticket = store.create_ticket(
         project_id=project.id,
         project_code=project.code,
@@ -297,11 +311,27 @@ def test_decline_reopens_affected_task(project: Project):
         approval_required=True,
         affected_task_id=task.id,
     )
-    store.update_ticket_approval(
-        project.code, ticket.id,
-        decision="denied", decided_by="user",
-        note="output is fine but scope is wrong; redo from spec",
-    )
+
+    outcome: dict = {}
+
+    def _decline():
+        try:
+            store.update_ticket_approval(
+                project.code, ticket.id,
+                decision="denied", decided_by="user",
+                note="output is fine but scope is wrong; redo from spec",
+            )
+            outcome["done"] = True
+        except Exception as exc:  # noqa: BLE001 — surfaced by the assert below
+            outcome["exc"] = exc
+
+    worker = threading.Thread(target=_decline, daemon=True)
+    worker.start()
+    worker.join(timeout=8.0)
+    assert not worker.is_alive(), (
+        "decline hung — a nested store-lock acquisition deadlocked the "
+        "approval transaction")
+    assert outcome.get("done") and "exc" not in outcome
 
     reopened = store.get_task(project.code, task.id)
     assert reopened is not None
@@ -309,6 +339,14 @@ def test_decline_reopens_affected_task(project: Project):
     last = reopened.transitions[-1]
     assert last.to_state == TaskStatus.PENDING.value
     assert "scope is wrong" in last.rationale
+    # The whole five-field authority tuple survives the reopen exactly.
+    assert (
+        reopened.tool_budget_sequence,
+        reopened.tool_calls_attempted,
+        reopened.tool_call_fingerprint,
+        reopened.tool_call_streak,
+        reopened.storm_strikes,
+    ) == (3, 2, "same", 2, 1)
 
 
 def test_approve_does_not_reopen_affected_goal(project: Project):
