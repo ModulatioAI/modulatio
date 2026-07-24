@@ -471,7 +471,13 @@ class AuthorizationRecoveryJournal:
     def begin(self, *, gate_snapshot, broker_snapshot,
               kind: str = KIND_TRANSACTION) -> None:
         """Persist the pre-transaction snapshots. Raises (denying the call
-        before any mutation) when the record cannot be written."""
+        before any mutation) when the record cannot be written, or when
+        the discriminator is not one this build understands — an
+        ambiguous record must never reach the recovery path."""
+        if kind not in (self.KIND_TRANSACTION, self.KIND_REVOKE):
+            raise ValueError(
+                f"recovery record kind {kind!r} is not one of "
+                f"{(self.KIND_TRANSACTION, self.KIND_REVOKE)}")
         payload = json.dumps({
             "version": self.VERSION,
             "kind": kind,
@@ -535,9 +541,21 @@ class AuthorizationRecoveryJournal:
                 f"version {version!r}, which this build cannot decode "
                 f"(expects {self.VERSION}) — authorization is refused "
                 f"until an operator resolves it with a matching build")
+        # A MISSING discriminator is a pre-kind record and reads as a
+        # transaction; a PRESENT one must be exactly known. A corrupted or
+        # future value is never interpreted as permission to restore
+        # authority — it fails closed with the record left intact.
+        kind = raw.get("kind", self.KIND_TRANSACTION)
+        if kind not in (self.KIND_TRANSACTION, self.KIND_REVOKE):
+            raise AuthorizationRecoveryError(
+                f"authorization recovery record {self.path} declares kind "
+                f"{kind!r}, which this build cannot act on (expects "
+                f"{self.KIND_TRANSACTION!r} or {self.KIND_REVOKE!r}) — "
+                f"authorization is refused and the record is left intact "
+                f"for an operator or a matching build")
         try:
             return {
-                "kind": raw.get("kind", self.KIND_TRANSACTION),
+                "kind": kind,
                 "gate": self._decode_gate(raw["gate"]),
                 "broker": self._decode_broker(raw["broker"]),
             }
@@ -625,21 +643,26 @@ class AuthorizationTransactionState:
             sort_keys=True).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
 
-    def revoke_authority(self, *, gate, broker=None) -> bool:
-        """The ``/rp`` escape hatch, SERIALIZED and SUPERSEDING.
+    def revoke_authority(self, *, gate, broker) -> bool:
+        """The ``/rp`` escape hatch: revoke ALL authority, SERIALIZED and
+        SUPERSEDING.
 
         Revocation is the operator's NEWEST decision, so it must outrank
         every older recovery record — a pending journal or an owed
         in-memory restore would otherwise replay afterwards and hand back
-        exactly what was revoked. Under one project lock, in order:
+        exactly what was revoked. Both authority axes are cleared, so the
+        capability store is required, never optional. Under one project
+        lock, in order:
 
-        1. restore the BROKER side of any pending journal (a crashed
-           bundle may owe capability recovery; clearing the record
-           without this would strand a leaked capability grant);
-        2. resolve owed in-memory BROKER debts the same way;
-        3. revoke the gate;
-        4. durably clear the journal;
-        5. discard gate-restoring debts — they are superseded, not owed.
+        1. read any owed record, refusing when its capability side has no
+           store to resolve it against;
+        2. publish the durable revoke INTENT before either store mutates,
+           so an interruption recovers FORWARD (finish clearing) instead
+           of replaying the older snapshots;
+        3. clear the capability store — session and durable;
+        4. revoke the folder gate;
+        5. clear the intent, then discard debts that could restore either
+           axis — they are superseded, not owed.
 
         Returns True only after that whole sequence is durable. False
         names, via ``recovery_error()``, which authority may still stand.
@@ -762,6 +785,17 @@ class AuthorizationTransactionState:
                 if owed is None:
                     self._recovery_error = None
                     return True
+                # An owed capability side cannot be resolved without its
+                # store: refuse BEFORE either store mutates and before the
+                # record is cleared, so a retry with the live store can
+                # still finish the restore or the revoke.
+                if owed["broker"] is not None and broker is None:
+                    self._recovery_error = (
+                        f"the pending recovery record {self.journal.path} "
+                        f"covers the capability store, but none was "
+                        f"supplied — neither authority was changed; retry "
+                        f"with the project's live stores")
+                    return False
                 if owed["kind"] == self.journal.KIND_REVOKE:
                     # An interrupted revoke recovers FORWARD: finish
                     # clearing both stores. Replaying the recorded

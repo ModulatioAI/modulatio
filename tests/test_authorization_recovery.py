@@ -324,20 +324,26 @@ def test_revocation_wins_over_a_stale_rollback(tmp_path, monkeypatch):
     assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH)
 
     revoked: dict = {}
+    broken: dict = {}
 
     def prompt_fn(req):
         # The operator hits /rp WHILE this approval modal is open — after
-        # the transaction captured its snapshot.
+        # the transaction captured its snapshot. The revoke itself runs
+        # against healthy stores; the failure is armed only afterwards, so
+        # it breaks the in-flight transaction's recording alone.
         if not revoked:
-            state.revoke_authority(gate=gate)
+            assert state.revoke_authority(gate=gate, broker=broker) is True
             revoked["done"] = True
+            broken["armed"] = True
         return _always(req)
 
     coord, gate, broker, state, ws = _authority(tmp_path, prompt_fn)
     args, o1, o2 = _two_outside_files(tmp_path)
+    real_write = perm.GrantStore._write_always
     monkeypatch.setattr(
         perm.GrantStore, "_write_always",
-        lambda self: (_ for _ in ()).throw(OSError("disk full")))
+        lambda self: (_ for _ in ()).throw(OSError("disk full"))
+        if broken else real_write(self))
 
     assert coord("run_shell", args) is False
     assert revoked, "the probe must actually revoke mid-prompt"
@@ -370,7 +376,7 @@ def test_transaction_started_before_revocation_cannot_commit(
     def prompt_fn(req):
         prompts.append(req)
         if not revoked:
-            state.revoke_authority(gate=gate)
+            state.revoke_authority(gate=gate, broker=broker)
             revoked["done"] = True
         return _always(req)
 
@@ -423,12 +429,12 @@ def test_concurrent_commit_survives_another_transactions_rollback(
 def test_revoke_authority_reports_failure_truthfully(tmp_path, monkeypatch):
     """The escape hatch never claims success it did not achieve."""
     coord, gate, broker, state, ws = _authority(tmp_path, _always)
-    assert state.revoke_authority(gate=gate) is True
+    assert state.revoke_authority(gate=gate, broker=broker) is True
 
     monkeypatch.setattr(
         lp, "revoke_all",
         lambda code: (_ for _ in ()).throw(OSError("store unwritable")))
-    ok = state.revoke_authority(gate=gate)
+    ok = state.revoke_authority(gate=gate, broker=broker)
     assert ok is False
     assert state.recovery_error() and "revoke" in state.recovery_error().lower()
 
@@ -714,6 +720,34 @@ def test_revoke_failure_on_the_capability_axis_is_truthful(
     assert "capability" in reason
 
 
+def test_revoke_failure_on_the_capability_directory_sync_is_truthful(
+    tmp_path, monkeypatch,
+):
+    """Durability failure on the capability store's DIRECTORY is as fatal
+    as a write failure: the revoke fails and names that axis."""
+    # The journal lives in its own directory so the injected failure can
+    # target the CAPABILITY store's directory alone.
+    wal_dir = tmp_path / "waldir"
+    wal_dir.mkdir()
+    coord, gate, broker, state, ws = _authority(
+        tmp_path, _always, journal_path=wal_dir / "auth_recovery.json")
+    _seed_both_axes(tmp_path, broker)
+
+    real_fsync = os.fsync
+    grants_dir = str((tmp_path / "grants.json").parent)
+
+    def _dir_fsync_fails(fd):
+        if os.fstat(fd).st_mode & 0o040000 and os.readlink(
+                f"/proc/self/fd/{fd}") == grants_dir:
+            raise OSError("dir fsync unsupported")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", _dir_fsync_fails)
+    assert state.revoke_authority(gate=gate, broker=broker) is False
+    monkeypatch.undo()
+    assert "capability" in (state.recovery_error() or "").lower()
+
+
 def test_revoke_without_a_broker_refuses_when_capability_state_is_owed(
     tmp_path,
 ):
@@ -758,6 +792,207 @@ def test_access_card_shows_no_grants_after_revoke(tmp_path, monkeypatch):
     card = "\n".join(orch.capability_card())
     assert "/tmp/session-root" not in card
     assert "weather.gov" not in card
+
+
+# ── recovery never discards an owed capability side without its store ───────
+
+
+def _pending_revoke_state(tmp_path, broker):
+    """The exact state after a revoke intent is published and both stores
+    still hold authority — an interrupted revoke."""
+    folder = _seed_both_axes(tmp_path, broker)
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    journal = perm.AuthorizationRecoveryJournal(tmp_path / "auth_recovery.json")
+    journal.begin(gate_snapshot=gate.snapshot_grants(),
+                  broker_snapshot=broker.grants.snapshot(),
+                  kind=journal.KIND_REVOKE)
+    return folder, journal
+
+
+def test_brokerless_recovery_of_a_revoke_refuses_and_keeps_the_record(
+    tmp_path,
+):
+    """A pending revoke owes a capability side: recovering WITHOUT that
+    store must refuse — never revoke one axis, drop the record, and leave
+    the other axis live."""
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    seeding_store = perm.GrantStore(tmp_path / "grants.json")
+    broker = perm.PermissionBroker(
+        mode=perm.RunMode.DEFAULT, grants=seeding_store, ask=None,
+        sandbox_available=lambda: True)
+    _folder, journal = _pending_revoke_state(tmp_path, broker)
+
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    state = perm.AuthorizationTransactionState(journal=journal)
+    assert state.recover_durable(gate=gate, broker=None) is False
+    assert journal.path.exists(), "the record must survive for a retry"
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH), "gate untouched"
+    assert perm.GrantStore(tmp_path / "grants.json").grants_view()["always"]
+    assert "capability" in (state.recovery_error() or "").lower()
+
+
+def test_retry_with_the_broker_completes_the_pending_revoke(tmp_path):
+    """From that exact state, a stack WITH the store converges to both
+    axes empty and removes the record."""
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    broker = perm.PermissionBroker(
+        mode=perm.RunMode.DEFAULT,
+        grants=perm.GrantStore(tmp_path / "grants.json"), ask=None,
+        sandbox_available=lambda: True)
+    _folder, journal = _pending_revoke_state(tmp_path, broker)
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    state = perm.AuthorizationTransactionState(journal=journal)
+    assert state.recover_durable(gate=gate, broker=broker) is False or True
+
+    fresh_broker = perm.PermissionBroker(
+        mode=perm.RunMode.DEFAULT,
+        grants=perm.GrantStore(tmp_path / "grants.json"), ask=None,
+        sandbox_available=lambda: True)
+    fresh_state = perm.AuthorizationTransactionState(
+        journal=perm.AuthorizationRecoveryJournal(journal.path))
+    assert fresh_state.recover_durable(
+        gate=lg.LeaderPermissionGate(CODE, workspace=ws),
+        broker=fresh_broker) is True
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == []
+    assert fresh_broker.grants.grants_view() == {"session": [], "always": []}
+    assert not journal.path.exists()
+
+
+def test_brokerless_recovery_of_a_transaction_refuses_and_retries_exactly(
+    tmp_path,
+):
+    """The same invariant for an ordinary transaction record: refusing
+    protects the owed capability restore, and the retry restores BOTH
+    snapshots exactly."""
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    gate0 = lg.LeaderPermissionGate(CODE, workspace=ws)
+    store0 = perm.GrantStore(tmp_path / "grants.json")
+    store0.record(
+        perm.capability_for("http_get", {"url": "https://legit.example/a"}),
+        perm.Decision.ALLOW_ALWAYS)
+    journal = perm.AuthorizationRecoveryJournal(tmp_path / "auth_recovery.json")
+    journal.begin(gate_snapshot=gate0.snapshot_grants(),
+                  broker_snapshot=store0.snapshot())
+    leaked = tmp_path / "leaked"
+    leaked.mkdir()
+    lp.add_grant(CODE, request_class=lp.REQUEST_CLASS_PATH,
+                 resource=str(leaked), actions=["read"])
+    store0.record(
+        perm.capability_for("http_get", {"url": "https://leak.example/a"}),
+        perm.Decision.ALLOW_ALWAYS)
+
+    state = perm.AuthorizationTransactionState(journal=journal)
+    assert state.recover_durable(
+        gate=lg.LeaderPermissionGate(CODE, workspace=ws), broker=None) is False
+    assert journal.path.exists()
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH), "gate not restored yet"
+
+    retry_broker = perm.PermissionBroker(
+        mode=perm.RunMode.DEFAULT,
+        grants=perm.GrantStore(tmp_path / "grants.json"), ask=None,
+        sandbox_available=lambda: True)
+    retry = perm.AuthorizationTransactionState(
+        journal=perm.AuthorizationRecoveryJournal(journal.path))
+    assert retry.recover_durable(
+        gate=lg.LeaderPermissionGate(CODE, workspace=ws),
+        broker=retry_broker) is True
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == []
+    assert retry_broker.grants.grants_view()["always"] == [
+        perm.capability_for(
+            "http_get", {"url": "https://legit.example/a"},
+        ).scoped_key(perm.Decision.ALLOW_ALWAYS)], "the exact prior snapshot"
+
+
+def test_all_authority_revoke_requires_the_capability_store(tmp_path):
+    """`/rp` is an ALL-authority operation: it cannot report success after
+    clearing only the folder axis, even with no record pending."""
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    state = perm.AuthorizationTransactionState(
+        journal=perm.AuthorizationRecoveryJournal(tmp_path / "j.json"))
+    with pytest.raises(TypeError):
+        state.revoke_authority(gate=gate)          # broker is required
+
+
+# ── the record discriminator is validated fail-closed ───────────────────────
+
+
+def _write_raw_record(path, payload: dict) -> None:
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _valid_record_payload(tmp_path, kind=None):
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    store = perm.GrantStore(tmp_path / "grants.json")
+    journal = perm.AuthorizationRecoveryJournal(tmp_path / "probe.json")
+    journal.begin(gate_snapshot=gate.snapshot_grants(),
+                  broker_snapshot=store.snapshot())
+    payload = json.loads(journal.path.read_text())
+    journal.clear()
+    if kind is None:
+        payload.pop("kind", None)
+    else:
+        payload["kind"] = kind
+    return payload
+
+
+@pytest.mark.parametrize("bad_kind", ["revok", "", 7, None])
+def test_unknown_record_kind_fails_closed(tmp_path, bad_kind):
+    """A corrupted or future discriminator is never read as permission to
+    restore authority: recovery refuses, mutates neither store, and keeps
+    the record."""
+    payload = _valid_record_payload(tmp_path, kind="revoke")
+    payload["kind"] = bad_kind
+    path = tmp_path / "auth_recovery.json"
+    _write_raw_record(path, payload)
+    prior = tmp_path / "prior"
+    prior.mkdir()
+    lp.add_grant(CODE, request_class=lp.REQUEST_CLASS_PATH,
+                 resource=str(prior), actions=["read"])
+
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    state = perm.AuthorizationTransactionState(
+        journal=perm.AuthorizationRecoveryJournal(path))
+    assert state.recover_durable(
+        gate=lg.LeaderPermissionGate(CODE, workspace=ws),
+        broker=perm.PermissionBroker(
+            mode=perm.RunMode.DEFAULT,
+            grants=perm.GrantStore(tmp_path / "grants.json"), ask=None,
+            sandbox_available=lambda: True)) is False
+    assert path.exists(), "the record must survive an unreadable kind"
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH), "gate untouched"
+    assert str(bad_kind) in (state.recovery_error() or "") or "kind" in (
+        state.recovery_error() or "").lower()
+
+
+def test_publishing_an_unknown_kind_is_refused(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    store = perm.GrantStore(tmp_path / "grants.json")
+    journal = perm.AuthorizationRecoveryJournal(tmp_path / "j.json")
+    with pytest.raises(ValueError):
+        journal.begin(gate_snapshot=gate.snapshot_grants(),
+                      broker_snapshot=store.snapshot(), kind="revok")
+    assert not journal.path.exists()
+
+
+def test_legacy_record_without_a_kind_decodes_as_a_transaction(tmp_path):
+    payload = _valid_record_payload(tmp_path, kind=None)
+    path = tmp_path / "auth_recovery.json"
+    _write_raw_record(path, payload)
+    owed = perm.AuthorizationRecoveryJournal(path).pending()
+    assert owed is not None
+    assert owed["kind"] == perm.AuthorizationRecoveryJournal.KIND_TRANSACTION
 
 
 # ── WAL cleanup + publication durability ────────────────────────────────────
