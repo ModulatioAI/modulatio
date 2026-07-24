@@ -945,6 +945,295 @@ def test_explicit_null_capability_store_refuses_with_nothing_touched(
     assert "capability" in (state.recovery_error() or "").lower()
 
 
+# ── the durable authority epoch supersedes older debts ──────────────────────
+
+
+def test_forward_revoke_recovery_discards_stale_debts(tmp_path):
+    """An interrupted revoke that recovers forward must also supersede the
+    in-memory debts of the state that recovers it: reconciling them would
+    hand back exactly what the revoke cleared."""
+    coord, gate, broker, state, ws = _authority(tmp_path, _always)
+    _seed_both_axes(tmp_path, broker)
+    state.owe("gate", gate.snapshot_grants())
+    state.owe("broker", broker.grants.snapshot())
+    journal = perm.AuthorizationRecoveryJournal(tmp_path / "auth_recovery.json")
+    journal.begin(gate_snapshot=gate.snapshot_grants(),
+                  broker_snapshot=broker.grants.snapshot(),
+                  kind=journal.KIND_REVOKE)
+
+    assert state.recover_durable(gate=gate, broker=broker) is True
+    assert state.outstanding() == 0, "stale debts must not survive a revoke"
+    assert state.reconcile(gate=gate, broker=broker) is True
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == []
+    assert broker.grants.grants_view() == {"session": [], "always": []}
+
+
+def test_another_instances_revoke_discards_this_states_debts(tmp_path):
+    """Cross-instance: instance A holds debts, instance B revokes. A's next
+    reconcile must DISCARD them — the durable epoch is the only evidence A
+    has that its snapshots lost the ordering race."""
+    coord_a, gate_a, broker_a, state_a, ws = _authority(tmp_path, _always)
+    _seed_both_axes(tmp_path, broker_a)
+    state_a.owe("gate", gate_a.snapshot_grants())
+    state_a.owe("broker", broker_a.grants.snapshot())
+
+    coord_b, gate_b, broker_b, state_b, _ws = _authority(tmp_path, _always)
+    assert state_b.revoke_authority(gate=gate_b, broker=broker_b) is True
+
+    assert state_a.reconcile(gate=gate_a, broker=broker_a) is True
+    assert state_a.outstanding() == 0
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == []
+    assert perm.GrantStore(tmp_path / "grants.json").grants_view() == {
+        "session": [], "always": []}
+
+
+_EPOCH_CHILD = """
+import sys
+from pathlib import Path
+sys.path.insert(0, {src!r})
+from modulatio import leader_gate as lg, permissions as perm, vault
+vault.VAULT_ROOT = Path({vault!r})
+gate = lg.LeaderPermissionGate({code!r}, workspace=Path({ws!r}))
+broker = perm.PermissionBroker(
+    mode=perm.RunMode.DEFAULT, grants=perm.GrantStore(Path({grants!r})),
+    ask=None, sandbox_available=lambda: True)
+journal = perm.AuthorizationRecoveryJournal(Path({journal!r}))
+state = perm.AuthorizationTransactionState(journal=journal)
+ok = state.revoke_authority(gate=gate, broker=broker)
+print("REVOKED" if ok else "FAILED", flush=True)
+"""
+
+
+def test_debts_from_before_another_processes_revoke_are_discarded(tmp_path):
+    """The same rule across a process boundary, with the durable epoch as
+    the only channel between them."""
+    coord, gate, broker, state, ws = _authority(tmp_path, _always)
+    _seed_both_axes(tmp_path, broker)
+    state.owe("gate", gate.snapshot_grants())
+    state.owe("broker", broker.grants.snapshot())
+
+    src = str(Path(__file__).resolve().parents[1] / "src")
+    child = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(_EPOCH_CHILD).format(
+            src=src, vault=str(tmp_path), code=CODE, ws=str(ws),
+            grants=str(tmp_path / "grants.json"),
+            journal=str(tmp_path / "auth_recovery.json"))],
+        capture_output=True, text=True, timeout=60)
+    assert "REVOKED" in child.stdout, child.stderr
+
+    assert state.reconcile(gate=gate, broker=broker) is True
+    assert state.outstanding() == 0
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == []
+
+
+# ── one readiness preflight in front of every authority consumer ────────────
+
+
+def test_live_caches_refresh_when_another_instance_revokes(tmp_path):
+    """Two live stacks over one project: B revokes; A's OWN cached
+    session/once grants and remembered capabilities must not keep
+    authorizing — the advanced epoch invalidates them without rebuilding
+    A."""
+    coord_a, gate_a, broker_a, state_a, ws = _authority(tmp_path, _always)
+    folder = _seed_both_axes(tmp_path, broker_a)
+    gate_a._session.setdefault("path", []).append(
+        {"resource": str(folder), "actions": ["read", "edit", "write"]})
+    gate_a._once.setdefault("path", []).append(str(folder))
+    broker_a.grants.record(
+        perm.capability_for("run_shell", {"cmd": "ls"}),
+        perm.Decision.ALLOW_SESSION)
+
+    coord_b, gate_b, broker_b, state_b, _ws = _authority(tmp_path, _always)
+    assert state_b.revoke_authority(gate=gate_b, broker=broker_b) is True
+
+    # WITHOUT rebuilding A: its readiness preflight observes the new epoch.
+    assert state_a.ensure_authority_ready(gate=gate_a, broker=broker_a) is True
+    assert gate_a._session == {} and gate_a._once == {}
+    assert broker_a.grants.grants_view() == {"session": [], "always": []}
+
+
+def test_broker_only_path_denies_under_a_pending_record(tmp_path):
+    """A raw capability check — the runner's broker arm, with no
+    coordinator in front of it — must not authorize while a recovery
+    record is pending."""
+    coord, gate, broker, state, ws = _authority(tmp_path, _always)
+    broker.grants.record(
+        perm.capability_for("http_get", {"url": "https://weather.gov/x"}),
+        perm.Decision.ALLOW_ALWAYS)
+    broker.bind_authority_readiness(
+        lambda: state.ensure_authority_ready(gate=gate, broker=broker))
+    assert broker.authorize("http_get", {"url": "https://weather.gov/x"}) is True
+
+    journal = perm.AuthorizationRecoveryJournal(tmp_path / "auth_recovery.json")
+    journal.begin(gate_snapshot=gate.snapshot_grants(),
+                  broker_snapshot=broker.grants.snapshot(),
+                  kind=journal.KIND_REVOKE)
+    # A pending revoke binds this path too: it recovers forward (clearing
+    # the grant) rather than serving the authority it was meant to remove.
+    assert broker.authorize(
+        "http_get", {"url": "https://weather.gov/x"}) is False
+
+
+def test_live_roots_refresh_before_enumeration(tmp_path):
+    """The tools' confinement fence reads the gate's granted roots
+    directly; that read must observe a revoke performed elsewhere."""
+    coord_a, gate_a, broker_a, state_a, ws = _authority(tmp_path, _always)
+    folder = _seed_both_axes(tmp_path, broker_a)
+    gate_a.bind_authority_readiness(
+        lambda: state_a.ensure_authority_ready(gate=gate_a, broker=broker_a))
+    assert str(folder) in gate_a.granted_roots()
+
+    coord_b, gate_b, broker_b, state_b, _ws = _authority(tmp_path, _always)
+    assert state_b.revoke_authority(gate=gate_b, broker=broker_b) is True
+
+    assert gate_a.granted_roots() == [], (
+        "the live fence must not keep enumerating revoked roots")
+
+
+def test_broker_only_path_denies_with_outstanding_debt(tmp_path):
+    coord, gate, broker, state, ws = _authority(tmp_path, _always)
+    broker.grants.record(
+        perm.capability_for("http_get", {"url": "https://weather.gov/x"}),
+        perm.Decision.ALLOW_ALWAYS)
+    broker.bind_authority_readiness(
+        lambda: state.ensure_authority_ready(gate=gate, broker=broker))
+    state.owe("gate", gate.snapshot_grants())
+    # An owed restore that cannot be discharged holds every consumer.
+    gate.restore_grants = lambda snap: (_ for _ in ()).throw(  # type: ignore
+        OSError("gate store broken"))
+    assert broker.authorize(
+        "http_get", {"url": "https://weather.gov/x"}) is False
+
+
+def test_capability_card_refreshes_to_the_revoked_epoch(tmp_path, monkeypatch):
+    """A live card must not render authority another instance revoked."""
+    from modulatio.orchestration import Orchestrator
+    from modulatio.types import Project
+
+    project = Project(
+        code=CODE, name="rp", objective="obj", leader_model="stub",
+        wiki_path=str(tmp_path / CODE.lower()))
+    runner = lambda prompt: "stub"  # noqa: E731 — test stub
+    orch = Orchestrator(project, runners=dict.fromkeys(
+        ("leader", "planner", "drafter", "qc"), runner))
+    folder = _seed_both_axes(
+        tmp_path, orch._build_permission_broker(perm.RunMode.DEFAULT, None))
+    orch.leader_gate()._session.setdefault("path", []).append(
+        {"resource": str(folder), "actions": ["read"]})
+    assert str(folder) in "\n".join(orch.capability_card())
+
+    # Another stack over the same project revokes.
+    other_gate = lg.LeaderPermissionGate(
+        CODE, workspace=orch._leader_workspace())
+    other_broker = perm.PermissionBroker(
+        mode=perm.RunMode.DEFAULT,
+        grants=perm.GrantStore(orch._permission_grants()._persist_path),
+        ask=None, sandbox_available=lambda: True)
+    other_state = perm.AuthorizationTransactionState(
+        journal=perm.AuthorizationRecoveryJournal(
+            orch._authorization_transaction_state().journal.path))
+    assert other_state.revoke_authority(
+        gate=other_gate, broker=other_broker) is True
+
+    assert str(folder) not in "\n".join(orch.capability_card())
+
+
+# ── revocation needs a project, not a conversation ──────────────────────────
+
+
+def test_project_revocation_service_clears_stores_without_a_conversation(
+    tmp_path, monkeypatch,
+):
+    """Durable grants outlive the process that made them, so revoking must
+    not require a live conversation or a configured model."""
+    coord, gate, broker, state, ws = _authority(tmp_path, _always)
+    _seed_both_axes(tmp_path, broker)
+
+    ok, message = perm.revoke_project_authority(CODE)
+    assert ok is True and "revoked" in message.lower()
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == []
+    assert perm.GrantStore(
+        perm.project_capability_store_path(CODE)).grants_view() == {
+        "session": [], "always": []}
+
+
+def test_tui_rp_revokes_without_a_conversation(tmp_path, monkeypatch):
+    """`/rp` before any conversation must revoke the project's durable
+    authority, not report that there is nothing to revoke."""
+    from modulatio import config, setup_state
+    from modulatio.tui.app import ModulatioApp
+
+    cfg_dir = tmp_path / "config"
+    monkeypatch.setattr(config, "CONFIG_DIR", cfg_dir)
+    monkeypatch.setattr(config, "DEFAULTS_FILE", cfg_dir / "defaults.json")
+    monkeypatch.setattr(
+        setup_state, "SETUP_STATE_FILE", cfg_dir / "setup-state.json")
+    config.save_defaults({"vault_root": str(tmp_path)})
+    config.reload()
+    folder = tmp_path / "widened"
+    folder.mkdir()
+    lp.add_grant(CODE, request_class=lp.REQUEST_CLASS_PATH,
+                 resource=str(folder), actions=["read"])
+    store = perm.GrantStore(perm.project_capability_store_path(CODE))
+    store.record(
+        perm.capability_for("http_get", {"url": "https://weather.gov/x"}),
+        perm.Decision.ALLOW_ALWAYS)
+
+    app = ModulatioApp(project_code=CODE, stub=True)
+    assert getattr(app, "_conv_orch", None) is None
+    shown: list = []
+    app._set_response = lambda msg, *a, **k: shown.append(msg)  # type: ignore
+    app._apply_side_effect("leader_revoke_permissions")
+
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == []
+    assert perm.GrantStore(
+        perm.project_capability_store_path(CODE)).grants_view() == {
+        "session": [], "always": []}
+    assert shown and "revoked" in shown[0].lower()
+
+
+def test_project_revocation_reports_failure_truthfully(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        lp, "revoke_all",
+        lambda code: (_ for _ in ()).throw(OSError("store unwritable")))
+    ok, message = perm.revoke_project_authority(CODE)
+    assert ok is False
+    assert "revoke" in message.lower() and "still stand" in message.lower()
+
+
+# ── the authorization seam never raises; it denies ──────────────────────────
+
+
+def test_lock_open_failure_denies_without_escaping(tmp_path, monkeypatch):
+    """A lock-file I/O failure at transaction acquisition is a denial, not
+    an exception out of the boolean permission seam."""
+    prompts: list = []
+
+    def prompt_fn(req):
+        prompts.append(req)
+        return _always(req)
+
+    coord, gate, broker, state, ws = _authority(tmp_path, prompt_fn)
+    outside = tmp_path / "mu"
+    outside.mkdir()
+    (outside / "m.txt").write_text("m")
+
+    real_open = os.open
+    lock_name = str(tmp_path / "auth_recovery.json.lock")
+
+    def _lock_open_fails(path, *a, **kw):
+        if str(path) == lock_name:
+            raise PermissionError("lock open denied")
+        return real_open(path, *a, **kw)
+
+    monkeypatch.setattr(os, "open", _lock_open_fails)
+    assert coord("read_file", {"path": str(outside / "m.txt")}) is False
+    monkeypatch.undo()
+    assert all(g["resource"] != str(outside)
+               for g in lp.load_grants(CODE, lp.REQUEST_CLASS_PATH)), (
+        "a denied call must record nothing")
+
+
 # ── the record discriminator is validated fail-closed ───────────────────────
 
 

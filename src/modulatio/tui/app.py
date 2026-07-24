@@ -1262,9 +1262,16 @@ class ModulatioApp(App):
         back to the workspace floor. No-op if no conversation exists yet."""
         orch = getattr(self, "_conv_orch", None)
         if orch is None:
-            self._set_response(
-                "No live conversation yet — there are no Leader grants to "
-                "revoke.")
+            # ALWAYS-scoped authority outlives the process that granted it,
+            # so revocation needs the PROJECT, not a live conversation.
+            from modulatio import permissions as _perm
+            code = getattr(self, "project_code", None)
+            if not code:
+                self._set_response(
+                    "No active project — there is nothing to revoke.")
+                return
+            _ok, message = _perm.revoke_project_authority(code)
+            self._set_response(message)
             return
         # ONE engine seam owns the serialized revocation (superseding any
         # older recovery record); the surface only renders its answer, so

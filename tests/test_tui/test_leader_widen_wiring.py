@@ -4,8 +4,8 @@ gate prompt_fn, and the /rp + /work side-effects reach the gate.
 
 These test the GLUE (the gate/modal/bridge are covered elsewhere): that
 ``_apply_side_effect`` routes the two Leader side-effects, that ``/rp`` calls
-``revoke_all`` on the conversation orchestrator's gate, and that the converse
-worker hands ``orch.converse`` a ``prompt_fn``.
+the engine's all-authority revocation seam and renders its result verbatim,
+and that the converse worker hands ``orch.converse`` a ``prompt_fn``.
 """
 from __future__ import annotations
 
@@ -90,12 +90,14 @@ def test_rp_side_effect_reports_a_failed_revoke(monkeypatch):
 
 
 def test_rp_side_effect_safe_with_no_orchestrator(monkeypatch):
-    """`/rp` before any conversation must not crash (nothing to revoke)."""
+    """`/rp` before any conversation revokes the PROJECT's durable
+    authority — grants outlive the process that made them — so the surface
+    reports the service's result, never a no-target claim."""
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     shown: list = []
     monkeypatch.setattr(app, "_set_response", lambda msg, *a, **k: shown.append(msg))
     app._apply_side_effect("leader_revoke_permissions")  # must not raise
-    assert shown and "No live conversation" in shown[0]
+    assert shown and "revoked" in shown[0].lower()
 
 
 def test_work_here_missing_path_is_reported(monkeypatch):

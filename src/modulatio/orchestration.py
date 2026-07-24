@@ -7031,15 +7031,35 @@ class Orchestrator:
         cached = getattr(self, "_auth_txn_state_cache", None)
         if cached is None:
             from modulatio import permissions as _perm
-            from modulatio import vault as _vault
             # Backed by a project-scoped WAL: path grants are durable
             # project files, so a failed rollback must be recoverable by a
             # LATER PROCESS too, not only by this instance's memory.
             cached = _perm.AuthorizationTransactionState(
                 journal=_perm.AuthorizationRecoveryJournal(
-                    _vault.project_dir(self.project.code)
-                    / "authorization_recovery.json"))
+                    _perm.project_recovery_journal_path(self.project.code)))
             self._auth_txn_state_cache = cached
+        return cached
+
+    def _authority_ready(self, *, broker=None) -> bool:
+        """Run the project's authority-readiness preflight for any consumer
+        on this Orchestrator. Recovery completes or refuses, stale debt is
+        discarded, and live caches expire when another instance advanced
+        the epoch — so no consumer serves authority that has already been
+        superseded."""
+        return self._authorization_transaction_state().ensure_authority_ready(
+            gate=self.leader_gate(),
+            broker=broker if broker is not None else self._authority_broker())
+
+    def _authority_broker(self):
+        """The capability store's broker for readiness/revocation work —
+        cached so the preflight never builds a fresh wrapper mid-check."""
+        cached = getattr(self, "_authority_broker_cache", None)
+        if cached is None:
+            from modulatio import permissions as _perm
+            cached = _perm.PermissionBroker(
+                mode=self._session_mode, grants=self._permission_grants(),
+                ask=None, sandbox_available=lambda: True)
+            self._authority_broker_cache = cached
         return cached
 
     def revoke_leader_permissions(self) -> "tuple[bool, str]":
@@ -7050,8 +7070,7 @@ class Orchestrator:
         Transaction and recovery assembly stay inside the engine."""
         state = self._authorization_transaction_state()
         ok = state.revoke_authority(
-            gate=self.leader_gate(), broker=self._build_permission_broker(
-                self._session_mode, None))
+            gate=self.leader_gate(), broker=self._authority_broker())
         if ok:
             return True, (
                 "All Leader permissions revoked — back to the workspace "
@@ -7078,10 +7097,9 @@ class Orchestrator:
         grants; the two never collide)."""
         cached = getattr(self, "_perm_grants_cache", None)
         if cached is None:
-            from modulatio import permissions as _perm, vault as _vault
+            from modulatio import permissions as _perm
             cached = _perm.GrantStore(
-                _vault.project_dir(self.project.code) / "permissions.json"
-            )
+                _perm.project_capability_store_path(self.project.code))
             self._perm_grants_cache = cached
         return cached
 
@@ -7092,7 +7110,7 @@ class Orchestrator:
         (filesystem axis) as a separate deny-chain arm in the runner — it never
         touches the folder fence (the gate-reconcile invariant)."""
         from modulatio import permissions as _perm, sandbox as _sandbox
-        return _perm.PermissionBroker(
+        broker = _perm.PermissionBroker(
             mode=mode,
             grants=self._permission_grants(),
             ask=ask,
@@ -7102,6 +7120,12 @@ class Orchestrator:
             ),
             on_decision=self._audit_permission_decision,
         )
+        # Every authority consumer runs ONE readiness preflight — including
+        # this broker when it is dispatched without a coordinator in front
+        # of it.
+        broker.bind_authority_readiness(
+            lambda: self._authority_ready(broker=broker))
+        return broker
 
     def _audit_permission_decision(self, cap, decision) -> None:
         """Best-effort audit of a broker grant/deny to the activity stream. The
@@ -8942,6 +8966,9 @@ class Orchestrator:
         from modulatio import sandbox as _sandbox
 
         gate = self.leader_gate()
+        # The card is an authority consumer too: never render grants a
+        # revoke or a pending recovery has already invalidated.
+        self._authority_ready()
         broker_view = self._permission_grants().grants_view()
         corrupt: list = []
         folders = tuple(_config.list_folders(on_corrupt=corrupt.append))
@@ -9075,6 +9102,7 @@ class Orchestrator:
                 self.project.code, workspace=self._leader_workspace(),
                 standing_roots=self._harness_roots(),
             )
+            cached.bind_authority_readiness(self._authority_ready)
             self._leader_gate_cache = cached
         return cached
 

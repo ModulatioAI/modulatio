@@ -387,6 +387,46 @@ def _fsync_dir_strict(path: "Path") -> None:
         os.close(dir_fd)
 
 
+def project_capability_store_path(project_code: str) -> "Path":
+    """The project's durable capability store."""
+    from modulatio import vault as _vault
+    return _vault.project_dir(project_code) / "permissions.json"
+
+
+def project_recovery_journal_path(project_code: str) -> "Path":
+    """The project's authority recovery record (and, beside it, the lock
+    and the durable authority epoch)."""
+    from modulatio import vault as _vault
+    return _vault.project_dir(project_code) / "authorization_recovery.json"
+
+
+def revoke_project_authority(project_code: str) -> "tuple[bool, str]":
+    """Revoke every Leader authority for a PROJECT — both the folder
+    grants and the remembered capabilities.
+
+    Needs only the project code: ALWAYS-scoped authority outlives the
+    process that granted it, so revoking it must not depend on a live
+    conversation or a configured model. Returns ``(ok, message)``; a
+    failure names which authority may still stand."""
+    from modulatio import leader_gate as _lg
+    from modulatio.orchestration import leader_workspace_path
+
+    journal = AuthorizationRecoveryJournal(
+        project_recovery_journal_path(project_code))
+    state = AuthorizationTransactionState(journal=journal)
+    gate = _lg.LeaderPermissionGate(
+        project_code, workspace=leader_workspace_path(project_code))
+    broker = PermissionBroker(
+        mode=RunMode.DEFAULT,
+        grants=GrantStore(project_capability_store_path(project_code)),
+        ask=None, sandbox_available=lambda: True)
+    if state.revoke_authority(gate=gate, broker=broker):
+        return True, (
+            "All Leader permissions revoked — back to the workspace floor.")
+    return False, (
+        f"Revoke did NOT complete. {state.recovery_error() or ''}".strip())
+
+
 class AuthorizationRecoveryError(RuntimeError):
     """The durable authorization-recovery record could not be read or
     trusted. Authorization fails closed until an operator resolves it —
@@ -412,6 +452,7 @@ class AuthorizationRecoveryJournal:
     def __init__(self, path: "Path | str", *, lock_timeout: float = 10.0) -> None:
         self.path = Path(path)
         self._lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        self._epoch_path = self.path.with_suffix(self.path.suffix + ".epoch")
         #: How long to wait for another instance's transaction before
         #: refusing. Waiting is correct — the other instance may be
         #: committing — but the wait is bounded so a wedged holder denies
@@ -484,39 +525,10 @@ class AuthorizationRecoveryJournal:
             "gate": self._encode_gate(gate_snapshot),
             "broker": self._encode_broker(broker_snapshot),
         }, indent=2).encode("utf-8")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        # A UNIQUE, exclusively-created temp: a predictable name reopened
-        # with O_TRUNC lets a pre-planted file or symlink capture the
-        # write. O_EXCL refuses to follow or reuse anything already there.
-        fd, tmp_name = tempfile.mkstemp(
-            dir=str(self.path.parent), prefix=self.path.name + ".",
-            suffix=".tmp")
-        tmp = Path(tmp_name)
-        try:
-            # Own the descriptor mkstemp handed us — reopening the name
-            # would leak this one and re-race the path.
-            os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "wb") as fh:
-                fd = -1                      # fdopen owns it now
-                fh.write(payload)
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp, self.path)
-            # The directory entry must be durable BEFORE the first
-            # authority mutation — otherwise a power loss can lose the WAL
-            # while keeping the grant it was meant to roll back.
-            _fsync_dir_strict(self.path.parent)
-        except BaseException:
-            if fd >= 0:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-            try:
-                tmp.unlink()
-            except FileNotFoundError:
-                pass
-            raise
+        # The record must be durable BEFORE the first authority mutation —
+        # a power loss that keeps the grant but loses the record defeats
+        # the whole point of writing one.
+        self._publish(self.path, payload)
 
     def pending(self) -> "dict | None":
         """The owed snapshots, or None when nothing is outstanding. A
@@ -566,6 +578,63 @@ class AuthorizationRecoveryJournal:
                 f"an operator removes or repairs it"
             ) from exc
 
+    def _publish(self, path: "Path", payload: bytes) -> None:
+        """Publish ``payload`` to ``path`` durably: a UNIQUE exclusively
+        created 0600 temp (a predictable name reopened with O_TRUNC lets a
+        planted file or symlink capture the write), fsynced, atomically
+        replaced, then the directory entry fsynced STRICTLY — an authority
+        record whose directory entry is not durable is exactly the loss
+        this file exists to prevent."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+        tmp = Path(tmp_name)
+        try:
+            # Own the descriptor mkstemp handed us — reopening the name
+            # would leak this one and re-race the path.
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                fd = -1                      # fdopen owns it now
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+            _fsync_dir_strict(path.parent)
+        except BaseException:
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+
+    def read_epoch(self) -> int:
+        """The project's durable AUTHORITY EPOCH. It advances whenever a
+        revoke supersedes the authority, and it is the only evidence a
+        separate state (or process) has that the snapshot it holds lost
+        the ordering race. An unreadable counter fails closed."""
+        try:
+            return int(self._epoch_path.read_text(encoding="utf-8").strip())
+        except FileNotFoundError:
+            return 0
+        except (OSError, ValueError) as exc:
+            raise AuthorizationRecoveryError(
+                f"the authority epoch at {self._epoch_path} is unreadable "
+                f"({type(exc).__name__}: {exc}) — authorization is refused "
+                f"until an operator restores or removes it") from exc
+
+    def advance_epoch(self) -> int:
+        """Publish the next epoch durably. Raises when it cannot be made
+        durable — an unadvanced epoch would let another state's older
+        debts look current."""
+        nxt = self.read_epoch() + 1
+        self._publish(self._epoch_path, f"{nxt}\n".encode("utf-8"))
+        return nxt
+
     def clear(self) -> None:
         """Drop the record and make the REMOVAL durable — a commit is not
         complete until the WAL entry is gone from the directory."""
@@ -580,8 +649,16 @@ class AuthorizationRecoveryJournal:
         """Exclusive project-scoped transaction window. A second process
         waits up to ``timeout`` and then raises, so an instance can never
         authorize underneath another's half-applied transaction."""
-        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(self._lock_path), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(self._lock_path), os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError as exc:
+            # The transaction lock is unusable: the caller must DENY, and
+            # a boolean authorization seam must never see an exception.
+            raise AuthorizationRecoveryError(
+                f"the authorization transaction lock {self._lock_path} "
+                f"could not be opened ({type(exc).__name__}: {exc}) — "
+                f"authorization is refused") from exc
         deadline = time.monotonic() + (
             self.lock_timeout if timeout is None else timeout)
         try:
@@ -622,6 +699,13 @@ class AuthorizationTransactionState:
         #: journal covers restart and every other instance.
         self.journal = journal
         self._recovery_error: "str | None" = None
+        #: The epoch this state has already reconciled its live caches to.
+        #: Starts at the current durable value: a fresh state's objects
+        #: are built from disk and owe no invalidation.
+        try:
+            self._observed_epoch = 0 if journal is None else journal.read_epoch()
+        except AuthorizationRecoveryError:
+            self._observed_epoch = -1
 
     def recovery_error(self) -> "str | None":
         """Operator-facing reason authorization is refused, when a durable
@@ -743,7 +827,19 @@ class AuthorizationTransactionState:
                 f"the folder grants could not be revoked "
                 f"({type(exc).__name__}: {exc}) — they still stand; the "
                 f"capability grants were cleared") from exc
-        # 4: the intent is discharged.
+        # 4: the authority epoch advances — the durable evidence that
+        # every snapshot taken before this revoke is stale, for this state
+        # and for any other live instance or process.
+        if self.journal is not None:
+            try:
+                self.journal.advance_epoch()
+            except Exception as exc:  # noqa: BLE001
+                raise AuthorizationRecoveryError(
+                    f"both stores WERE cleared, but the authority epoch "
+                    f"could not be advanced ({type(exc).__name__}: {exc}) — "
+                    f"another instance's older grants could be restored; "
+                    f"retry the revoke") from exc
+        # 5: the intent is discharged.
         if self.journal is not None:
             try:
                 self.journal.clear()
@@ -754,20 +850,55 @@ class AuthorizationTransactionState:
                     f"({type(exc).__name__}: {exc}) — recovery will finish "
                     f"the revoke; remove the file once you have verified "
                     f"the project's permission files") from exc
-        # 5: no older debt may restore what was just revoked.
+        # 6: every debt this state holds predates the revoke, so none of
+        # them may restore what it just cleared. (The advanced epoch says
+        # the same thing to every OTHER live state.)
         with self._lock:
-            self._debts = [
-                d for d in self._debts if d[0] not in ("gate", "broker")]
+            self._debts.clear()
 
     def owe(self, kind: str, snapshot) -> None:
         """Record a restore that FAILED — its exact pre-transaction
-        snapshot is still owed to the store."""
+        snapshot is still owed to the store. The debt is TAGGED with the
+        authority epoch it belongs to: a revoke advances that epoch, so a
+        debt from before it is provably stale and must be discarded
+        rather than restored."""
+        try:
+            epoch = 0 if self.journal is None else self.journal.read_epoch()
+        except AuthorizationRecoveryError:
+            epoch = -1        # unknown epoch: never treated as current
         with self._lock:
-            self._debts.append((kind, snapshot))
+            self._debts.append((kind, snapshot, epoch))
 
     def outstanding(self) -> int:
         with self._lock:
             return len(self._debts)
+
+    def ensure_authority_ready(self, *, gate, broker) -> bool:
+        """THE readiness invariant every authority consumer runs before it
+        reads or grants authority.
+
+        Completes or refuses pending durable recovery, discharges or
+        discards in-memory debt, and — when the durable epoch has advanced
+        since this state last looked — invalidates the LIVE caches that no
+        disk reload would fix: the gate's in-memory session/once grants and
+        the store's remembered session capabilities. Memory-only authority
+        held by one instance is exactly what survives another instance's
+        revoke, so the epoch is what expires it.
+
+        False means the caller must deny."""
+        if not self.recover_durable(gate=gate, broker=broker):
+            return False
+        try:
+            current = 0 if self.journal is None else self.journal.read_epoch()
+        except AuthorizationRecoveryError as exc:
+            self._recovery_error = str(exc)
+            return False
+        if current != self._observed_epoch:
+            gate.forget_live_grants()
+            if broker is not None:
+                broker.grants.forget_live_grants()
+            self._observed_epoch = current
+        return self.reconcile(gate=gate, broker=broker)
 
     def recover_durable(self, *, gate, broker) -> bool:
         """Replay any journaled transaction — the restart/second-instance
@@ -801,10 +932,14 @@ class AuthorizationTransactionState:
                     # An interrupted revoke recovers FORWARD: finish
                     # clearing both stores. Replaying the recorded
                     # snapshots would hand back exactly what the operator
-                    # revoked.
+                    # revoked — and so would any debt this state still
+                    # holds, since every one of them predates the revoke.
                     if broker is not None:
                         broker.grants.revoke_all()
                     gate.revoke_all()
+                    self.journal.advance_epoch()
+                    with self._lock:
+                        self._debts.clear()
                 else:
                     gate.restore_grants(owed["gate"])
                     if broker is not None and owed["broker"] is not None:
@@ -826,9 +961,20 @@ class AuthorizationTransactionState:
         are verified clean (nothing owed); False while any debt stands —
         the caller must deny. Restoring the captured SNAPSHOT preserves
         pre-existing authority exactly; it is never a blind revoke."""
+        try:
+            current = 0 if self.journal is None else self.journal.read_epoch()
+        except AuthorizationRecoveryError as exc:
+            self._recovery_error = str(exc)
+            return False
         with self._lock:
             while self._debts:
-                kind, snap = self._debts[-1]
+                kind, snap, epoch = self._debts[-1]
+                if epoch != current:
+                    # The authority was superseded after this snapshot was
+                    # taken (a revoke advanced the epoch): restoring it
+                    # would hand back what the operator revoked. Discard.
+                    self._debts.pop()
+                    continue
                 try:
                     if kind == "gate":
                         gate.restore_grants(snap)
@@ -1224,6 +1370,15 @@ class GrantStore:
         except FileNotFoundError:
             return session, always, ("absent",)
 
+    def forget_live_grants(self) -> None:
+        """Drop this instance's MEMORY-ONLY authority and re-read the
+        durable set from disk. Used when the authority epoch advanced
+        under a live instance: its remembered session capabilities are not
+        on disk, so no reload alone would expire them."""
+        with self._lock:
+            self._session.clear()
+        self._always = self._load()
+
     def revoke_all(self) -> None:
         """Drop EVERY remembered capability — session and durable — and
         publish the emptied store durably. Raises on any write/sync
@@ -1299,9 +1454,20 @@ class PermissionBroker:
         sandbox-requiring capability run open, record a grant, or escalate an audit.
         Belt-and-braces with the runner's compose-seam wrapper."""
         try:
+            # The readiness preflight binds THIS path too: a broker-only
+            # dispatch (no coordinator in front) must not serve authority
+            # a pending recovery or an advanced epoch has invalidated.
+            readiness = getattr(self, "_readiness", None)
+            if readiness is not None and not readiness():
+                return False
             return self._authorize_inner(tool_name, args)
         except Exception:
             return False
+
+    def bind_authority_readiness(self, readiness) -> None:
+        """Bind the engine's authority-readiness preflight (see
+        ``AuthorizationTransactionState.ensure_authority_ready``)."""
+        self._readiness = readiness
 
     def _authorize_inner(self, tool_name: str, args: "dict | None" = None) -> bool:
         state, cap = self.resolve_capability(tool_name, args)

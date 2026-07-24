@@ -195,7 +195,14 @@ class LeaderPermissionGate:
     def granted_roots(self, request_class: str = lp.REQUEST_CLASS_PATH) -> list[str]:
         """The granted resources for a class (persisted + session + the
         current tool call's ONCE grants) — the ``extra_roots`` the Leader's
-        tool registry confines to, beyond the workspace."""
+        tool registry confines to, beyond the workspace.
+
+        Runs the authority-readiness preflight first when one is bound: a
+        fence must never enumerate roots a revoke or a pending recovery
+        has already invalidated. An unready authority enumerates NOTHING —
+        the workspace floor still applies."""
+        if not self._ready():
+            return []
         return ([g["resource"] for g in self._grants(request_class)]
                 + list(self._once.get(request_class, ())))
 
@@ -300,6 +307,25 @@ class LeaderPermissionGate:
             # the single approved call (begin_tool_call expires it).
             self._once.setdefault(request.request_class, []).append(root)
         return decision
+
+    def forget_live_grants(self) -> None:
+        """Drop this instance's MEMORY-ONLY grants (session + once). The
+        durable store is re-read on every check, so it needs no reload;
+        these two do — they exist nowhere else and would otherwise outlive
+        a revoke performed by another instance."""
+        self._session.clear()
+        self._once.clear()
+
+    def bind_authority_readiness(self, readiness) -> None:
+        """Bind the engine's authority-readiness preflight. Every read of
+        this gate's granted roots runs it first, so a fence built from
+        those roots can never enumerate authority a revoke or a pending
+        recovery has already invalidated."""
+        self._readiness = readiness
+
+    def _ready(self) -> bool:
+        readiness = getattr(self, "_readiness", None)
+        return True if readiness is None else bool(readiness())
 
     def revoke_all(self) -> None:
         """The ``/rp`` escape hatch: clear persisted grants (every class) AND the
