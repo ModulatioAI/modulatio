@@ -1,12 +1,17 @@
 # Designated Linux gate — black-box substrate tier
 
-host: Linux 7.0.0-28-generic x86_64
-kernel.unprivileged_userns_clone: 1
-bwrap: /usr/bin/bwrap (bubblewrap 0.9.0)
-prerequisite probe: PASS (bwrap confines: namespace probe rc 0)
-commit: 320c4c5e2d1aaafae974225d2e842a0d94d49eb0 (code under test; this stamp lands in the follow-up commit)
-date-utc: 2026-07-24T20:59:24Z
+## Provenance (captured BEFORE the run, from the clean commit under test)
+git rev-parse HEAD : c488ba4a4b769fa80fe5d256a162a80b3dd60b4c
+git status --porcelain: <empty — clean worktree>
+run-started-utc     : 2026-07-24T21:16:04Z
 
+## Host
+uname -srm: Linux 7.0.0-28-generic x86_64
+kernel.unprivileged_userns_clone: 1
+bwrap: /usr/bin/bwrap — bubblewrap 0.9.0
+prerequisite probe (bwrap --unshare-all --die-with-parent --ro-bind / / true): PASS (rc 0 — bwrap confines)
+
+## Six-test tier
 ```
 ============================= test session starts ==============================
 platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0 -- /home/cknox/modulatio/.venv/bin/python
@@ -24,5 +29,7 @@ tests/test_access_sandbox_blackbox.py::test_state_refused_denies_run PASSED [ 66
 tests/test_access_sandbox_blackbox.py::test_convention_import_smoke_runs_genuinely_confined PASSED [ 83%]
 tests/test_access_sandbox_blackbox.py::test_black_box_states_cover_every_substrate_descriptor PASSED [100%]
 
-============================== 6 passed in 0.61s ===============================
+============================== 6 passed in 0.47s ===============================
 ```
+
+run-finished-utc: 2026-07-24T21:16:05Z
