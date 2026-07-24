@@ -437,11 +437,10 @@ def test_plain_save_mirrors_canonical_budget_never_advances(project_with_run):
 
 
 def test_interleaved_consume_cannot_be_erased_by_merge(project_with_run):
-    """The R3-signed interrupt guarantee under concurrency: a consume that
-    lands while a monotonic merge is in flight is never overwritten — the
-    merge's read+project+write and the consume serialize on one store
-    lock. The merge's canonical read is deterministically delayed; the
-    consume must wait for it and apply on top."""
+    """A consume that lands while a monotonic merge is in flight is never
+    overwritten: the merge's read+project+write and the consume serialize
+    on one store lock. The merge's canonical read is deterministically
+    delayed; the consume must wait for it and apply on top."""
     import threading
     import time as _time
 

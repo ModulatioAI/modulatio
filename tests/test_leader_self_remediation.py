@@ -1,11 +1,10 @@
-"""#80 Leader self-remediation — the typed remediation gate.
+"""Leader self-remediation — the typed remediation gate.
 
-Slice 1: the model DECLARES a `remediation` object on the Leader-verify
-output; the engine VALIDATES it by enum membership + target identity ONLY
-(never parses prose), fails CLOSED to a named defer, and defaults an absent
-declaration on a `disappointed` verdict to the one whitelisted safe shape
-(revise-in-place on the goal's own tasks). Reviewer-signed design:
-docs/design/leader-self-remediation.md.
+The model DECLARES a `remediation` object on the Leader-verify output; the
+engine VALIDATES it by enum membership + target identity ONLY (never parses
+prose), fails CLOSED to a named defer, and defaults an absent declaration on
+a `disappointed` verdict to the one whitelisted safe shape (revise-in-place
+on the goal's own tasks).
 """
 
 from __future__ import annotations
