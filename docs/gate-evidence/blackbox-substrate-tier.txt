@@ -4,7 +4,7 @@ host: Linux 7.0.0-28-generic x86_64
 kernel.unprivileged_userns_clone: 1
 bwrap: /usr/bin/bwrap (bubblewrap 0.9.0)
 prerequisite probe: PASS (bwrap confines: namespace probe rc 0)
-commit: 9d3ba3b85c561ad59ea7014db7d4181b8884e4c9 (evidence run performed on the R6 tree)
+commit: 320c4c5e2d1aaafae974225d2e842a0d94d49eb0 (code under test; this stamp lands in the follow-up commit)
 date-utc: 2026-07-24T20:59:24Z
 
 ```
