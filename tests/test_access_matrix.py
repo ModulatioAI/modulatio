@@ -29,7 +29,11 @@ from modulatio import orchestration as _orch
 from modulatio import permissions as perm
 from modulatio import tools, vault
 
-_T0 = time.monotonic()
+#: Wall time spent INSIDE this module's tests. Measuring elapsed time
+#: since import would charge this module for every other test that ran
+#: between its import and its last test, which says nothing about whether
+#: the matrix itself is seconds-class.
+_ELAPSED = 0.0
 
 CODE = "matrix"
 
@@ -697,10 +701,19 @@ def test_parity_observable_exception_unobserved_is_caught(tmp_path):
 # ── wall-time guard (defined last: runs after every cell above) ────────────
 
 
+@pytest.fixture(autouse=True)
+def _charge_matrix_time():
+    """Accumulate each test's own duration into the module total."""
+    global _ELAPSED
+    started = time.monotonic()
+    yield
+    _ELAPSED += time.monotonic() - started
+
+
 def test_zz_matrix_stays_seconds_class():
     """The whole module — every executed cell included — must stay far from
     minute-class, or it can no longer ride the default scoped path."""
-    assert time.monotonic() - _T0 < 30.0
+    assert _ELAPSED < 30.0
 
 
 # ── the live run-time capability card (Orchestrator) ────────────────────────

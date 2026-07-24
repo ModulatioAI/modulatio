@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -1136,6 +1137,157 @@ def test_capability_card_refreshes_to_the_revoked_epoch(tmp_path, monkeypatch):
         gate=other_gate, broker=other_broker) is True
 
     assert str(folder) not in "\n".join(orch.capability_card())
+
+
+def test_production_coordinator_denies_stale_authority_after_a_revoke(
+    tmp_path,
+):
+    """The COORDINATOR itself — not the readiness helper called directly —
+    must observe another instance's revoke: it resolves grants through the
+    gate and broker directly, so it has to run the preflight that expires
+    their live caches."""
+    answers: list = []
+
+    def deny_fn(req):
+        answers.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_DENY)
+
+    coord_a, gate_a, broker_a, state_a, ws = _authority(tmp_path, deny_fn)
+    folder = _seed_both_axes(tmp_path, broker_a)
+    (folder / "f.txt").write_text("f")
+    gate_a._session.setdefault("path", []).append(
+        {"resource": str(folder), "actions": ["read", "edit", "write"]})
+    gate_a._once.setdefault("path", []).append(str(folder))
+    broker_a.grants.record(
+        perm.capability_for("http_get", {"url": "https://weather.gov/x"}),
+        perm.Decision.ALLOW_SESSION)
+
+    coord_b, gate_b, broker_b, state_b, _ws = _authority(tmp_path, _always)
+    assert state_b.revoke_authority(gate=gate_b, broker=broker_b) is True
+
+    # A's own coordinator, not rebuilt: neither axis may ride its caches.
+    assert coord_a("read_file", {"path": str(folder / "f.txt")}) is False
+    assert coord_a("http_get", {"url": "https://weather.gov/x"}) is False
+    assert gate_a._session == {} and gate_a._once == {}
+    assert broker_a.grants.grants_view() == {"session": [], "always": []}
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == [], (
+        "a denied answer records nothing")
+
+
+def test_reconcile_and_revoke_serialize_on_the_project_lock(tmp_path):
+    """A revoke landing while another state reconciles must not interleave:
+    whichever order the lock grants, the durable stores end empty, the debt
+    is gone, and no pre-revoke authority is resurrected."""
+    import threading
+
+    coord_a, gate_a, broker_a, state_a, ws = _authority(tmp_path, _always)
+    _seed_both_axes(tmp_path, broker_a)
+    state_a.owe("gate", gate_a.snapshot_grants())      # an epoch-0 debt
+
+    coord_b, gate_b, broker_b, state_b, _ws = _authority(tmp_path, _always)
+    started = threading.Event()
+    real_restore = gate_a.restore_grants
+
+    def _slow_restore(snap):
+        started.set()
+        time.sleep(0.4)          # hold the project lock across the restore
+        return real_restore(snap)
+
+    gate_a.restore_grants = _slow_restore  # type: ignore[assignment]
+    revoked: dict = {}
+
+    def _revoke():
+        started.wait(timeout=5)
+        revoked["ok"] = state_b.revoke_authority(
+            gate=gate_b, broker=broker_b)
+
+    worker = threading.Thread(target=_revoke)
+    worker.start()
+    assert state_a.reconcile(gate=gate_a, broker=broker_a) is True
+    worker.join(timeout=15)
+
+    assert revoked.get("ok") is True
+    assert state_a.outstanding() == 0
+    # Whichever order the lock granted, the DURABLE stores end empty —
+    # nothing A restored survived the revoke that followed it.
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == []
+    assert perm.GrantStore(tmp_path / "grants.json").grants_view() == {
+        "session": [], "always": []}
+    # A's own live caches expire on its next preflight (the epoch moved).
+    assert state_a.ensure_authority_ready(
+        gate=gate_a, broker=broker_a) is True
+    assert broker_a.grants.grants_view() == {"session": [], "always": []}
+
+
+def test_cleanup_failure_retains_a_usable_debt(tmp_path, monkeypatch):
+    """A reconciliation whose cleanup is not durable must retain a WELL
+    FORMED debt: the retry has to work, not raise out of the authority
+    seam."""
+    coord, gate, broker, state, ws = _authority(tmp_path, _always)
+    _seed_both_axes(tmp_path, broker)
+    state.owe("gate", gate.snapshot_grants())
+    monkeypatch.setattr(
+        perm.AuthorizationRecoveryJournal, "clear",
+        lambda self: (_ for _ in ()).throw(OSError("unlink denied")))
+
+    assert state.reconcile(gate=gate, broker=broker) is False
+    assert state.outstanding() == 1
+
+    monkeypatch.undo()
+    assert state.reconcile(gate=gate, broker=broker) is True
+    assert state.outstanding() == 0
+
+
+def test_retained_debt_is_discarded_when_the_epoch_advances(
+    tmp_path, monkeypatch,
+):
+    """The retained debt is epoch-tagged like any other: a revoke between
+    the failed cleanup and the retry discards it instead of restoring
+    pre-revoke authority."""
+    coord_a, gate_a, broker_a, state_a, ws = _authority(tmp_path, _always)
+    folder = _seed_both_axes(tmp_path, broker_a)
+    state_a.owe("gate", gate_a.snapshot_grants())
+    monkeypatch.setattr(
+        perm.AuthorizationRecoveryJournal, "clear",
+        lambda self: (_ for _ in ()).throw(OSError("unlink denied")))
+    assert state_a.reconcile(gate=gate_a, broker=broker_a) is False
+    monkeypatch.undo()
+
+    coord_b, gate_b, broker_b, state_b, _ws = _authority(tmp_path, _always)
+    assert state_b.revoke_authority(gate=gate_b, broker=broker_b) is True
+
+    assert state_a.reconcile(gate=gate_a, broker=broker_a) is True
+    assert state_a.outstanding() == 0
+    assert all(g["resource"] != str(folder)
+               for g in lp.load_grants(CODE, lp.REQUEST_CLASS_PATH))
+
+
+def test_card_refuses_while_the_authority_is_unready(tmp_path, monkeypatch):
+    """An unready authority renders NO card: the surface shows the recovery
+    reason instead of grants it cannot vouch for."""
+    from modulatio.orchestration import Orchestrator
+    from modulatio.types import Project
+
+    project = Project(
+        code=CODE, name="rp", objective="obj", leader_model="stub",
+        wiki_path=str(tmp_path / CODE.lower()))
+    runner = lambda prompt: "stub"  # noqa: E731 — test stub
+    orch = Orchestrator(project, runners=dict.fromkeys(
+        ("leader", "planner", "drafter", "qc"), runner))
+    folder = _seed_both_axes(
+        tmp_path, orch._build_permission_broker(perm.RunMode.DEFAULT, None))
+    orch.leader_gate()._session.setdefault("path", []).append(
+        {"resource": str(folder), "actions": ["read"]})
+
+    # A recovery record this stack cannot read holds the whole view.
+    perm.project_recovery_journal_path(CODE).write_text(
+        "{not valid json", encoding="utf-8")
+
+    with pytest.raises(perm.AuthorizationRecoveryError) as exc_info:
+        orch.capability_card()
+    assert "recovery" in str(exc_info.value).lower()
+    rendered = str(exc_info.value)
+    assert str(folder) not in rendered and "weather.gov" not in rendered
 
 
 # ── revocation needs a project, not a conversation ──────────────────────────

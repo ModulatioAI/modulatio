@@ -957,15 +957,27 @@ class AuthorizationTransactionState:
         return True
 
     def reconcile(self, *, gate, broker) -> bool:
-        """Retry every owed restore under the lock. True when the stores
-        are verified clean (nothing owed); False while any debt stands —
-        the caller must deny. Restoring the captured SNAPSHOT preserves
-        pre-existing authority exactly; it is never a blind revoke."""
+        """Retry every owed restore. True when the stores are verified
+        clean (nothing owed); False while any debt stands — the caller
+        must deny. Restoring the captured SNAPSHOT preserves pre-existing
+        authority exactly; it is never a blind revoke.
+
+        The whole decision — reading the epoch, dropping superseded debts,
+        restoring the rest, clearing the record — runs inside the PROJECT
+        transaction, so a revoke cannot complete between the epoch read
+        and the restore and see its revoked authority handed back."""
+        transaction = (contextlib.nullcontext() if self.journal is None
+                       else self.journal.transaction())
         try:
-            current = 0 if self.journal is None else self.journal.read_epoch()
+            with transaction:
+                return self._reconcile_locked(gate=gate, broker=broker)
         except AuthorizationRecoveryError as exc:
             self._recovery_error = str(exc)
             return False
+
+    def _reconcile_locked(self, *, gate, broker) -> bool:
+        current = 0 if self.journal is None else self.journal.read_epoch()
+        discharged: list = []
         with self._lock:
             while self._debts:
                 kind, snap, epoch = self._debts[-1]
@@ -984,14 +996,18 @@ class AuthorizationTransactionState:
                         return False  # no store to restore into: stay owed
                 except Exception:  # noqa: BLE001 — still unverified
                     return False
-                self._debts.pop()
+                discharged.append(self._debts.pop())
             if self.journal is not None:
                 try:
                     self.journal.clear()  # debts discharged: nothing owed
                 except Exception:  # noqa: BLE001 — cleanup is not durable:
-                    # keep the debt so the next call retries rather than
-                    # reporting a reconciliation that isn't recorded.
-                    self._debts.append(("gate", gate.snapshot_grants()))
+                    # keep an owed debt so the next call retries rather
+                    # than reporting a reconciliation that isn't recorded.
+                    # It carries the CURRENT epoch like any other, so a
+                    # revoke before the retry still discards it.
+                    self._debts.append(
+                        discharged[-1] if discharged
+                        else ("gate", gate.snapshot_grants(), current))
                     return False
             return True
 
@@ -1091,14 +1107,11 @@ def build_authorization_coordinator(
                 debt.owe("broker", broker_snap)
 
     def authorize(name: str, args: dict) -> bool:
-        # An unreconciled rollback means the authority stores are
-        # unverified: deny — before the once-slate resets or any silent
-        # grant resolves — until the pre-transaction snapshots restore.
-        # DURABLE debt first (a journal outlives this process and every
-        # object here), then this process's own in-memory debt.
-        if not debt.recover_durable(gate=gate, broker=broker):
-            return False
-        if debt.outstanding() and not debt.reconcile(gate=gate, broker=broker):
+        # THE readiness invariant, before the once-slate resets or any
+        # silent grant resolves. This path reads the gate and the broker
+        # directly, so it cannot rely on their own readiness hooks — it
+        # runs the same preflight every other consumer does.
+        if not debt.ensure_authority_ready(gate=gate, broker=broker):
             return False
         # A new tool call starts a fresh once-slate (same contract as
         # build_permission_callback).

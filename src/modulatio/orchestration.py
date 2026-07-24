@@ -8966,9 +8966,15 @@ class Orchestrator:
         from modulatio import sandbox as _sandbox
 
         gate = self.leader_gate()
-        # The card is an authority consumer too: never render grants a
-        # revoke or a pending recovery has already invalidated.
-        self._authority_ready()
+        # The card is an authority consumer too. An unready authority
+        # renders NOTHING: the cached dictionaries below cannot be
+        # vouched for, so the surface shows the recovery reason instead of
+        # grants that may already be revoked.
+        if not self._authority_ready():
+            from modulatio import permissions as _perm
+            raise _perm.AuthorizationRecoveryError(
+                self._authorization_transaction_state().recovery_error()
+                or "the authority view could not be verified")
         broker_view = self._permission_grants().grants_view()
         corrupt: list = []
         folders = tuple(_config.list_folders(on_corrupt=corrupt.append))
