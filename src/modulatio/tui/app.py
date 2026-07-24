@@ -1261,8 +1261,19 @@ class ModulatioApp(App):
         turn rebuilds the registry with no granted roots, so the hands snap
         back to the workspace floor. No-op if no conversation exists yet."""
         orch = getattr(self, "_conv_orch", None)
-        if orch is not None:
-            orch.leader_gate().revoke_all()
+        if orch is None:
+            self._set_response(
+                "No live conversation yet — there are no Leader grants to "
+                "revoke.")
+            return
+        # SERIALIZED with the authorization transaction: an approval that
+        # is mid-flight cannot commit or roll back over this revocation.
+        state = orch._authorization_transaction_state()
+        if not state.revoke_authority(gate=orch.leader_gate()):
+            self._set_response(
+                f"Revoke did NOT complete — the Leader's grants may still "
+                f"stand. {state.recovery_error() or ''}".strip())
+            return
         self._set_response(
             "All Leader permissions revoked — back to the workspace floor."
         )

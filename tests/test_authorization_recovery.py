@@ -308,6 +308,225 @@ def test_second_instance_cannot_authorize_during_an_open_transaction(
     assert len(prompts) == 1
 
 
+# ── the serialized authority boundary: revocation wins over stale views ─────
+
+
+def test_revocation_wins_over_a_stale_rollback(tmp_path, monkeypatch):
+    """A transaction that snapshotted BEFORE `/rp` must never restore that
+    snapshot: the operator's revocation is the latest decision, so the
+    transaction denies and the revoked grant stays gone — through a
+    fresh-process recovery too."""
+    prior = tmp_path / "prior"
+    prior.mkdir()
+    (prior / "p.txt").write_text("p")
+    lp.add_grant(CODE, request_class=lp.REQUEST_CLASS_PATH,
+                 resource=str(prior), actions=["read"])
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH)
+
+    revoked: dict = {}
+
+    def prompt_fn(req):
+        # The operator hits /rp WHILE this approval modal is open — after
+        # the transaction captured its snapshot.
+        if not revoked:
+            state.revoke_authority(gate=gate)
+            revoked["done"] = True
+        return _always(req)
+
+    coord, gate, broker, state, ws = _authority(tmp_path, prompt_fn)
+    args, o1, o2 = _two_outside_files(tmp_path)
+    monkeypatch.setattr(
+        perm.GrantStore, "_write_always",
+        lambda self: (_ for _ in ()).throw(OSError("disk full")))
+
+    assert coord("run_shell", args) is False
+    assert revoked, "the probe must actually revoke mid-prompt"
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == [], (
+        "the rollback must not resurrect the revoked grant")
+
+    # And a fresh process cannot resurrect it either: the revoked root is
+    # no longer covered, so a denying operator sees the call refused.
+    asked: list = []
+
+    def deny_fn(req):
+        asked.append(req)
+        return lg.ScopedDecision(scope=lp.SCOPE_DENY)
+
+    coord2, *_rest = _authority(tmp_path, deny_fn)
+    assert coord2("read_file", {"path": str(prior / "p.txt")}) is False
+    assert len(asked) == 1, (
+        "the revoked root must be ASKED for again across a fresh stack, "
+        "never silently covered by a resurrected grant")
+
+
+def test_transaction_started_before_revocation_cannot_commit(
+    tmp_path,
+):
+    """Not only rollback: a transaction whose captured view predates `/rp`
+    cannot COMMIT authority either."""
+    prompts: list = []
+    revoked: dict = {}
+
+    def prompt_fn(req):
+        prompts.append(req)
+        if not revoked:
+            state.revoke_authority(gate=gate)
+            revoked["done"] = True
+        return _always(req)
+
+    coord, gate, broker, state, ws = _authority(tmp_path, prompt_fn)
+    outside = tmp_path / "theta"
+    outside.mkdir()
+    (outside / "t.txt").write_text("t")
+    lp.add_grant(CODE, request_class=lp.REQUEST_CLASS_PATH,
+                 resource=str(tmp_path / "unrelated"), actions=["read"])
+
+    assert coord("read_file", {"path": str(outside / "t.txt")}) is False
+    assert len(prompts) == 1
+    # Nothing from the stale transaction was committed.
+    assert all(g["resource"] != str(outside)
+               for g in lp.load_grants(CODE, lp.REQUEST_CLASS_PATH))
+
+
+def test_concurrent_commit_survives_another_transactions_rollback(
+    tmp_path, monkeypatch,
+):
+    """One instance commits a legitimate grant while another transaction
+    is in flight and fails: the failing rollback must not delete the
+    committed grant."""
+    committed = tmp_path / "committed"
+    committed.mkdir()
+    (committed / "c.txt").write_text("c")
+
+    other: dict = {}
+
+    def prompt_fn(req):
+        # A DIFFERENT instance commits a real grant mid-prompt.
+        if not other:
+            lp.add_grant(CODE, request_class=lp.REQUEST_CLASS_PATH,
+                         resource=str(committed), actions=["read"])
+            other["done"] = True
+        return _always(req)
+
+    coord, gate, broker, state, ws = _authority(tmp_path, prompt_fn)
+    args, o1, o2 = _two_outside_files(tmp_path)
+    monkeypatch.setattr(
+        perm.GrantStore, "_write_always",
+        lambda self: (_ for _ in ()).throw(OSError("disk full")))
+
+    assert coord("run_shell", args) is False
+    assert any(g["resource"] == str(committed)
+               for g in lp.load_grants(CODE, lp.REQUEST_CLASS_PATH)), (
+        "a failed transaction must not delete another's committed grant")
+
+
+def test_revoke_authority_reports_failure_truthfully(tmp_path, monkeypatch):
+    """The escape hatch never claims success it did not achieve."""
+    coord, gate, broker, state, ws = _authority(tmp_path, _always)
+    assert state.revoke_authority(gate=gate) is True
+
+    monkeypatch.setattr(
+        lp, "revoke_all",
+        lambda code: (_ for _ in ()).throw(OSError("store unwritable")))
+    ok = state.revoke_authority(gate=gate)
+    assert ok is False
+    assert state.recovery_error() and "revoke" in state.recovery_error().lower()
+
+
+# ── WAL cleanup + publication durability ────────────────────────────────────
+
+
+def test_clear_failure_after_recording_denies_without_leaking(
+    tmp_path, monkeypatch,
+):
+    """A WAL-clear failure is an UNCOMMITTED transaction: deny, restore
+    the captured snapshots, keep the recovery record, never leak an
+    exception through the authorization boundary."""
+    prompts: list = []
+
+    def prompt_fn(req):
+        prompts.append(req)
+        return _always(req)
+
+    coord, gate, broker, state, ws = _authority(tmp_path, prompt_fn)
+    outside = tmp_path / "iota"
+    outside.mkdir()
+    (outside / "i.txt").write_text("i")
+    monkeypatch.setattr(
+        perm.AuthorizationRecoveryJournal, "clear",
+        lambda self: (_ for _ in ()).throw(PermissionError("unlink denied")))
+
+    assert coord("read_file", {"path": str(outside / "i.txt")}) is False
+    assert all(g["resource"] != str(outside)
+               for g in lp.load_grants(CODE, lp.REQUEST_CLASS_PATH))
+
+    # A fresh stack still recovers cleanly once the seam heals.
+    monkeypatch.undo()
+    coord2, *_r = _authority(tmp_path, prompt_fn)
+    assert coord2("read_file", {"path": str(outside / "i.txt")}) is True
+
+
+def test_reconcile_retains_debt_when_cleanup_fails(tmp_path, monkeypatch):
+    journal = perm.AuthorizationRecoveryJournal(tmp_path / "j.json")
+    state = perm.AuthorizationTransactionState(journal=journal)
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    state.owe("gate", gate.snapshot_grants())
+    monkeypatch.setattr(
+        perm.AuthorizationRecoveryJournal, "clear",
+        lambda self: (_ for _ in ()).throw(PermissionError("unlink denied")))
+    assert state.reconcile(gate=gate, broker=None) is False
+    assert state.outstanding() == 1
+
+
+def test_journal_publish_fsyncs_the_parent_directory(tmp_path, monkeypatch):
+    synced: list = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(
+        os, "fsync", lambda fd: synced.append(fd) or real_fsync(fd))
+    journal = perm.AuthorizationRecoveryJournal(tmp_path / "j.json")
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    store = perm.GrantStore(tmp_path / "grants.json")
+    journal.begin(gate_snapshot=gate.snapshot_grants(),
+                  broker_snapshot=store.snapshot())
+    assert len(synced) >= 2, "the file AND its parent directory are synced"
+    synced.clear()
+    journal.clear()
+    assert synced, "removal is made durable too"
+
+
+def test_hostile_precreated_temp_path_cannot_hijack_publication(tmp_path):
+    """The WAL's temporary path is unique and exclusive: a pre-planted
+    file or symlink at a predictable name cannot capture the write."""
+    journal = perm.AuthorizationRecoveryJournal(tmp_path / "j.json")
+    target = tmp_path / "victim.txt"
+    target.write_text("original", encoding="utf-8")
+    planted = Path(str(tmp_path / "j.json") + ".tmp")
+    planted.symlink_to(target)
+
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    gate = lg.LeaderPermissionGate(CODE, workspace=ws)
+    store = perm.GrantStore(tmp_path / "grants.json")
+    journal.begin(gate_snapshot=gate.snapshot_grants(),
+                  broker_snapshot=store.snapshot())
+    assert target.read_text(encoding="utf-8") == "original"
+    assert journal.pending() is not None
+
+
+def test_unknown_journal_version_fails_closed(tmp_path):
+    path = tmp_path / "j.json"
+    path.write_text(json.dumps(
+        {"version": 999, "gate": {}, "broker": {}}), encoding="utf-8")
+    journal = perm.AuthorizationRecoveryJournal(path)
+    with pytest.raises(perm.AuthorizationRecoveryError) as exc_info:
+        journal.pending()
+    assert "999" in str(exc_info.value)
+
+
 def test_journal_round_trips_both_snapshot_shapes(tmp_path):
     """The WAL preserves both stores' snapshots EXACTLY — including raw
     durable bytes and the broker's three-way file token."""

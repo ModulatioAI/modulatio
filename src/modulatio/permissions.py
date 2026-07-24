@@ -36,11 +36,13 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import hashlib
 import enum
 import fcntl
 import inspect
 import json
 import os
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -372,6 +374,23 @@ def ask_via_prompt_fn(prompt_fn):
     return ask
 
 
+def _fsync_dir(path: "Path") -> None:
+    """Make a directory ENTRY durable (rename/unlink), best-effort — the
+    same posture as the vault's atomic writer: POSIX local disks get the
+    guarantee, exotic mounts degrade instead of failing the write."""
+    try:
+        dir_fd = os.open(str(path), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        try:
+            os.fsync(dir_fd)
+        except OSError:
+            pass          # read-only mount / unsupported FS
+    finally:
+        os.close(dir_fd)
+
+
 class AuthorizationRecoveryError(RuntimeError):
     """The durable authorization-recovery record could not be read or
     trusted. Authorization fails closed until an operator resolves it —
@@ -451,14 +470,23 @@ class AuthorizationRecoveryJournal:
             "broker": self._encode_broker(broker_snapshot),
         }, indent=2).encode("utf-8")
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # A UNIQUE, exclusively-created temp: a predictable name reopened
+        # with O_TRUNC lets a pre-planted file or symlink capture the
+        # write. O_EXCL refuses to follow or reuse anything already there.
+        tmp = Path(tempfile.mkstemp(
+            dir=str(self.path.parent), prefix=self.path.name + ".",
+            suffix=".tmp")[1])
         try:
-            with os.fdopen(fd, "wb") as fh:
+            os.chmod(tmp, 0o600)
+            with open(tmp, "wb") as fh:
                 fh.write(payload)
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(tmp, self.path)
+            # The directory entry must be durable BEFORE the first
+            # authority mutation — otherwise a power loss can lose the WAL
+            # while keeping the grant it was meant to roll back.
+            _fsync_dir(self.path.parent)
         except BaseException:
             try:
                 tmp.unlink()
@@ -482,6 +510,13 @@ class AuthorizationRecoveryJournal:
                 f"until it is restored from backup or removed by an "
                 f"operator who has verified the project's grant files"
             ) from exc
+        version = raw.get("version") if isinstance(raw, dict) else None
+        if version != self.VERSION:
+            raise AuthorizationRecoveryError(
+                f"authorization recovery record {self.path} declares "
+                f"version {version!r}, which this build cannot decode "
+                f"(expects {self.VERSION}) — authorization is refused "
+                f"until an operator resolves it with a matching build")
         try:
             return {
                 "gate": self._decode_gate(raw["gate"]),
@@ -495,10 +530,13 @@ class AuthorizationRecoveryJournal:
             ) from exc
 
     def clear(self) -> None:
+        """Drop the record and make the REMOVAL durable — a commit is not
+        complete until the WAL entry is gone from the directory."""
         try:
             self.path.unlink()
         except FileNotFoundError:
-            pass
+            return
+        _fsync_dir(self.path.parent)
 
     @contextlib.contextmanager
     def transaction(self, *, timeout: "float | None" = None):
@@ -552,6 +590,46 @@ class AuthorizationTransactionState:
         """Operator-facing reason authorization is refused, when a durable
         recovery record cannot be read/trusted."""
         return self._recovery_error
+
+    @staticmethod
+    def authority_generation(gate_snapshot, broker_snapshot) -> str:
+        """Digest of the authority state a rollback would restore. Any
+        durable OR in-memory grant change — a concurrent commit, an
+        operator ``/rp`` — yields a different generation, so a stale
+        snapshot is detectable without a bump counter every writer would
+        have to remember to call."""
+        payload = json.dumps(
+            [AuthorizationRecoveryJournal._encode_gate(gate_snapshot),
+             (None if broker_snapshot is None
+              else AuthorizationRecoveryJournal._encode_broker(
+                  broker_snapshot))],
+            sort_keys=True).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    def revoke_authority(self, *, gate) -> bool:
+        """The ``/rp`` escape hatch, SERIALIZED: revoke every grant inside
+        the project transaction so no in-flight approval can interleave —
+        and report truthfully. False means the revocation did NOT take;
+        ``recovery_error()`` says why."""
+        try:
+            if self.journal is None:
+                gate.revoke_all()
+            else:
+                with self.journal.transaction():
+                    gate.revoke_all()
+        except AuthorizationRecoveryError as exc:
+            self._recovery_error = (
+                f"revoke refused: {exc}")
+            return False
+        except Exception as exc:  # noqa: BLE001 — never claim a revoke that
+            # did not happen
+            self._recovery_error = (
+                f"revoke did not complete ({type(exc).__name__}: {exc}) — "
+                f"the Leader's grants may still stand; retry, and check the "
+                f"project's permission files if it keeps failing")
+            return False
+        self._recovery_error = None
+        return True
 
     def owe(self, kind: str, snapshot) -> None:
         """Record a restore that FAILED — its exact pre-transaction
@@ -614,7 +692,13 @@ class AuthorizationTransactionState:
                     return False
                 self._debts.pop()
             if self.journal is not None:
-                self.journal.clear()      # debts discharged: nothing owed
+                try:
+                    self.journal.clear()  # debts discharged: nothing owed
+                except Exception:  # noqa: BLE001 — cleanup is not durable:
+                    # keep the debt so the next call retries rather than
+                    # reporting a reconciliation that isn't recorded.
+                    self._debts.append(("gate", gate.snapshot_grants()))
+                    return False
             return True
 
 
@@ -643,15 +727,35 @@ def build_authorization_coordinator(
 
     @contextlib.contextmanager
     def _durable_transaction(gate_snap, broker_snap):
-        """Hold the project-scoped transaction and persist the WAL BEFORE
-        the first mutation. Yields False when the record cannot be written
-        or another instance owns the transaction — the caller denies with
-        nothing mutated."""
+        """Hold the project-scoped transaction, verify the captured view is
+        STILL current, and persist the WAL — all before the first mutation.
+
+        Yields False when the record cannot be written, another instance
+        owns the transaction, or the authority changed while the operator
+        was answering (a concurrent commit, or an ``/rp`` revocation). A
+        snapshot captured before the lock is never restored over a newer
+        decision: the caller denies with nothing mutated."""
         if debt.journal is None:
             yield True
             return
         try:
             with debt.journal.transaction():
+                # Re-read the authority under the lock: if it moved since
+                # the snapshot, the operator's later decision wins and this
+                # transaction cannot mutate OR roll back over it.
+                try:
+                    current_gate = gate.snapshot_grants()
+                    current_broker = (
+                        broker.grants.snapshot() if broker is not None
+                        else None)
+                except OSError:
+                    yield False
+                    return
+                captured = debt.authority_generation(gate_snap, broker_snap)
+                if debt.authority_generation(
+                        current_gate, current_broker) != captured:
+                    yield False
+                    return
                 try:
                     debt.journal.begin(
                         gate_snapshot=gate_snap, broker_snapshot=broker_snap)
@@ -664,10 +768,20 @@ def build_authorization_coordinator(
             # underneath it.
             yield False
 
-    def _commit_durable() -> None:
-        """A clean commit owes nothing: drop the WAL."""
-        if debt.journal is not None:
+    def _commit_durable(gate_snap, broker_snap) -> bool:
+        """Complete the transaction: the commit is not done until the WAL
+        entry is durably gone. A clear failure means the transaction never
+        committed — restore the captured snapshots (still serialized), keep
+        the recovery record if that restore fails, and return False so the
+        caller denies. Never leaks an exception."""
+        if debt.journal is None:
+            return True
+        try:
             debt.journal.clear()
+            return True
+        except Exception:  # noqa: BLE001 — uncommitted: roll back
+            _restore_both(gate_snap, broker_snap)
+            return False
 
     def _restore_both(gate_snap, broker_snap) -> None:
         """Attempt each restore INDEPENDENTLY — one failure never skips the
@@ -767,8 +881,7 @@ def build_authorization_coordinator(
                 except Exception:  # noqa: BLE001 — restore, fail closed
                     _restore_both(gate_snap, broker_snap)
                     return False
-                _commit_durable()
-                return True
+                return _commit_durable(gate_snap, broker_snap)
 
         # Capability-only ask (no path prompt carried it): same rules as
         # the bundle path — snapshot BEFORE the prompt (a snapshot read
@@ -800,7 +913,8 @@ def build_authorization_coordinator(
                         # it, denying every later call until it reconciles.
                         debt.owe("broker", broker_snap)
                     return False
-                _commit_durable()
+                if not _commit_durable(gate_snap, broker_snap):
+                    return False
                 return recorded
         return True
 
