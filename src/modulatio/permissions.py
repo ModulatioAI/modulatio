@@ -694,8 +694,19 @@ class AuthorizationTransactionState:
         A durable revoke INTENT is published before either store is
         touched, so a crash mid-sequence recovers forward (finish
         clearing) instead of replaying the older snapshots."""
+        # This operation clears BOTH axes, so the capability store is
+        # mandatory — a null one is refused here, before any record is
+        # published or either store mutates, rather than degrading into a
+        # folder-only revoke that would report success.
+        if broker is None:
+            raise AuthorizationRecoveryError(
+                "no capability store was supplied — NOTHING was revoked; "
+                "this operation clears both the folder grants and the "
+                "remembered capability grants, so it needs the project's "
+                "live stores")
         try:
-            owed = None if self.journal is None else self.journal.pending()
+            if self.journal is not None:
+                self.journal.pending()   # a corrupt record refuses up front
         except AuthorizationRecoveryError:
             raise
         except Exception as exc:
@@ -703,21 +714,12 @@ class AuthorizationTransactionState:
                 f"could not read the recovery record before revoking "
                 f"({type(exc).__name__}: {exc}) — NOTHING was revoked; the "
                 f"Leader's grants all still stand") from exc
-        # An owed record with a capability side cannot be resolved without
-        # the store it belongs to: refuse rather than clear the record and
-        # silently skip that axis.
-        if broker is None and owed is not None:
-            raise AuthorizationRecoveryError(
-                "a pending recovery record covers the capability store, "
-                "but no capability store was supplied — NOTHING was "
-                "revoked; retry the revoke with the project's live stores")
         # 1: the revoke intent, durable BEFORE either store mutates.
         if self.journal is not None:
             try:
                 self.journal.begin(
                     gate_snapshot=gate.snapshot_grants(),
-                    broker_snapshot=(None if broker is None
-                                     else broker.grants.snapshot()),
+                    broker_snapshot=broker.grants.snapshot(),
                     kind=self.journal.KIND_REVOKE)
             except Exception as exc:  # noqa: BLE001
                 raise AuthorizationRecoveryError(
@@ -725,15 +727,14 @@ class AuthorizationTransactionState:
                     f"({type(exc).__name__}: {exc}) — NOTHING was revoked; "
                     f"all the Leader's grants still stand") from exc
         # 2: the capability axis.
-        if broker is not None:
-            try:
-                broker.grants.revoke_all()
-            except Exception as exc:  # noqa: BLE001
-                raise AuthorizationRecoveryError(
-                    f"the capability store could not be cleared "
-                    f"({type(exc).__name__}: {exc}) — remembered "
-                    f"capability grants may still stand; the folder grants "
-                    f"were not touched") from exc
+        try:
+            broker.grants.revoke_all()
+        except Exception as exc:  # noqa: BLE001
+            raise AuthorizationRecoveryError(
+                f"the capability store could not be cleared "
+                f"({type(exc).__name__}: {exc}) — remembered capability "
+                f"grants may still stand; the folder grants were not "
+                f"touched") from exc
         # 3: the folder axis.
         try:
             gate.revoke_all()

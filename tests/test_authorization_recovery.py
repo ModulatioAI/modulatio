@@ -846,8 +846,13 @@ def test_retry_with_the_broker_completes_the_pending_revoke(tmp_path):
     _folder, journal = _pending_revoke_state(tmp_path, broker)
     gate = lg.LeaderPermissionGate(CODE, workspace=ws)
     state = perm.AuthorizationTransactionState(journal=journal)
-    assert state.recover_durable(gate=gate, broker=broker) is False or True
+    # The retry itself must SUCCEED and leave nothing behind.
+    assert state.recover_durable(gate=gate, broker=broker) is True
+    assert lp.load_grants(CODE, lp.REQUEST_CLASS_PATH) == []
+    assert broker.grants.grants_view() == {"session": [], "always": []}
+    assert not journal.path.exists()
 
+    # A second fresh stack over the same files is a clean no-op.
     fresh_broker = perm.PermissionBroker(
         mode=perm.RunMode.DEFAULT,
         grants=perm.GrantStore(tmp_path / "grants.json"), ask=None,
@@ -918,6 +923,26 @@ def test_all_authority_revoke_requires_the_capability_store(tmp_path):
         journal=perm.AuthorizationRecoveryJournal(tmp_path / "j.json"))
     with pytest.raises(TypeError):
         state.revoke_authority(gate=gate)          # broker is required
+
+
+def test_explicit_null_capability_store_refuses_with_nothing_touched(
+    tmp_path,
+):
+    """An EXPLICIT null store is refused as firmly as an omitted one, with
+    no pending record to hide behind: nothing is revoked, nothing is
+    published, and the reason names the missing capability store."""
+    coord, gate, broker, state, ws = _authority(tmp_path, _always)
+    folder = _seed_both_axes(tmp_path, broker)
+    journal_path = tmp_path / "auth_recovery.json"
+    assert not journal_path.exists()
+
+    assert state.revoke_authority(gate=gate, broker=None) is False
+    assert any(g["resource"] == str(folder)
+               for g in lp.load_grants(CODE, lp.REQUEST_CLASS_PATH))
+    view = broker.grants.grants_view()
+    assert view["always"] and view["session"], "neither scope was cleared"
+    assert not journal_path.exists(), "no revoke record was published"
+    assert "capability" in (state.recovery_error() or "").lower()
 
 
 # ── the record discriminator is validated fail-closed ───────────────────────
