@@ -863,21 +863,40 @@ class _DeterministicRunShell:
                 f"{proc.stdout}{proc.stderr}")
 
 
-def _gate_suite(root, *, binds: bool = True):
-    """A produced repo with a runnable suite. ``binds`` writes tests that
-    actually reach the shipped component; False models the suite that is
-    green about something else entirely."""
+_PATH_SETUP = (
+    "import pathlib\nimport sys\n\n"
+    "sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))\n"
+)
+
+#: How a produced suite may relate to the shipped component. Only the forms
+#: that LOAD it are evidence; the rest merely say its name.
+_SUITE_BODIES = {
+    "import": _PATH_SETUP + "import webapp\n\n\ndef test_ok():\n"
+              "    assert webapp is not None\n",
+    "from-import": _PATH_SETUP + "from webapp import *  # noqa: F403\n\n\n"
+                   "def test_ok():\n    assert True\n",
+    "importlib": _PATH_SETUP + "import importlib\n\n\ndef test_ok():\n"
+                 "    assert importlib.import_module('webapp') is not None\n",
+    "comment": "# webapp is supposedly covered\ndef test_ok():\n"
+               "    assert True\n",
+    "docstring": '"""Tests for webapp."""\n\n\ndef test_ok():\n'
+                 "    assert True\n",
+    "string": "def test_ok():\n    name = 'webapp'\n    assert name\n",
+    "func-name": "def test_webapp_ok():\n    assert True\n",
+    "none": "def test_ok():\n    assert True\n",
+}
+
+
+def _gate_suite(root, *, binds: bool = True, shape: str | None = None):
+    """A produced repo with a runnable suite. ``shape`` selects how the tests
+    relate to the shipped component; ``binds`` is the plain switch between a
+    real import and a suite that is green about something else."""
     (root / "pyproject.toml").write_text(
         '[project]\nname = "webapp"\nversion = "0"\n', encoding="utf-8")
     (root / "tests").mkdir(exist_ok=True)
-    body = (
-        "import pathlib\nimport sys\n\n"
-        "sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))\n"
-        "import webapp\n\n\n"
-        "def test_ok():\n    assert webapp is not None\n"
-        if binds else "def test_ok():\n    assert True\n"
-    )
-    (root / "tests" / "test_ok.py").write_text(body, encoding="utf-8")
+    key = shape if shape is not None else ("import" if binds else "none")
+    (root / "tests" / "test_ok.py").write_text(
+        _SUITE_BODIES[key], encoding="utf-8")
 
 
 def test_import_smoke_green_for_declared_layout(project, monkeypatch):
@@ -899,18 +918,20 @@ def test_import_smoke_green_for_declared_layout(project, monkeypatch):
     assert "import webapp" in report
 
 
-def test_gate_is_red_when_the_suite_never_reaches_the_component(
-    project, monkeypatch,
+@pytest.mark.parametrize(
+    "shape", ["comment", "docstring", "string", "func-name", "none"])
+def test_naming_the_component_without_importing_it_is_red(
+    project, monkeypatch, shape,
 ):
-    """A suite can pass without ever importing the deliverable. That green
-    is evidence about the suite, not the product, and it reads the same in
-    a report — so the gate refuses it."""
+    """Prose is not evidence. A comment, a docstring, a string literal, or a
+    test function name carrying the component's name all read like coverage
+    in a report while the suite never loads the product."""
     from modulatio import store as store_mod
 
     orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
     orch.kickoff("build the webapp package")
     tasks = store_mod.list_tasks(PROJECT_CODE)
-    _gate_suite(orch._shared_artifacts_root(), binds=False)
+    _gate_suite(orch._shared_artifacts_root(), shape=shape)
     _enforceable_sandbox(monkeypatch)
     orch._pytest_gate_run_shell = _DeterministicRunShell()
     monkeypatch.setattr(Orchestrator, "_goal_pytest_gate", _REAL_PYTEST_GATE)
@@ -918,7 +939,35 @@ def test_gate_is_red_when_the_suite_never_reaches_the_component(
     state, report = orch._goal_pytest_gate(tasks)
 
     assert state is False
-    assert "never reaches webapp" in report
+    assert "no test imported webapp" in report
+
+
+@pytest.mark.parametrize("shape", ["import", "from-import", "importlib"])
+def test_every_real_import_form_is_observed(project, monkeypatch, shape):
+    """The observation comes from the run, so it sees a plain import, a
+    from-import, and a dynamic ``import_module`` alike."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    _gate_suite(orch._shared_artifacts_root(), shape=shape)
+    _enforceable_sandbox(monkeypatch)
+    orch._pytest_gate_run_shell = _DeterministicRunShell()
+    monkeypatch.setattr(Orchestrator, "_goal_pytest_gate", _REAL_PYTEST_GATE)
+
+    state, report = orch._goal_pytest_gate(tasks)
+
+    assert state is True, report
+
+
+def test_fabricated_module_entry_is_not_an_observation():
+    """A ``sys.modules`` entry with no file inside the tree under test is not
+    evidence that anything was loaded from the product."""
+    wanted = {"webapp"}
+
+    assert Orchestrator._unimported_components(wanted, set()) is not None
+    assert Orchestrator._unimported_components(wanted, {"webapp"}) is None
 
 
 def test_import_smoke_red_when_package_name_diverges(project, monkeypatch):

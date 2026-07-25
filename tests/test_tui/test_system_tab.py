@@ -75,6 +75,31 @@ async def test_one_failing_seam_does_not_blank_the_others(_isolate,
 
 
 @pytest.mark.asyncio
+async def test_budget_pane_agrees_with_the_metered_authorization(_isolate):
+    """An absent cap is not permission. The metered gate DENIES when no cap
+    is configured, so a pane calling that state "unlimited" tells the
+    operator the opposite of what the engine will do."""
+    from modulatio import comptroller
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        screen = app.query_one(SystemScreen)
+        screen.refresh_all()
+        await pilot.pause()
+        pane = _text(screen.query_one("#system-budget", Static))
+
+    decision = comptroller.authorize_metered_tool(
+        PROJECT_CODE, "paid-cloud", "render", "T-1", "k1", "agent-1")
+
+    assert decision.allowed is False          # no cap configured → denied
+    assert "not configured" in pane and "denied" in pane
+    assert "unlimited" not in pane
+    # The deleted authorization model must not name the live capability.
+    assert "escalation" not in pane.lower()
+
+
+@pytest.mark.asyncio
 async def test_mode_button_submits_the_command_to_converse(_isolate):
     """The mode is set by the operator's leading /-command in converse and
     nowhere else, so the button types that command into the console rather

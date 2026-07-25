@@ -1,38 +1,43 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
-"""Comptroller — authorization layer for producer escalations.
+"""Comptroller — the daily spend authority for metered tool use.
 
 Deterministic, non-LLM business function: given a project's declared
-daily budget per cost_class, authorize or deny a producer escalation
-before it consumes a paid-cloud or premium-cloud LLM call. Denial
-surfaces as a BLOCKER ticket with ``refresh_at`` set to tomorrow's
-UTC midnight so #7e's auto-resume pattern picks it up on the next
+daily cap per cost_class, authorize or deny a paid tool call before it
+spends real money. Denial carries ``refresh_at`` set to tomorrow's UTC
+midnight so an auto-resume pattern can pick it up on the next
 billing-cycle rollover.
 
 Business-harness level: no opinion about what the producers produce
-(code, research, shell ops, text, anything). The comptroller just
-counts escalations per cost_class per UTC day and compares to a
-declarative budget.
+(code, research, shell ops, text, anything). The comptroller counts
+paid calls per cost_class per UTC day and compares to a declarative cap.
 
-Config: ``<project_vault>/comptroller.md`` frontmatter. Missing file
-or missing field → unlimited for that tier (back-compat with every
-project created before #9d). Example::
+**An absent cap is not permission.** A missing file or missing field
+means no cap was declared, and the metered authorization FAILS CLOSED:
+the call is denied until a cap exists. Surfaces reporting a budget must
+say so rather than reading an absent cap as unlimited — the two are
+opposite answers.
+
+Config: ``<project_vault>/comptroller.md`` frontmatter. The field names
+predate the current authorization and are kept as compatibility schema;
+they name the daily cap for the cost_class, whatever spends it::
 
     ---
     paid_cloud_escalations_per_day: 10
     premium_cloud_escalations_per_day: 3
     ---
 
-Ledger: ``<project_vault>/comptroller-ledger.md``, append-only,
-one line per authorization::
+Ledger: ``<project_vault>/comptroller-ledger.md``, append-only, one line
+per authorization. Two streams have written it — the metered tool tier,
+and an earlier producer-escalation path that no longer exists. Both are
+still COUNTED, so entries an earlier install wrote keep debiting today's
+cap and an upgrade cannot hand a project a fresh allowance::
 
     2026-04-21T10:30:00+00:00 premium-cloud producer-strategic
     2026-04-21T11:15:00+00:00 paid-cloud   producer-reasoning
 
-Scan filtered by UTC day boundary gives today's spend. Only
-authorized calls (``allowed=True``) append; denials leave the ledger
-unchanged. ``free-local`` escalations authorize unconditionally and
-skip the ledger entirely (no API cost to gate).
+Scan filtered by UTC day boundary gives today's spend. Only authorized
+calls (``allowed=True``) append; denials leave the ledger unchanged.
 """
 
 from __future__ import annotations
@@ -64,9 +69,11 @@ _LOCK_TIMEOUT_SECONDS = 30.0
 
 @dataclass(frozen=True)
 class Budget:
-    """Per-cost-class daily escalation caps. ``None`` = unlimited for
-    that tier — the back-compat default for projects that don't
-    declare a budget."""
+    """Per-cost-class daily spend caps, exactly as parsed.
+
+    ``None`` means NO CAP WAS DECLARED — it is the absence of a value,
+    not permission. What that absence authorizes is decided by the
+    consumer: :func:`authorize_metered_tool` fails closed and denies."""
 
     paid_cloud_per_day: int | None = None
     premium_cloud_per_day: int | None = None
@@ -74,7 +81,7 @@ class Budget:
 
 @dataclass(frozen=True)
 class Authorization:
-    """Result of an ``authorize_escalation`` call.
+    """Result of an authorization call.
 
     ``allowed`` is the go/no-go flag. On deny, ``refresh_at`` carries
     the timestamp at which the relevant daily bucket will refresh
@@ -88,8 +95,8 @@ class Authorization:
     authorized today, allowed-but-not-re-charged. It is a STRUCTURED signal so
     the tool runner can short-circuit the provider re-invoke (reuse the prior
     result) instead of paying again, replacing the fragile ``"idempotent" in
-    reason`` substring contract. Defaults False to keep every existing caller
-    and the ``authorize_escalation`` path back-compatible."""
+    reason`` substring contract. Defaults False so every existing caller
+    keeps its behaviour."""
 
     allowed: bool
     refresh_at: datetime | None
@@ -144,10 +151,10 @@ def load_budget(project_code: str) -> Budget:
     path = _config_path(project_code)
     if not path.exists():
         return Budget()
-    # Degrade-open on a corrupt/non-UTF8 config: a bad byte must not crash the
-    # whole budget-gated path (which would defeat escalation degrade-open). The
-    # contract is "missing file/field → unlimited"; an unreadable file is, for
-    # gating purposes, equivalent — read leniently rather than raise.
+    # A corrupt/non-UTF8 config must not crash the budget-gated path: read
+    # leniently and return an EMPTY budget rather than raising. That is not a
+    # permissive outcome — an absent cap denies at the metered gate, so an
+    # unreadable file lands in the same fail-closed place as a missing one.
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -252,7 +259,7 @@ def _lock_timeout_seconds() -> float:
 @contextmanager
 def _ledger_lock(project_code: str):
     """Serialize the count→check→append critical section of a budget-gated
-    escalation. The wave scheduler runs producers concurrently; without
+    call. The wave scheduler runs producers concurrently; without
     this lock two requests can both read ``spent`` below the cap, both pass
     the check, and both append — exceeding the declared daily budget (which
     gates *paid* cloud calls, so it's a real-money guardrail).
@@ -267,8 +274,8 @@ def _ledger_lock(project_code: str):
     deadline. Rather than block forever on a wedged holder — which would
     freeze *every* budget-gated call on the host — we bound the wait with a
     non-blocking acquire loop. On timeout the caller decides its fail
-    posture (escalation degrades open, metered fails closed), so a stuck
-    lock is observable and bounded instead of a silent global wedge.
+    posture — the metered gate fails CLOSED — so a stuck lock is observable
+    and bounded instead of a silent global wedge.
     """
     ledger = _ledger_path(project_code)
     ledger.parent.mkdir(parents=True, exist_ok=True)
@@ -375,9 +382,8 @@ def authorize_metered_tool(
 ) -> Authorization:
     """Gate ONE metered (paid-cloud / premium-cloud) tool call before it spends.
 
-    Unlike ``authorize_escalation`` (agent escalation, which degrades OPEN), the
-    metered-tool path **fails CLOSED** — real money
-    flows through it and the LLM controls when a tool fires:
+    This path **fails CLOSED** — real money flows through it and the LLM
+    controls when a tool fires:
 
     - Unknown / missing ``cost_class`` (not paid-cloud/premium-cloud) → **DENY**.
     - No declared budget for the tier → **DENY** (explicit opt-in required; a

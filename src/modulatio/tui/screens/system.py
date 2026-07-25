@@ -131,8 +131,10 @@ class SystemScreen(Vertical):
         return f"[b]ACCESS[/b]\n{rows}"
 
     def _budget_text(self, code: "str | None") -> str:
-        """Daily escalation caps per cost class. ``None`` is unlimited, which
-        is the shipped default — say so rather than printing a bare dash."""
+        """Daily caps for METERED TOOL use, read as the authorization sees
+        them. An absent cap is not permission — the metered gate fails
+        closed and denies, so reporting a missing cap as "unlimited" would
+        tell the operator the opposite of what the engine will do."""
         from modulatio import comptroller
 
         if not code:
@@ -143,9 +145,10 @@ class SystemScreen(Vertical):
             ("paid cloud", budget.paid_cloud_per_day),
             ("premium cloud", budget.premium_cloud_per_day),
         ):
-            shown = "unlimited" if value is None else f"{value}/day"
+            shown = (f"{value}/day" if value is not None
+                     else "not configured — metered calls denied")
             lines.append(f"  {label:<14} {shown}")
-        return "[b]BUDGET[/b] (daily escalation caps)\n" + "\n".join(lines)
+        return "[b]BUDGET[/b] (daily metered-tool caps)\n" + "\n".join(lines)
 
     def _doctor_text(self) -> str:
         from modulatio import diagnostics

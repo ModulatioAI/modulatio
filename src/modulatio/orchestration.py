@@ -2292,6 +2292,35 @@ def _extract_iterate_decision(response: str) -> dict | None:
 
 # ─── Orchestrator ───────────────────────────────────────────────────────────
 
+#: Engine-authored bootstrap for the test-binding observation. Runs the SAME
+#: hook-free suite in-process, then records which declared components were
+#: actually imported — read from ``sys.modules`` AFTER the run, and only
+#: counted when the module resolves to a real file inside the tree under test.
+#: A name a test merely mentions in prose is never imported and never appears;
+#: a fabricated ``sys.modules`` entry carries no such file and is discarded.
+#:
+#: The observation is written to a file rather than printed: the runner keeps
+#: only the head of stdout, so a trailing marker could be truncated away by a
+#: noisy suite — exactly when the evidence matters most.
+_IMPORT_OBSERVER_BOOTSTRAP = """
+import json, os, sys
+import pytest
+_names = json.loads(os.environ["MODULATIO_OBSERVE_NAMES"])
+_out = os.environ["MODULATIO_OBSERVE_OUT"]
+_root = os.path.realpath(os.getcwd())
+_code = pytest.main(sys.argv[1:])
+_seen = []
+for _n in _names:
+    _m = sys.modules.get(_n)
+    _f = getattr(_m, "__file__", None) if _m is not None else None
+    if _f and os.path.realpath(_f).startswith(_root + os.sep):
+        _seen.append(_n)
+with open(_out, "w", encoding="utf-8") as _fh:
+    json.dump(_seen, _fh)
+sys.exit(int(_code))
+"""
+
+
 class Orchestrator:
     """Drives the GSD loop for one project, one pass.
 
@@ -9031,8 +9060,8 @@ class Orchestrator:
     # ── #151/e2e Blocker 2: per-task artifact staging + deterministic merge ──
     def _reusable_prior_components(
         self, tasks: "list[Task] | None",
-    ) -> "frozenset[str] | None":
-        """Which top-level components an EARLIER run may still contribute to
+    ) -> "frozenset[tuple] | None":
+        """Which declared components an EARLIER run may still contribute to
         this one, or None to place no restriction.
 
         Prose and data reuse across runs is broad — an earlier draft or a
@@ -9047,7 +9076,7 @@ class Orchestrator:
             t.artifact_kind in _CODE_ARTIFACT_KINDS for t in tasks
         ):
             return None
-        names: set = set()
+        prefixes: set = set()
         for gid in sorted({t.goal_id for t in tasks if t.goal_id}):
             goal = store.get_goal(
                 self.project.code, gid, run_id=self.project.run_id)
@@ -9056,11 +9085,23 @@ class Orchestrator:
             for c in goal.convention_contracts:
                 if _conv.validate_sealed_contract(c) is not None:
                     continue
-                for part in (c.component_root, c.source_root, c.import_name):
-                    head = str(part or "").split("/")[0].strip()
-                    if head:
-                        names.add(head)
-        return frozenset(names)
+                # The WHOLE declared component, as path segments. Reducing it
+                # to a first segment throws the boundary away before the
+                # comparison: "src/webapp" would become "src" and admit every
+                # sibling product under src/, which is the contamination this
+                # fence exists to stop.
+                root = tuple(
+                    part for part in str(c.component_root or "").split("/")
+                    if part
+                )
+                below = tuple(
+                    part for part in str(c.source_root or "").split("/")
+                    if part
+                ) or ((c.import_name,) if c.import_name else ())
+                whole = root + below
+                if whole:
+                    prefixes.add(whole)
+        return frozenset(prefixes)
 
     def _shared_artifacts_root(self) -> Path:
         """The DURABLE artifacts tree: project-scoped + run-namespaced, so
@@ -12640,7 +12681,8 @@ class Orchestrator:
         if run_shell is None:
             return None, "run_shell tool unavailable (no artifacts root bound)"
 
-        def _run_pytest(root: "Path", rel: str, noconftest: bool):
+        def _run_pytest(root: "Path", rel: str, noconftest: bool,
+                        observe: "tuple | None" = None):
             """Run the engine-selected test files under ``root``. Returns
             ``(exit_code, result_text)``, or ``(None, reason)`` when the gate
             is UNAVAILABLE (tool refusal / pytest not installed / unparseable).
@@ -12654,10 +12696,21 @@ class Orchestrator:
             """
             flag = "--noconftest --tb=no --show-capture=no --maxfail=1 " \
                 if noconftest else ""
+            args = (f"-q --color=no {flag}-o addopts= "
+                    f"-p no:cacheprovider {rel}")
+            if observe is None:
+                cmd = f"pytest {args}"
+            else:
+                # ONE invocation supplies both the green result and the
+                # import observation: the engine's own bootstrap runs the
+                # same arguments in-process and records what got loaded.
+                cmd = (f"MODULATIO_OBSERVE_NAMES={_shlex.quote(observe[0])} "
+                       f"MODULATIO_OBSERVE_OUT={_shlex.quote(str(observe[1]))} "
+                       f"python3 -c {_shlex.quote(_IMPORT_OBSERVER_BOOTSTRAP)} "
+                       f"{args}")
             try:
                 result = run_shell.call(
-                    cmd=(f"pytest -q --color=no {flag}-o addopts= "
-                         f"-p no:cacheprovider {rel}"),
+                    cmd=cmd,
                     profile="full", cwd=str(root),
                     timeout=_PYTEST_GATE_TIMEOUT_S,
                 )
@@ -12688,6 +12741,8 @@ class Orchestrator:
         all_green = True
         advisory = False
         any_tests = False
+        declared_names = self._declared_component_names(tasks)
+        observed_imports: set = set()
         for repo_root in roots:
             # Engine-selected explicit test files + neutralized addopts
             # (cadre R2 MED-1): the suite cannot steer collection via
@@ -12711,7 +12766,21 @@ class Orchestrator:
             # stripped, a test the producer tried to hide/deselect/xfail RUNS
             # and its failure surfaces — the engine cannot be tricked by code
             # it did not run.
-            code, res = _run_pytest(repo_root, rel, noconftest=True)
+            observe_path = repo_root / ".modulatio-import-observation.json"
+            observe = (
+                (json.dumps(sorted(declared_names)), observe_path)
+                if declared_names else None
+            )
+            code, res = _run_pytest(
+                repo_root, rel, noconftest=True, observe=observe)
+            if observe is not None:
+                try:
+                    observed_imports |= set(
+                        json.loads(observe_path.read_text(encoding="utf-8")))
+                except (OSError, ValueError):
+                    pass          # absent observation == nothing imported
+                finally:
+                    observe_path.unlink(missing_ok=True)
             if code is None:
                 return None, res  # UNAVAILABLE (tool refusal / no pytest)
             if code == 0:
@@ -12769,7 +12838,7 @@ class Orchestrator:
         # suite runs, not that the product works. Tests that exercise only
         # their own fixtures (or the standard library) pass exactly as
         # loudly as tests that exercise the deliverable.
-        unbound = self._unbound_test_suites(tasks, roots)
+        unbound = self._unimported_components(declared_names, observed_imports)
         if unbound:
             reports.append(unbound)
             return False, "\n\n".join(reports)
@@ -12788,16 +12857,12 @@ class Orchestrator:
                 "evidence, not a tamper-proof attestation.")
         return all_green, "\n\n".join(reports)
 
-    def _unbound_test_suites(
-        self, tasks: "list[Task]", roots: "list[Path]",
-    ) -> "str | None":
-        """Reason the shipped tests do not reach the shipped component, or
-        None when they do.
 
-        The component's declared import name is the one thing every test of
-        it must name. A suite that never mentions it is not testing the
-        product — it is green about something else, which reads identically
-        in a report."""
+
+    def _declared_component_names(self, tasks: "list[Task]") -> set:
+        """Import names of every sealed, non-standalone component this goal
+        declares — the modules a suite testing this product must actually
+        import."""
         from modulatio import conventions as _conv
 
         wanted: set = set()
@@ -12811,28 +12876,28 @@ class Orchestrator:
                         and c.import_name
                         and _conv.validate_sealed_contract(c) is None):
                     wanted.add(c.import_name)
-        if not wanted:
-            return None
+        return wanted
 
-        seen: set = set()
-        for repo_root in roots:
-            for path in self._discover_test_files(repo_root):
-                try:
-                    body = path.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    continue
-                for name in wanted:
-                    if re.search(rf"\b{re.escape(name)}\b", body):
-                        seen.add(name)
-        missing = sorted(wanted - seen)
+    @staticmethod
+    def _unimported_components(wanted: set, observed: set) -> "str | None":
+        """Reason the shipped tests never imported the shipped component, or
+        None when they did.
+
+        A suite proves it tests the product by IMPORTING it while running.
+        Naming the component in a comment, a docstring, a string literal, or
+        a test function name reads the same in a report and proves nothing —
+        so the evidence is the observation from the run, not the source
+        text."""
+        missing = sorted(wanted - observed)
         if not missing:
             return None
         return (
-            "engine-run pytest is green but the suite never reaches "
+            "engine-run pytest is green but no test imported "
             + ", ".join(missing)
-            + " — no discovered test file names the shipped component, so "
+            + " — the suite ran without loading the shipped component, so "
               "the green result is evidence about something other than the "
-              "deliverable"
+              "deliverable. Import it from a test (or add a one-line import "
+              "probe) so the run exercises what shipped."
         )
 
     def _convention_import_smoke(

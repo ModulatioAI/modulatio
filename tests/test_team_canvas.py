@@ -262,11 +262,44 @@ def test_prior_components_filter_drops_another_objectives_work(tmp_path):
     (new / "slate" / "main.py").write_text("z = 3\n")
 
     d = build_digest(root, hoist_run_id="20260701-new",
-                     prior_components=frozenset({"slate"}))
+                     prior_components=frozenset({("slate",)}))
 
     assert "20260701-new/slate/main.py" in d   # this run, always
     assert "20260629-old/slate/util.py" in d   # prior run, declared component
     assert "narrative/engine.py" not in d      # another objective's work
+
+
+def test_component_fence_compares_whole_path_segments(tmp_path):
+    """A component is a PATH, not a name. Reducing it to a first segment
+    throws the boundary away before comparing, so declaring one component
+    would admit every sibling beneath the same parent."""
+    root = tmp_path / "artifacts"
+    old, new = root / "20260629-old", root / "20260701-new"
+    for rel in ("src/other_product/engine.py", "src/webapp/util.py",
+                "services/worker/w.py", "services/api/a.py",
+                "api_old/legacy.py", "api/keep.py"):
+        f = old / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("x = 1\n")
+    (new / "src" / "webapp").mkdir(parents=True)
+    (new / "src" / "webapp" / "main.py").write_text("z = 3\n")
+
+    d = build_digest(
+        root, hoist_run_id="20260701-new",
+        prior_components=frozenset({("src", "webapp"), ("services", "api"),
+                                    ("api",)}),
+    )
+
+    # Declared components remain available…
+    assert "20260629-old/src/webapp/util.py" in d
+    assert "20260629-old/services/api/a.py" in d
+    assert "20260629-old/api/keep.py" in d
+    # …their siblings do not.
+    assert "src/other_product/engine.py" not in d
+    assert "services/worker/w.py" not in d
+    assert "api_old/legacy.py" not in d
+    # The current run is never touched by the prior-run filter.
+    assert "20260701-new/src/webapp/main.py" in d
 
 
 def test_no_filter_still_offers_every_prior_run(tmp_path):

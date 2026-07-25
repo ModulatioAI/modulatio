@@ -525,6 +525,58 @@ def test_sandbox_profile_stores_only_confining_values(monkeypatch):
     assert "MODULATIO_SANDBOX_PROFILE" not in os.environ
 
 
+@pytest.mark.parametrize(
+    "spelling", ["off", "OFF", "Off", " off ", " Off ", "\toff\n", "oFf"])
+def test_no_spelling_of_the_bypass_survives_a_stored_override(
+    monkeypatch, spelling,
+):
+    """The guard has to speak the CONSUMER's language. ``current_profile()``
+    strips and lowercases before deciding, so a guard comparing raw text
+    would pass ``"OFF"`` straight through to the same runtime decision."""
+    from modulatio import sandbox
+
+    monkeypatch.delenv("MODULATIO_SANDBOX_PROFILE", raising=False)
+    _save_overrides({"MODULATIO_SANDBOX_PROFILE": spelling})
+    config.apply_env_overrides()
+
+    assert "MODULATIO_SANDBOX_PROFILE" not in os.environ
+    assert sandbox.current_profile() != "off"
+
+
+def test_replacing_a_stored_profile_with_a_bypass_leaves_it_confining(
+    monkeypatch,
+):
+    """A stored ``trusted`` that is later hand-edited to a bypass spelling
+    must not survive as ownership: the effective posture stays confining."""
+    from modulatio import sandbox
+
+    monkeypatch.delenv("MODULATIO_SANDBOX_PROFILE", raising=False)
+    _save_overrides({"MODULATIO_SANDBOX_PROFILE": "trusted"})
+    config.apply_env_overrides()
+    assert sandbox.current_profile() == "trusted"
+
+    _save_overrides({"MODULATIO_SANDBOX_PROFILE": "OFF"})
+    config.apply_env_overrides()
+
+    assert "MODULATIO_SANDBOX_PROFILE" not in os.environ
+    assert sandbox.current_profile() == "standard"
+
+
+@pytest.mark.parametrize("value", [5, None, True, ["off"], {"p": "off"}])
+def test_non_string_stored_profiles_cannot_normalize_into_a_bypass(
+    monkeypatch, value,
+):
+    """A value with no spelling carries no profile — it must fail safe, not
+    stringify into something the consumer reads as a bypass."""
+    from modulatio import sandbox
+
+    monkeypatch.delenv("MODULATIO_SANDBOX_PROFILE", raising=False)
+    _save_overrides({"MODULATIO_SANDBOX_PROFILE": value})
+    config.apply_env_overrides()
+
+    assert sandbox.current_profile() != "off"
+
+
 # ═══ fold: test_config_low_audit.py ═══
 # LOW-audit regression tests for src/modulatio/config.py.
 #

@@ -80,7 +80,7 @@ def build_digest(
     artifacts_root: Path,
     *,
     hoist_run_id: str | None = None,
-    prior_components: "frozenset[str] | None" = None,
+    prior_components: "frozenset[tuple] | None" = None,
 ) -> str:
     """Render a markdown digest of ``artifacts_root``'s contents.
 
@@ -132,7 +132,11 @@ def build_digest(
             parts = p.relative_to(artifacts_root).parts
             if not parts or parts[0] == hoist_run_id:
                 return True
-            return len(parts) > 1 and parts[1] in prior_components
+            below = parts[1:]
+            # Whole leading segments, never a single name: a component is a
+            # PATH, so "src/webapp" must not admit "src/other_product", and
+            # "api" must not admit "api_old".
+            return any(below[:len(pref)] == pref for pref in prior_components)
 
         files = [p for p in files if _keeps(p)]
     if not files:

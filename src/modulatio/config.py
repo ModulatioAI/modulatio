@@ -381,8 +381,19 @@ ENV_OVERRIDE_ALLOWLIST: frozenset[str] = frozenset({
 #: Values a stored override may never carry, per allowlisted key. The key is
 #: settable; these particular values are not, because they turn confinement
 #: off — which stays an explicit environment act rather than stored state.
-_REFUSED_OVERRIDE_VALUES: "dict[str, frozenset[str]]" = {
-    "MODULATIO_SANDBOX_PROFILE": frozenset({"off"}),
+#:
+#: Each entry names the CANONICALIZER the consumer applies, so the refusal
+#: compares the same spelling the runtime acts on. Comparing raw text here
+#: would let ``"OFF"`` or ``" off "`` past a guard whose consumer lowercases
+#: and strips — the guard has to speak the consumer's language.
+def _canonical_sandbox_profile(value: object) -> str:
+    from modulatio.sandbox import canonical_profile
+    return canonical_profile(value)
+
+
+_REFUSED_OVERRIDE_VALUES: "dict[str, tuple]" = {
+    "MODULATIO_SANDBOX_PROFILE": (
+        _canonical_sandbox_profile, frozenset({"off"})),
 }
 
 #: Keys apply_env_overrides has set — so a later save can update or unset
@@ -415,7 +426,15 @@ def apply_env_overrides() -> None:
             logger.warning(
                 "env_overrides: refusing non-allowlisted key %r", key)
             continue
-        if str(value) in _REFUSED_OVERRIDE_VALUES.get(key, ()):
+        canonicalize, refused = _REFUSED_OVERRIDE_VALUES.get(
+            key, (None, frozenset()))
+        if canonicalize is not None and canonicalize(value) in refused:
+            # A refused value also RELEASES any value this loop applied
+            # earlier: the file no longer claims the old one, so keeping it
+            # enforced would be ownership the stored state has dropped.
+            if key in _ENV_OVERRIDES_SET:
+                os.environ.pop(key, None)
+                _ENV_OVERRIDES_SET.discard(key)
             # Some values of an otherwise settable key disable confinement
             # outright. Those stay a deliberate shell/env act — a stored file
             # must not be able to persist one.

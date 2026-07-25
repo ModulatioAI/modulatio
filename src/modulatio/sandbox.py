@@ -83,6 +83,20 @@ _DEFAULT_SANDBOX_PROFILE = "standard"
 _WARNED_BAD_PROFILE: set[str] = set()
 
 
+def canonical_profile(raw: object) -> str:
+    """The profile spelling the engine actually acts on.
+
+    THE one canonicalizer: every guard that decides whether a profile value
+    is permitted must compare against this, because this is what decides
+    what the sandbox does. A guard that canonicalizes differently from the
+    consumer is not a guard — ``"OFF"`` and ``" off "`` reach the same
+    runtime decision as ``"off"``. Non-string values carry no spelling and
+    canonicalize to the empty string (the caller then falls back)."""
+    if not isinstance(raw, str):
+        return ""
+    return raw.strip().lower()
+
+
 def current_profile() -> str:
     """Return the active sandbox profile from ``MODULATIO_SANDBOX_PROFILE``.
 
@@ -90,7 +104,7 @@ def current_profile() -> str:
     ``standard`` (fail-safe: an operator typo must NOT silently widen the
     sandbox) and warns once per bad value.
     """
-    raw = os.environ.get(_SANDBOX_PROFILE_ENV, "").strip().lower()
+    raw = canonical_profile(os.environ.get(_SANDBOX_PROFILE_ENV, ""))
     if not raw:
         return _DEFAULT_SANDBOX_PROFILE
     if raw not in VALID_SANDBOX_PROFILES:
