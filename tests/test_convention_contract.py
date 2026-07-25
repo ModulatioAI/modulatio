@@ -961,13 +961,86 @@ def test_every_real_import_form_is_observed(project, monkeypatch, shape):
     assert state is True, report
 
 
-def test_fabricated_module_entry_is_not_an_observation():
-    """A ``sys.modules`` entry with no file inside the tree under test is not
-    evidence that anything was loaded from the product."""
-    wanted = {"webapp"}
+@pytest.mark.parametrize("shape", ["forge-real-file", "forge-no-file",
+                                   "forge-missing-file", "same-name-elsewhere"])
+def test_state_a_test_can_manufacture_is_not_import_evidence(
+    project, monkeypatch, shape,
+):
+    """``sys.modules`` membership is a value any test can assign. Evidence is
+    the LOAD, so a fabricated entry — even one carrying the real component's
+    own file — and a same-named module found outside the sealed source root
+    are both RED."""
+    from modulatio import store as store_mod
 
-    assert Orchestrator._unimported_components(wanted, set()) is not None
-    assert Orchestrator._unimported_components(wanted, {"webapp"}) is None
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    root = orch._shared_artifacts_root()
+    _gate_suite(root, shape="none")
+    bodies = {
+        "forge-real-file": (
+            "import os, sys, types\n\n\ndef test_forge():\n"
+            "    m = types.ModuleType('webapp')\n"
+            "    m.__file__ = os.path.join(os.getcwd(), 'webapp', '__init__.py')\n"
+            "    sys.modules['webapp'] = m\n    assert True\n"),
+        "forge-no-file": (
+            "import sys, types\n\n\ndef test_forge():\n"
+            "    sys.modules['webapp'] = types.ModuleType('webapp')\n"
+            "    assert True\n"),
+        "forge-missing-file": (
+            "import sys, types\n\n\ndef test_forge():\n"
+            "    m = types.ModuleType('webapp')\n"
+            "    m.__file__ = '/nonexistent/webapp/__init__.py'\n"
+            "    sys.modules['webapp'] = m\n    assert True\n"),
+        "same-name-elsewhere": (
+            "import pathlib, sys\n"
+            "sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))\n"
+            "import webapp\n\n\ndef test_other():\n    assert webapp\n"),
+    }
+    if shape == "same-name-elsewhere":
+        # A DIFFERENT module that merely shares the name, beside the tests.
+        (root / "tests" / "webapp.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (root / "tests" / "test_ok.py").write_text(bodies[shape], encoding="utf-8")
+
+    _enforceable_sandbox(monkeypatch)
+    orch._pytest_gate_run_shell = _DeterministicRunShell()
+    monkeypatch.setattr(Orchestrator, "_goal_pytest_gate", _REAL_PYTEST_GATE)
+
+    state, report = orch._goal_pytest_gate(tasks)
+
+    assert state is False, report
+    assert "no test imported webapp" in report
+
+
+def test_a_repository_local_pytest_cannot_replace_the_engine_runner(
+    project, monkeypatch,
+):
+    """The bootstrap runs isolated from the producer's working directory. A
+    ``pytest.py`` at the repository root would otherwise be imported instead
+    of the real runner, and its ``main()`` could return zero without running
+    a single test."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    root = orch._shared_artifacts_root()
+    _gate_suite(root, shape="none")
+    (root / "tests" / "test_ok.py").write_text(
+        "def test_definitely_fails():\n    assert False\n", encoding="utf-8")
+    (root / "pytest.py").write_text(
+        "import os, sys, types\n\n\ndef main(args=None):\n"
+        "    m = types.ModuleType('webapp')\n"
+        "    m.__file__ = os.path.join(os.getcwd(), 'webapp', '__init__.py')\n"
+        "    sys.modules['webapp'] = m\n    return 0\n", encoding="utf-8")
+
+    _enforceable_sandbox(monkeypatch)
+    orch._pytest_gate_run_shell = _DeterministicRunShell()
+    monkeypatch.setattr(Orchestrator, "_goal_pytest_gate", _REAL_PYTEST_GATE)
+
+    state, report = orch._goal_pytest_gate(tasks)
+
+    assert state is False, report
 
 
 def test_import_smoke_red_when_package_name_diverges(project, monkeypatch):
@@ -1388,6 +1461,78 @@ def _mint_a_child(orch, goal, tasks, child_id="CVC-T-900", **overrides):
     store_mod.save_task(PROJECT_CODE, parent)
     store_mod.create_task(PROJECT_CODE, child)
     return child
+
+
+def _contract(**kw):
+    from modulatio import conventions as _conv
+
+    base = dict(ecosystem="python", state="resolved", layout="flat",
+                component_root="", source_root="", test_root="",
+                import_name="", distribution_name="", manifest_filename="")
+    base.update(kw)
+    return _conv._sealed(**base)
+
+
+@pytest.mark.parametrize("kw,expected", [
+    (dict(layout="src", component_root="services/api",
+          source_root="src/webapp", import_name="webapp"),
+     ("services", "api")),
+    (dict(layout="src", source_root="src/webapp", import_name="webapp"),
+     ("src", "webapp")),
+    (dict(layout="flat", source_root="webapp", import_name="webapp"),
+     ("webapp",)),
+])
+def test_reusable_prior_components_selects_the_declared_boundary(
+    project, monkeypatch, kw, expected,
+):
+    """The boundary the ENGINE derives, not one supplied by hand. A declared
+    component root IS the component — extending past it drops the manifest
+    and test tree that were declared with it; stopping short of it admits
+    siblings."""
+    from modulatio import store as store_mod
+
+    orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
+    goal.convention_contracts = [_contract(**kw)]
+    store_mod.save_goal(PROJECT_CODE, goal)
+    bound = [t for t in tasks if t.artifact_kind == "code"]
+
+    assert orch._reusable_prior_components(bound) == frozenset({expected})
+
+
+def test_declared_monorepo_component_keeps_its_manifest_and_tests(
+    project, monkeypatch, tmp_path,
+):
+    """Feed the PRODUCED tuple to the digest: a declared monorepo component
+    brings its manifest and test tree with it, while its siblings stay out."""
+    from modulatio import store as store_mod
+    from modulatio.team_canvas import build_digest
+
+    orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
+    goal.convention_contracts = [_contract(
+        layout="src", component_root="services/api",
+        source_root="src/webapp", import_name="webapp")]
+    store_mod.save_goal(PROJECT_CODE, goal)
+    produced = orch._reusable_prior_components(
+        [t for t in tasks if t.artifact_kind == "code"])
+
+    root = tmp_path / "artifacts"
+    for rel in ("20260629-old/services/api/pyproject.toml",
+                "20260629-old/services/api/src/webapp/__init__.py",
+                "20260629-old/services/api/tests/test_api.py",
+                "20260629-old/services/worker/w.py",
+                "20260701-new/services/api/src/webapp/main.py"):
+        f = root / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("x = 1\n")
+
+    d = build_digest(root, hoist_run_id="20260701-new",
+                     prior_components=produced)
+
+    assert "services/api/pyproject.toml" in d
+    assert "services/api/src/webapp/__init__.py" in d
+    assert "services/api/tests/test_api.py" in d
+    assert "services/worker/w.py" not in d
+    assert "20260701-new/services/api/src/webapp/main.py" in d
 
 
 def test_honest_minted_child_rides_its_durable_mint_authority(

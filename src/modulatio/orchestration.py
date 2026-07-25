@@ -2292,31 +2292,63 @@ def _extract_iterate_decision(response: str) -> dict | None:
 
 # ─── Orchestrator ───────────────────────────────────────────────────────────
 
-#: Engine-authored bootstrap for the test-binding observation. Runs the SAME
-#: hook-free suite in-process, then records which declared components were
-#: actually imported — read from ``sys.modules`` AFTER the run, and only
-#: counted when the module resolves to a real file inside the tree under test.
-#: A name a test merely mentions in prose is never imported and never appears;
-#: a fabricated ``sys.modules`` entry carries no such file and is discarded.
+#: Engine-authored bootstrap for the test-binding observation.
 #:
-#: The observation is written to a file rather than printed: the runner keeps
-#: only the head of stdout, so a trailing marker could be truncated away by a
-#: noisy suite — exactly when the evidence matters most.
+#: Two things a producer controls must not be able to forge this evidence:
+#: the RUNNER and the OBSERVATION.
+#:
+#: The runner is protected by launching with ``-I``. A bare ``-c`` puts the
+#: working directory — the producer's own repository — on the import path,
+#: so a file named ``pytest.py`` at its root is imported instead of the real
+#: one, and its ``main()`` can return zero without running a single test.
+#:
+#: The observation is protected by recording a LOADER EXECUTION rather than
+#: reading ``sys.modules`` afterwards. Final membership is a value any test
+#: can assign: a fabricated module carrying the real component's ``__file__``
+#: is indistinguishable from an import that happened. A finder installed
+#: ahead of ``pytest.main()`` sees the load itself, and records the component
+#: only when the module actually executed from inside its own sealed source
+#: root — so a same-named module found elsewhere in the tree does not count.
 _IMPORT_OBSERVER_BOOTSTRAP = """
-import json, os, sys
-import pytest
-_names = json.loads(os.environ["MODULATIO_OBSERVE_NAMES"])
+import importlib.util, json, os, sys
+
+_origins = json.loads(os.environ["MODULATIO_OBSERVE_ORIGINS"])
 _out = os.environ["MODULATIO_OBSERVE_OUT"]
 _root = os.path.realpath(os.getcwd())
+_seen = set()
+
+
+class _LoadWitness:
+    # Ahead of every other finder: records the load, then steps aside and
+    # lets the real machinery resolve it.
+    def find_spec(self, name, path=None, target=None):
+        if name not in _origins:
+            return None
+        rest = [f for f in sys.meta_path if f is not self]
+        for finder in rest:
+            try:
+                spec = finder.find_spec(name, path, target)
+            except Exception:
+                continue
+            if spec is None:
+                continue
+            origin = getattr(spec, "origin", None) or ""
+            try:
+                real = os.path.realpath(origin)
+            except Exception:
+                real = ""
+            wanted = os.path.realpath(os.path.join(_root, _origins[name]))
+            if real == wanted or real.startswith(wanted + os.sep):
+                _seen.add(name)
+            return spec
+        return None
+
+
+sys.meta_path.insert(0, _LoadWitness())
+import pytest
 _code = pytest.main(sys.argv[1:])
-_seen = []
-for _n in _names:
-    _m = sys.modules.get(_n)
-    _f = getattr(_m, "__file__", None) if _m is not None else None
-    if _f and os.path.realpath(_f).startswith(_root + os.sep):
-        _seen.append(_n)
 with open(_out, "w", encoding="utf-8") as _fh:
-    json.dump(_seen, _fh)
+    json.dump(sorted(_seen), _fh)
 sys.exit(int(_code))
 """
 
@@ -9085,22 +9117,27 @@ class Orchestrator:
             for c in goal.convention_contracts:
                 if _conv.validate_sealed_contract(c) is not None:
                     continue
-                # The WHOLE declared component, as path segments. Reducing it
-                # to a first segment throws the boundary away before the
-                # comparison: "src/webapp" would become "src" and admit every
-                # sibling product under src/, which is the contamination this
-                # fence exists to stop.
+                # The WHOLE declared component, as path segments. Reducing
+                # it to a first segment throws the boundary away before the
+                # comparison ("src/webapp" would become "src" and admit
+                # every sibling product); extending it PAST the component
+                # root drops the component's own manifest and test tree,
+                # which are part of what was declared.
+                #
+                # So: a component root IS the boundary. Only when none was
+                # declared does the source root (or the import name) stand
+                # in for it.
                 root = tuple(
                     part for part in str(c.component_root or "").split("/")
                     if part
                 )
-                below = tuple(
-                    part for part in str(c.source_root or "").split("/")
-                    if part
-                ) or ((c.import_name,) if c.import_name else ())
-                whole = root + below
-                if whole:
-                    prefixes.add(whole)
+                if not root:
+                    root = tuple(
+                        part for part in str(c.source_root or "").split("/")
+                        if part
+                    ) or ((c.import_name,) if c.import_name else ())
+                if root:
+                    prefixes.add(root)
         return frozenset(prefixes)
 
     def _shared_artifacts_root(self) -> Path:
@@ -12704,9 +12741,10 @@ class Orchestrator:
                 # ONE invocation supplies both the green result and the
                 # import observation: the engine's own bootstrap runs the
                 # same arguments in-process and records what got loaded.
-                cmd = (f"MODULATIO_OBSERVE_NAMES={_shlex.quote(observe[0])} "
+                cmd = (f"MODULATIO_OBSERVE_ORIGINS={_shlex.quote(observe[0])} "
                        f"MODULATIO_OBSERVE_OUT={_shlex.quote(str(observe[1]))} "
-                       f"python3 -c {_shlex.quote(_IMPORT_OBSERVER_BOOTSTRAP)} "
+                       f"python3 -I -c "
+                       f"{_shlex.quote(_IMPORT_OBSERVER_BOOTSTRAP)} "
                        f"{args}")
             try:
                 result = run_shell.call(
@@ -12741,7 +12779,7 @@ class Orchestrator:
         all_green = True
         advisory = False
         any_tests = False
-        declared_names = self._declared_component_names(tasks)
+        declared_origins = self._declared_component_origins(tasks)
         observed_imports: set = set()
         for repo_root in roots:
             # Engine-selected explicit test files + neutralized addopts
@@ -12768,8 +12806,8 @@ class Orchestrator:
             # it did not run.
             observe_path = repo_root / ".modulatio-import-observation.json"
             observe = (
-                (json.dumps(sorted(declared_names)), observe_path)
-                if declared_names else None
+                (json.dumps(declared_origins), observe_path)
+                if declared_origins else None
             )
             code, res = _run_pytest(
                 repo_root, rel, noconftest=True, observe=observe)
@@ -12810,9 +12848,22 @@ class Orchestrator:
             # imports). Fall back to a conftest-enabled run — but its result is
             # ADVISORY: the engine cannot verify it hook-free, so a green here
             # is evidence, not a tamper-proof attestation.
-            code_cf, res_cf = _run_pytest(repo_root, rel, noconftest=False)
+            # The observation must ride the invocation whose green is
+            # REPORTED. The hook-free attempt above errored, so its
+            # observation describes a run nobody is trusting; this one is
+            # the evidence, advisory label and all.
+            code_cf, res_cf = _run_pytest(
+                repo_root, rel, noconftest=False, observe=observe)
             if code_cf is None:
                 return None, res_cf
+            if observe is not None:
+                try:
+                    observed_imports |= set(
+                        json.loads(observe_path.read_text(encoding="utf-8")))
+                except (OSError, ValueError):
+                    pass
+                finally:
+                    observe_path.unlink(missing_ok=True)
             advisory = True
             all_green = all_green and code_cf == 0
             reports.append(
@@ -12838,7 +12889,8 @@ class Orchestrator:
         # suite runs, not that the product works. Tests that exercise only
         # their own fixtures (or the standard library) pass exactly as
         # loudly as tests that exercise the deliverable.
-        unbound = self._unimported_components(declared_names, observed_imports)
+        unbound = self._unimported_components(
+            set(declared_origins), observed_imports)
         if unbound:
             reports.append(unbound)
             return False, "\n\n".join(reports)
@@ -12859,13 +12911,16 @@ class Orchestrator:
 
 
 
-    def _declared_component_names(self, tasks: "list[Task]") -> set:
-        """Import names of every sealed, non-standalone component this goal
-        declares — the modules a suite testing this product must actually
-        import."""
+    def _declared_component_origins(self, tasks: "list[Task]") -> dict:
+        """Import name → the sealed source root it must load from, for every
+        non-standalone component this goal declares.
+
+        The ROOT travels with the name because a same-named module elsewhere
+        in the tree (``tests/webapp.py``) is not the shipped component, and
+        an import of it is not evidence the product was exercised."""
         from modulatio import conventions as _conv
 
-        wanted: set = set()
+        wanted: dict = {}
         for gid in sorted({t.goal_id for t in tasks}):
             goal = store.get_goal(
                 self.project.code, gid, run_id=self.project.run_id)
@@ -12875,7 +12930,11 @@ class Orchestrator:
                 if (c.state == "resolved" and c.layout != "standalone"
                         and c.import_name
                         and _conv.validate_sealed_contract(c) is None):
-                    wanted.add(c.import_name)
+                    root = "/".join(
+                        part for part in (c.component_root, c.source_root)
+                        if part
+                    )
+                    wanted[c.import_name] = root or c.import_name
         return wanted
 
     @staticmethod
