@@ -108,6 +108,25 @@ def test_dispatch_validation_passes_on_the_real_table():
     perm.validate_capability_dispatch()
 
 
+def test_the_table_is_validated_when_the_module_loads():
+    """A guard that only the suite runs cannot fail fast — a drifted table
+    would still load and ship. The module that DEFINES the table validates
+    it in its own body, so importing the engine is the check."""
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(perm))
+    top_level_calls = {
+        node.value.func.id
+        for node in tree.body
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+    }
+
+    assert "validate_capability_dispatch" in top_level_calls
+
+
 def test_mapped_entry_that_stops_emitting_a_fixed_kind_fails_fast(
     monkeypatch,
 ):

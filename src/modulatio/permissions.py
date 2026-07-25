@@ -352,6 +352,13 @@ def capability_for(tool_name: str, args: "dict | None" = None) -> Capability:
                       _scoped={"once": key, "session": key, "always": key})
 
 
+# The dispatch table and its emitters are both defined above, so this is the
+# earliest point the pair can be checked — and importing the engine is what
+# has to catch a drifted table. Left to the test suite alone, a builder that
+# stopped emitting its declared kind would still load and ship.
+validate_capability_dispatch()
+
+
 def ask_via_prompt_fn(prompt_fn):
     """Adapt a surface's EXISTING ``prompt_fn(SecurityRequest) -> ScopedDecision``
     bridge (the TUI approval modal / the web approval ticket) into the broker's
