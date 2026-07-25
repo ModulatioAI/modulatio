@@ -363,7 +363,27 @@ ENV_OVERRIDE_ALLOWLIST: frozenset[str] = frozenset({
     "MODULATIO_CTX_BUDGET_LEADER_CHAT",
     "MODULATIO_CTX_BUDGET_RESEARCH",
     "MODULATIO_WEB_PORT",
+    "MODULATIO_REQUIRE_SANDBOX",
+    "MODULATIO_SANDBOX_PROFILE",
+    "MODULATIO_CALL_TIMEOUT",
+    "MODULATIO_WAVE_GLOBAL_CAP",
+    "MODULATIO_DISPATCH_BREAKER",
+    "MODULATIO_LEADER_ITERATE",
+    "MODULATIO_WAVE_REFLECT",
+    "MODULATIO_INBOXES",
+    "MODULATIO_WIN_CODIFY_FLOOR",
+    "MODULATIO_CODIFICATION_TIMEOUT_S",
+    "MODULATIO_MAX_ATTACHMENT_BYTES",
+    "MODULATIO_CRASH_KEEP",
+    "MODULATIO_LOW_CREDIBILITY_DOMAINS",
 })
+
+#: Values a stored override may never carry, per allowlisted key. The key is
+#: settable; these particular values are not, because they turn confinement
+#: off — which stays an explicit environment act rather than stored state.
+_REFUSED_OVERRIDE_VALUES: "dict[str, frozenset[str]]" = {
+    "MODULATIO_SANDBOX_PROFILE": frozenset({"off"}),
+}
 
 #: Keys apply_env_overrides has set — so a later save can update or unset
 #: them live, while never touching a key the shell/.env owns.
@@ -394,6 +414,15 @@ def apply_env_overrides() -> None:
             # loudly, not injected — never a persistent sandbox/loader hijack.
             logger.warning(
                 "env_overrides: refusing non-allowlisted key %r", key)
+            continue
+        if str(value) in _REFUSED_OVERRIDE_VALUES.get(key, ()):
+            # Some values of an otherwise settable key disable confinement
+            # outright. Those stay a deliberate shell/env act — a stored file
+            # must not be able to persist one.
+            logger.warning(
+                "env_overrides: refusing %r=%r — that value disables "
+                "confinement and must be set in the environment, not stored",
+                key, str(value))
             continue
         if key in os.environ and key not in _ENV_OVERRIDES_SET:
             continue  # shell/.env owns it — the tab renders it read-only

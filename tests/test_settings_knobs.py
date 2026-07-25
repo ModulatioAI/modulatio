@@ -121,3 +121,46 @@ def test_engine_knob_defaults_match_their_consumers():
     assert float(by["MODULATIO_SIZE_TOLERANCE"].default) == (
         orchestration._SIZE_TOLERANCE)
     assert int(by["MODULATIO_WEB_PORT"].default) == server._DEFAULT_PORT
+
+    from modulatio import _crash, attachments, runners, sandbox
+    assert float(by["MODULATIO_CALL_TIMEOUT"].default) == (
+        runners._DEFAULT_CALL_TIMEOUT)
+    assert int(by["MODULATIO_CRASH_KEEP"].default) == _crash._DEFAULT_KEEP
+    assert int(by["MODULATIO_MAX_ATTACHMENT_BYTES"].default) == (
+        attachments.DEFAULT_MAX_DOCUMENT_BYTES)
+    assert int(by["MODULATIO_WIN_CODIFY_FLOOR"].default) == (
+        orchestration._WIN_CODIFY_FLOOR_DEFAULT)
+    assert float(by["MODULATIO_CODIFICATION_TIMEOUT_S"].default) == (
+        orchestration._CODIFICATION_TIMEOUT_DEFAULT)
+    assert by["MODULATIO_SANDBOX_PROFILE"].default == (
+        sandbox._DEFAULT_SANDBOX_PROFILE)
+
+
+def test_non_blank_defaults_satisfy_their_own_validator():
+    """A default that its own knob would reject cannot be restored after an
+    override is cleared, so the two must never drift apart. Blank defaults
+    are excluded: blank CLEARS an override rather than setting a value."""
+    offenders = [
+        k.key for k in settings_knobs.KNOBS
+        if k.default and not k.valid(k.default)
+    ]
+    assert offenders == []
+
+
+def test_exposing_a_knob_imposes_nothing_until_it_is_set(monkeypatch):
+    """Every newly surfaced knob is an OVERRIDE of an engine default, so an
+    unset registry leaves behaviour exactly as shipped — surfacing a knob
+    must never itself cap the Leader's conversation or the team's work."""
+    from modulatio import context_budget, orchestration, runners, sandbox
+
+    for knob in settings_knobs.KNOBS:
+        monkeypatch.delenv(knob.key, raising=False)
+
+    assert runners._default_call_timeout() == runners._DEFAULT_CALL_TIMEOUT
+    # No global producer cap, and the conversational window keeps its
+    # dispatch default (the model's own window) rather than gaining a cap.
+    assert orchestration.Orchestrator._wave_global_cap() is None
+    assert context_budget._role_knob_set("leader-chat") is False
+    # The substrate keeps its shipped posture, neither tightened nor widened.
+    assert sandbox.current_profile() == sandbox._DEFAULT_SANDBOX_PROFILE
+    assert sandbox.is_sandbox_required() is False

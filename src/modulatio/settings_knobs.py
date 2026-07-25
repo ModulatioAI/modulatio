@@ -20,7 +20,10 @@ import os
 from dataclasses import dataclass
 from typing import Callable
 
-from modulatio import config, context_budget
+from modulatio import (
+    _crash, attachments, config, context_budget, orchestration, runners,
+    sandbox,
+)
 
 
 def _int_range(lo: int, hi: int) -> "Callable[[str], bool]":
@@ -46,6 +49,17 @@ def _toggle(raw: str) -> bool:
     return raw in ("0", "1")
 
 
+def _one_of(*allowed: str) -> "Callable[[str], bool]":
+    return lambda raw: raw in allowed
+
+
+def _blank_or_int_range(lo: int, hi: int) -> "Callable[[str], bool]":
+    """Blank keeps the engine's own behaviour; a value overrides it. Used
+    where UNSET is not merely a default number but a different rule."""
+    inner = _int_range(lo, hi)
+    return lambda raw: raw == "" or inner(raw)
+
+
 @dataclass(frozen=True)
 class Knob:
     key: str          # the MODULATIO_* env name
@@ -65,6 +79,13 @@ _BUDGET_ROLE_NAMES = (
 _BUDGET_ROLES = tuple(
     (role, str(context_budget.EXPERIMENTAL_DEFAULTS[role]))
     for role in _BUDGET_ROLE_NAMES
+)
+
+#: Profiles this registry may store. ``off`` is excluded on purpose: it
+#: disables confinement exactly as the bypass env var does, so it stays an
+#: explicit environment act rather than a value a stored file can carry.
+_SETTABLE_SANDBOX_PROFILES = tuple(
+    p for p in sorted(sandbox.VALID_SANDBOX_PROFILES) if p != "off"
 )
 
 KNOBS: "tuple[Knob, ...]" = tuple(
@@ -107,6 +128,69 @@ KNOBS: "tuple[Knob, ...]" = tuple(
         Knob("MODULATIO_SIZE_TOLERANCE", "QC size tolerance", "0.10",
              "QC's discretion margin on size-band checks. Range 0.0–0.5.",
              _float_range(0.0, 0.5)),
+        # Substrate. These TIGHTEN or DESCRIBE confinement; the bypass that
+        # disables it is deliberately absent — unhulling the engine is not a
+        # one-keystroke edit in a settings list.
+        Knob("MODULATIO_REQUIRE_SANDBOX", "Require a working sandbox", "0",
+             "1 = refuse to run shell work when the sandbox cannot confine "
+             "it. Default soft-falls to unsandboxed so hosts without bwrap "
+             "still run.", _toggle),
+        Knob("MODULATIO_SANDBOX_PROFILE", "Sandbox profile",
+             sandbox._DEFAULT_SANDBOX_PROFILE,
+             "Confinement profile for shell work: "
+             + " · ".join(_SETTABLE_SANDBOX_PROFILES)
+             + ". Turning confinement OFF is not stored state — set "
+             "MODULATIO_SANDBOX_PROFILE in the environment for that. An "
+             "unrecognized value falls back to "
+             f"{sandbox._DEFAULT_SANDBOX_PROFILE!r} rather than widening.",
+             _one_of(*_SETTABLE_SANDBOX_PROFILES)),
+        # Timeouts and ceilings. Every default below is the engine's own, so
+        # leaving a field blank changes nothing about how the team works.
+        Knob("MODULATIO_CALL_TIMEOUT", "Model call timeout",
+             str(runners._DEFAULT_CALL_TIMEOUT),
+             "Seconds a single completion may take before it is abandoned. "
+             "Lowering this can cut off long coding calls mid-flight. "
+             "Range 1–7200.", _float_range(1.0, 7200.0)),
+        Knob("MODULATIO_WAVE_GLOBAL_CAP", "Global producer cap", "",
+             "Blank = no global cap (the per-pool ceiling still bounds "
+             "threads). A value caps producers in flight across all pools; "
+             "clamped to 1–1024.", _blank_or_int_range(1, 1024)),
+        Knob("MODULATIO_DISPATCH_BREAKER", "Dispatch breaker", "0",
+             "1 = abort an attempt whose output degenerates (repetition, "
+             "runaway length) instead of letting it burn the budget.",
+             _toggle),
+        Knob("MODULATIO_LEADER_ITERATE", "Between-task reflection", "0",
+             "1 = let the Leader reconsider direction between tasks "
+             "(continue / revise / drop) instead of running the plan "
+             "straight through.", _toggle),
+        Knob("MODULATIO_WAVE_REFLECT", "Between-wave reflection", "0",
+             "1 = let the Leader reflect between concurrent waves.",
+             _toggle),
+        Knob("MODULATIO_INBOXES", "Agent inboxes", "1",
+             "1 = agents may pass notes to each other between tasks. "
+             "0 = enqueue and read become no-ops.", _toggle),
+        Knob("MODULATIO_WIN_CODIFY_FLOOR", "Codification floor",
+             str(orchestration._WIN_CODIFY_FLOOR_DEFAULT),
+             "How many times a correction must recur before it is codified "
+             "into skill guidance. Range 1–50.", _int_range(1, 50)),
+        Knob("MODULATIO_CODIFICATION_TIMEOUT_S", "Codification timeout",
+             str(orchestration._CODIFICATION_TIMEOUT_DEFAULT),
+             "Seconds the post-run codification pass may take before it is "
+             "abandoned. Range 1–3600.", _float_range(1.0, 3600.0)),
+        Knob("MODULATIO_MAX_ATTACHMENT_BYTES", "Attachment size cap",
+             str(attachments.DEFAULT_MAX_DOCUMENT_BYTES),
+             "Largest attachment accepted, in bytes. Applies to documents "
+             "and images alike. Range 1024–104857600.",
+             _int_range(1024, 104857600)),
+        Knob("MODULATIO_CRASH_KEEP", "Crash reports kept",
+             str(_crash._DEFAULT_KEEP),
+             "How many crash reports are retained before the oldest are "
+             "pruned. Range 1–1000.", _int_range(1, 1000)),
+        Knob("MODULATIO_LOW_CREDIBILITY_DOMAINS", "Low-credibility domains",
+             "",
+             "Comma-separated domains research should treat as weak sources, "
+             "added to the shipped set. Blank adds none.",
+             lambda raw: True),
         Knob("MODULATIO_WEB_PORT", "WebOS port", "8787",
              "Port `modulatio-api` serves the WebOS on. Change it if something "
              "else occupies the default. Range 1–65535; `--port` still wins.",

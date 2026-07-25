@@ -486,9 +486,10 @@ def test_absent_env_overrides_is_a_noop():
 
 
 def test_env_overrides_refuse_non_allowlisted_keys(monkeypatch):
-    """The backend enforces the SAME curated
-    allowlist as the SETTINGS tab — a hand-edited defaults.json cannot
-    persistently kill the sandbox or hijack the loader."""
+    """The backend enforces the SAME curated allowlist as the SETTINGS tab —
+    a hand-edited defaults.json cannot persistently kill the sandbox or
+    hijack the loader. The sandbox PROFILE is settable, but the one value
+    that disables confinement is refused just like the bypass key."""
     for k in ("MODULATIO_RUN_SHELL_UNSAFE", "MODULATIO_SANDBOX_PROFILE",
               "LD_PRELOAD", "PYTHONPATH"):
         monkeypatch.delenv(k, raising=False)
@@ -502,10 +503,26 @@ def test_env_overrides_refuse_non_allowlisted_keys(monkeypatch):
     monkeypatch.delenv("MODULATIO_QC_FIXER", raising=False)
     config.apply_env_overrides()
     assert "MODULATIO_RUN_SHELL_UNSAFE" not in os.environ
+    # Allowlisted, but "off" disables confinement — refused by value.
     assert "MODULATIO_SANDBOX_PROFILE" not in os.environ
     assert "LD_PRELOAD" not in os.environ
     assert "PYTHONPATH" not in os.environ
     assert os.environ["MODULATIO_QC_FIXER"] == "0"
+
+
+def test_sandbox_profile_stores_only_confining_values(monkeypatch):
+    """The profile is operator-settable, so a stored tightening applies —
+    while the value that turns confinement off is refused from the file and
+    left to the environment."""
+    monkeypatch.delenv("MODULATIO_SANDBOX_PROFILE", raising=False)
+    _save_overrides({"MODULATIO_SANDBOX_PROFILE": "trusted"})
+    config.apply_env_overrides()
+    assert os.environ["MODULATIO_SANDBOX_PROFILE"] == "trusted"
+
+    monkeypatch.delenv("MODULATIO_SANDBOX_PROFILE", raising=False)
+    _save_overrides({"MODULATIO_SANDBOX_PROFILE": "off"})
+    config.apply_env_overrides()
+    assert "MODULATIO_SANDBOX_PROFILE" not in os.environ
 
 
 # ═══ fold: test_config_low_audit.py ═══
