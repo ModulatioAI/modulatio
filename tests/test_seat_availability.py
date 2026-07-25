@@ -152,6 +152,47 @@ def test_availability_exhaustion_routes_to_qc_backstop(project: Project):
     assert t.status is TaskStatus.COMPLETED
 
 
+def test_cooldown_window_is_ninety_seconds(project: Project):
+    """The seat sits out long enough for a provider to recover but short
+    enough that a healthy producer is not stranded through a whole wave —
+    the window the cooling seat is actually parked for."""
+    import time as _time
+
+    orch = Orchestrator(project, _runners())
+    before = _time.monotonic()
+    orch._note_seat_unavailable("james")
+    parked = orch._seat_unavailable_until["james"] - before
+
+    assert 89.0 <= parked <= 91.0, f"parked for {parked:.1f}s"
+
+
+def test_cooling_a_seat_announces_the_endpoint_cooldown(project: Project):
+    """A seat leaving the pool must say WHY. Without it the operator sees an
+    idle producer and reads the cause off whatever event came last — the
+    no-progress break — which is a different failure entirely."""
+    seen: list = []
+    orch = Orchestrator(project, _runners(), activity_callback=seen.append)
+
+    orch._note_seat_unavailable("james")
+
+    (event,) = [e for e in seen if e.phase == "seat_cooldown"]
+    assert event.agent_id == "james"
+    assert event.detail == {"seconds": 90.0}
+
+
+def test_no_progress_break_does_not_cool_the_seat(project: Project):
+    """The no-progress breaker ends a redo loop; it does not park the seat.
+    Only an unavailable endpoint does, so the two must not be conflated."""
+    orch = Orchestrator(project, _runners())
+
+    orch._emit_activity(
+        role=orch.default_producer_role, phase="redo_no_progress",
+        task_id="T-1", agent_id="james",
+    )
+
+    assert not orch._seat_in_cooldown("james")
+
+
 def test_dispatch_pool_excludes_cooling_seats(project: Project, monkeypatch):
     """A cooling seat leaves the dispatch pool for the cooldown window and
     returns after expiry; an all-producers-cooling pool degrades to the full

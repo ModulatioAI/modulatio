@@ -221,7 +221,10 @@ _TOOL_CALL_STREAK_CAP = 6
 #: How long a seat sits out of the dispatch pool after an availability-class
 #: exhaustion. A dead seat is otherwise a task MAGNET — always idle, always
 #: ranked "best-available" — and every task it attracts burns its budget.
-_SEAT_COOLDOWN_S = 180.0
+#: Long enough for a rate limit to refill or a crashed local model to reload,
+#: short enough that a healthy seat is not stranded past a wave: expiry is a
+#: half-open probe, so a still-dead seat simply cools again.
+_SEAT_COOLDOWN_S = 90.0
 
 #: Hard wall-clock ceiling on the engine-run pytest evidence gate (#43) so a
 #: hanging produced test suite can never hang the Leader's verify.
@@ -9833,11 +9836,22 @@ class Orchestrator:
 
     def _note_seat_unavailable(self, agent_id: "str | None") -> None:
         """The seat's model proved UNAVAILABLE (availability-class failure in
-        the producer phase) — sit it out of dispatch for the cooldown."""
+        the producer phase) — sit it out of dispatch for the cooldown.
+
+        The sit-out is announced: a seat that silently leaves the pool reads
+        as an idle producer with no cause, and the surrounding events (a
+        no-progress break, a QC hand-off) invite the wrong explanation. The
+        event names the real one and carries how long it lasts."""
         if agent_id:
             import time as _time
             self._seat_unavailable_until[agent_id] = (
                 _time.monotonic() + _SEAT_COOLDOWN_S
+            )
+            self._emit_activity(
+                role=self.default_producer_role,
+                phase="seat_cooldown",
+                agent_id=agent_id,
+                detail={"seconds": _SEAT_COOLDOWN_S},
             )
 
     def _seat_in_cooldown(self, agent_id: str) -> bool:

@@ -101,6 +101,13 @@ _PHASE: dict[str, tuple[str, str]] = {
     "jt_codified": ("★★", "codified a job template"),
     "leader_self_fix": ("✚✚", "fixed it directly"),
     "dispatch_aborted": ("!!", "attempt stopped by the breaker"),
+    # An unavailable endpoint parks the seat; naming it stops an idle
+    # producer reading as a stall with no cause.
+    "seat_cooldown": ("◌◌", "is waiting out an api endpoint cooldown"),
+    # The redo loop ended because the attempt came back byte-identical, not
+    # because the seat is unhealthy — an unmapped phase would print the raw
+    # token and invite that reading.
+    "redo_no_progress": ("!!", "repeated an identical attempt — handing to QC"),
 }
 
 

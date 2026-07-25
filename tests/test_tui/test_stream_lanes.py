@@ -97,6 +97,20 @@ async def test_conversation_pseudo_task_is_not_a_task_on_screen(_isolate):
         assert any("proj1-T-001" in m for m in tv.messages), tv.messages
 
 
+def test_seat_and_redo_phases_read_as_english_not_raw_tokens():
+    """An unmapped phase prints its raw engine token, which the operator then
+    reads as the cause of whatever happens next. Both of these name a real
+    and DIFFERENT condition, so both must speak plainly."""
+    from modulatio.tui.widgets.stream_view import _PHASE
+
+    cooldown = _PHASE["seat_cooldown"][1]
+    no_progress = _PHASE["redo_no_progress"][1]
+
+    assert "api endpoint cooldown" in cooldown
+    assert "_" not in cooldown and "_" not in no_progress
+    assert cooldown != no_progress
+
+
 def test_leader_role_covers_leader_star_and_planner():
     for r in ("leader", "leader-decompose", "leader-reflect", "leader-iterate",
               "leader-chat", "planner"):
