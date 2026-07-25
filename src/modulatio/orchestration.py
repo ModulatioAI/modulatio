@@ -4842,7 +4842,7 @@ class Orchestrator:
         return "\n\n---\n\n".join(chunks)
 
     # ── Producer: execute task → writes artifact + returns evidence ────
-    def _build_team_canvas_digest(self) -> str:
+    def _build_team_canvas_digest(self, task: "Task | None" = None) -> str:
         """Pre-V2 Slice C: build a digest of the run's artifacts/ tree
         for producer prompt injection. Returns the team_canvas module's
         rendered markdown block or its empty marker. Defensive — any
@@ -4860,7 +4860,10 @@ class Orchestrator:
             # reusable material a producer needs survives the cap.
             artifacts_root = project_dir(self.project.code) / "artifacts"
             digest = team_canvas.build_digest(
-                artifacts_root, hoist_run_id=self.project.run_id
+                artifacts_root,
+                hoist_run_id=self.project.run_id,
+                prior_components=self._reusable_prior_components(
+                    [task] if task is not None else None),
             )
         except Exception:
             return ""
@@ -5083,7 +5086,7 @@ class Orchestrator:
         # lines of each prior file so cross-file drift is reduced
         # (engineer 2 sees engineer 1's actual method names, doesn't
         # invent ones). Empty marker on first producer in the run.
-        team_canvas_block = self._build_team_canvas_digest()
+        team_canvas_block = self._build_team_canvas_digest(task)
         # Pre-V2 Slice B: project design-intent — binding constraints +
         # intentional choices the team should honor (e.g., "Python
         # stdlib only," "markdown vault, not SQLite"). Read from
@@ -7643,7 +7646,7 @@ class Orchestrator:
         )
         domain_standards = _with_operation_card(task, domain_standards)
         team_memory_context = self._recall_team_memory(task)
-        team_canvas_block = self._build_team_canvas_digest()
+        team_canvas_block = self._build_team_canvas_digest(task)
         from modulatio import design_intent as _design_intent
         design_intent_block = (
             self._iteration_contract_block()
@@ -9026,6 +9029,39 @@ class Orchestrator:
         return f"drafts/{_draft_fallback_name(task)}"
 
     # ── #151/e2e Blocker 2: per-task artifact staging + deterministic merge ──
+    def _reusable_prior_components(
+        self, tasks: "list[Task] | None",
+    ) -> "frozenset[str] | None":
+        """Which top-level components an EARLIER run may still contribute to
+        this one, or None to place no restriction.
+
+        Prose and data reuse across runs is broad — an earlier draft or a
+        gathered dataset is usable whatever it was gathered for. Code is not:
+        a module belongs to the component it was written for, and a component
+        this plan never declares belongs to a different product. Restricting
+        only code goals keeps the reuse that pays for itself while removing
+        the material that gets copied into the wrong deliverable."""
+        from modulatio import conventions as _conv
+
+        if not tasks or not any(
+            t.artifact_kind in _CODE_ARTIFACT_KINDS for t in tasks
+        ):
+            return None
+        names: set = set()
+        for gid in sorted({t.goal_id for t in tasks if t.goal_id}):
+            goal = store.get_goal(
+                self.project.code, gid, run_id=self.project.run_id)
+            if goal is None:
+                continue
+            for c in goal.convention_contracts:
+                if _conv.validate_sealed_contract(c) is not None:
+                    continue
+                for part in (c.component_root, c.source_root, c.import_name):
+                    head = str(part or "").split("/")[0].strip()
+                    if head:
+                        names.add(head)
+        return frozenset(names)
+
     def _shared_artifacts_root(self) -> Path:
         """The DURABLE artifacts tree: project-scoped + run-namespaced, so
         every run's accepted outputs accumulate side-by-side under the

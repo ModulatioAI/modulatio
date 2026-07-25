@@ -12328,7 +12328,7 @@ def test_tool_loop_honors_binary_assembly_output_file(project, tmp_path, monkeyp
     # Quiet the prompt-context collaborators (no roster / research / memory).
     monkeypatch.setattr(orch, "_ensure_research", lambda t: "")
     monkeypatch.setattr(orch, "_recall_team_memory", lambda t: "")
-    monkeypatch.setattr(orch, "_build_team_canvas_digest", lambda: "")
+    monkeypatch.setattr(orch, "_build_team_canvas_digest", lambda *a, **k: "")
     monkeypatch.setattr(orch, "_iteration_contract_block", lambda: "")
     monkeypatch.setattr(orch, "_extract_producer_proposals", lambda r, **kw: r)
 

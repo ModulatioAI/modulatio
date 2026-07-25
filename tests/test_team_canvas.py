@@ -227,6 +227,62 @@ def test_digest_hoist_run_id_puts_this_run_first(tmp_path):
     assert d.index("20260701-new/zzz.md") < d.index("20260629-old/aaa.md")
 
 
+def test_prior_run_material_is_labelled_reference_only(tmp_path):
+    """An earlier run of the same project may have built something else
+    entirely. Listed under one heading with this run's files it reads as part
+    of the same deliverable — which is how one run's modules get copied into
+    another's product."""
+    root = tmp_path / "artifacts"
+    (root / "20260629-old").mkdir(parents=True)
+    (root / "20260629-old" / "chapters.md").write_text("# ch1\nprose\n")
+    (root / "20260701-new").mkdir(parents=True)
+    (root / "20260701-new" / "site.md").write_text("# site\nbody\n")
+
+    d = build_digest(root, hoist_run_id="20260701-new")
+
+    assert "### This run — the deliverable being built" in d
+    assert "REFERENCE ONLY" in d
+    assert "never copy these files into it" in d
+    # The fence sits BETWEEN the runs, not after both.
+    assert d.index("20260701-new/site.md") < d.index("REFERENCE ONLY")
+    assert d.index("REFERENCE ONLY") < d.index("20260629-old/chapters.md")
+
+
+def test_prior_components_filter_drops_another_objectives_work(tmp_path):
+    """A code plan names the components it builds. An earlier run's tree that
+    this plan never declares belongs to a different product, so it is not
+    offered as material at all."""
+    root = tmp_path / "artifacts"
+    old, new = root / "20260629-old", root / "20260701-new"
+    (old / "narrative").mkdir(parents=True)
+    (old / "narrative" / "engine.py").write_text("x = 1\n")
+    (old / "slate").mkdir(parents=True)
+    (old / "slate" / "util.py").write_text("y = 2\n")
+    (new / "slate").mkdir(parents=True)
+    (new / "slate" / "main.py").write_text("z = 3\n")
+
+    d = build_digest(root, hoist_run_id="20260701-new",
+                     prior_components=frozenset({"slate"}))
+
+    assert "20260701-new/slate/main.py" in d   # this run, always
+    assert "20260629-old/slate/util.py" in d   # prior run, declared component
+    assert "narrative/engine.py" not in d      # another objective's work
+
+
+def test_no_filter_still_offers_every_prior_run(tmp_path):
+    """Prose and data reuse stays broad: with no declared component set the
+    digest spans runs exactly as before."""
+    root = tmp_path / "artifacts"
+    (root / "20260629-old").mkdir(parents=True)
+    (root / "20260629-old" / "notes.md").write_text("# notes\n")
+    (root / "20260701-new").mkdir(parents=True)
+    (root / "20260701-new" / "draft.md").write_text("# draft\n")
+
+    d = build_digest(root, hoist_run_id="20260701-new")
+
+    assert "20260629-old/notes.md" in d
+
+
 def test_digest_prior_runs_ordered_most_recent_first(tmp_path):
     """Among prior runs, the most recent (lexicographically-largest run id,
     since ids are timestamp-prefixed) is listed first — the freshest prior

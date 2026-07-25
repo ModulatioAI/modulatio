@@ -76,7 +76,12 @@ def _within_tree(path: Path, root_resolved: Path) -> bool:
     return True
 
 
-def build_digest(artifacts_root: Path, *, hoist_run_id: str | None = None) -> str:
+def build_digest(
+    artifacts_root: Path,
+    *,
+    hoist_run_id: str | None = None,
+    prior_components: "frozenset[str] | None" = None,
+) -> str:
     """Render a markdown digest of ``artifacts_root``'s contents.
 
     Empty / missing dir → an empty marker line so the prompt slot
@@ -118,6 +123,18 @@ def build_digest(artifacts_root: Path, *, hoist_run_id: str | None = None) -> st
         and p.is_file()
         and _within_tree(p, root_resolved)
     ]
+    if prior_components is not None and hoist_run_id:
+        # A prior run belongs to whatever objective produced it. When the
+        # caller can name the components THIS plan declares, everything else
+        # from an earlier run is another objective's work and is dropped
+        # rather than offered as material.
+        def _keeps(p: Path) -> bool:
+            parts = p.relative_to(artifacts_root).parts
+            if not parts or parts[0] == hoist_run_id:
+                return True
+            return len(parts) > 1 and parts[1] in prior_components
+
+        files = [p for p in files if _keeps(p)]
     if not files:
         return _empty_marker()
 
@@ -141,6 +158,9 @@ def build_digest(artifacts_root: Path, *, hoist_run_id: str | None = None) -> st
         files.sort(key=lambda p: str(p.relative_to(artifacts_root)))
 
     out: list[str] = ["## Team canvas — what the team has built so far", ""]
+    if hoist_run_id:
+        out += ["### This run — the deliverable being built", ""]
+    prior_header_pending = bool(hoist_run_id)
     total_chars = 0
     truncated = False
     omitted = 0
@@ -167,6 +187,16 @@ def build_digest(artifacts_root: Path, *, hoist_run_id: str | None = None) -> st
 
     for path in files:
         rel = path.relative_to(artifacts_root)
+        if prior_header_pending and _run_component(path) != hoist_run_id:
+            # Everything past this point came from an EARLIER run of this
+            # project, which may have been a different objective entirely.
+            # Unlabelled, it reads as part of the same deliverable — which is
+            # how one run's modules end up copied into another's product.
+            prior_header_pending = False
+            for line in ("", "### Earlier runs in this project — REFERENCE ONLY",
+                         "(not part of this deliverable; reuse what you learn, "
+                         "never copy these files into it)", ""):
+                _emit(line, count_omit=False)
         # Stat first — refusing to read oversized files keeps a multi-MiB
         # log out of memory just to slice the first HEAD_LINES off it.
         try:
