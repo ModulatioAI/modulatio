@@ -1,9 +1,9 @@
 # Designated Linux gate — black-box substrate tier
 
 ## Provenance (captured BEFORE the run, from the clean commit under test)
-git rev-parse HEAD : f2ebb2281b42f8d9b00f0d1a3eb30869be4a0b91
+git rev-parse HEAD : c56b19e19dd1bd522339a20968f6d7fda3ec355d
 git status --porcelain: <empty — clean worktree>
-run-started-utc     : 2026-07-24T23:56:51Z
+run-started-utc     : 2026-07-25T00:48:32Z
 
 ## Host
 uname -srm: Linux 7.0.0-28-generic x86_64
@@ -24,7 +24,7 @@ tests/test_access_sandbox_blackbox.py::test_state_refused_denies_run PASSED [ 66
 tests/test_access_sandbox_blackbox.py::test_convention_import_smoke_runs_genuinely_confined PASSED [ 83%]
 tests/test_access_sandbox_blackbox.py::test_black_box_states_cover_every_substrate_descriptor PASSED [100%]
 
-============================== 6 passed in 0.44s ===============================
+============================== 6 passed in 0.82s ===============================
 ```
 
-run-finished-utc: 2026-07-24T23:56:52Z
+run-finished-utc: 2026-07-25T00:48:33Z
