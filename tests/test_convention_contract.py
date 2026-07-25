@@ -849,6 +849,36 @@ def test_tampered_projection_refuses_dispatch(project, monkeypatch):
     assert orch._task_plan_dispatch_refusal(victim) is not None
 
 
+def test_dispatch_refusal_ticket_describes_the_plan_witness(
+    project, monkeypatch,
+):
+    """A dispatch refusal opens a ticket for work that NEVER ran, so its
+    body must not describe exhausted attempts or a failed QC-as-fixer
+    salvage — and it must point at the plan, not at re-running a producer
+    that cannot invent authority."""
+    from modulatio import store as store_mod
+    from modulatio.orchestration import RunSummary
+
+    orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
+    victim = next(t for t in tasks if t.artifact_kind == "code")
+    victim.convention_contract_id = "cvc-imposter"
+    store_mod.save_task(PROJECT_CODE, victim)
+    orch._producer_execute = (  # type: ignore[assignment]
+        lambda task, corrective_notes="": (_ for _ in ()).throw(
+            AssertionError("producer must not run on a refused dispatch")))
+
+    orch._run_task_with_redo_inner(victim, RunSummary(project=project))
+
+    (ticket,) = [t for t in store_mod.list_tickets(PROJECT_CODE)
+                 if t.affected_task_id == victim.id]
+    assert "exhausted" not in ticket.body
+    assert "QC-as-fixer" not in ticket.body
+    assert "dispatch refused" in ticket.body.lower()
+    assert "re-plan" in ticket.body
+    # The mechanism reason still reaches the operator.
+    assert "cvc-imposter" in ticket.body or "projection" in ticket.body
+
+
 def test_minted_child_rides_mint_authority_not_plan_manifest(
     project, monkeypatch,
 ):

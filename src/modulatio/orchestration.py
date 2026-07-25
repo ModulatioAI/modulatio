@@ -10108,7 +10108,18 @@ class Orchestrator:
             )
             t.status = TaskStatus.BLOCKED
             summary.errors.append(f"{t.id}: {plan_refusal}")
-            self._ticket_for_failed_task(t, plan_refusal)
+            self._ticket_for_failed_task(
+                t, plan_refusal,
+                what_happened=(
+                    f"Dispatch refused for task **{t.id}** — the goal's task "
+                    f"plan is incomplete, tampered with, or never committed, "
+                    f"so nothing authorized this task to run. No producer "
+                    f"was called and no fix was attempted."),
+                remedy=(
+                    "Restore the missing or altered task records and re-run, "
+                    "or re-plan the goal. A producer re-run cannot help: it "
+                    "cannot invent the plan authority this check requires."),
+            )
             return
         corrective_notes = initial_corrective_notes
         last_qc: tuple[AssertionEvidence, str] | None = None  # (verdict, notes)
@@ -11145,13 +11156,30 @@ class Orchestrator:
         self._emit_activity(role="qc", phase="qc_sweep_ended")
         return completed_any
 
-    def _ticket_for_failed_task(self, t: Task, reason: str) -> None:
+    def _ticket_for_failed_task(
+        self, t: Task, reason: str, *,
+        what_happened: str | None = None, remedy: str | None = None,
+    ) -> None:
         """Open an operator ticket when a task terminates FAILED (BLOCKED /
         QC_REJECTED) so the wedge surfaces in the Tickets tab — not only the error
         log — failures landed in logs but were never ticketed, and
         the Leader can't read logs either). Environmental defects open their own
         dedicated ticket; this is the generic terminal-failure path. Best-effort +
-        wave-safe (deferred to the merge phase when isolated)."""
+        wave-safe (deferred to the merge phase when isolated).
+
+        The default narrative describes attempt exhaustion, which is only true
+        for tasks that actually ran. A caller that terminates a task WITHOUT
+        producer work supplies its own ``what_happened``/``remedy`` so the
+        ticket does not describe recovery attempts that never happened."""
+        happened = what_happened or (
+            f"Task **{t.id}** ({t.artifact_kind or '?'}) could not be "
+            f"completed — it exhausted its attempts and the QC-as-fixer "
+            f"backstop could not recover it.")
+        next_step = remedy or (
+            "Review the task and the run logs (`modulatio logs`), then "
+            "re-run or revise the objective. A recurring failure on the "
+            "same kind may mean the producer model is unsuited to it.")
+
         def _open():
             store.create_ticket(
                 project_id=self.project.id,
@@ -11160,14 +11188,9 @@ class Orchestrator:
                 priority=TicketPriority.CRITICAL,
                 title=f"task {t.id} failed: {reason[:80]}",
                 body=(
-                    f"## What happened\n\nTask **{t.id}** ({t.artifact_kind or '?'}) "
-                    f"could not be completed — it exhausted its attempts and the "
-                    f"QC-as-fixer backstop could not recover it.\n\n"
+                    f"## What happened\n\n{happened}\n\n"
                     f"## Reason\n\n{reason}\n\n"
-                    f"## What you can do\n\nReview the task and the run logs "
-                    f"(`modulatio logs`), then re-run or revise the objective. A "
-                    f"recurring failure on the same kind may mean the producer "
-                    f"model is unsuited to it.\n"
+                    f"## What you can do\n\n{next_step}\n"
                 ),
                 affected_task_id=t.id,
                 actor="orchestrator",
