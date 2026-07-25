@@ -12750,11 +12750,20 @@ class Orchestrator:
             """The finalized observation, or an empty set. Absent, oversized,
             malformed, wrong-schema, and unknown-token data all mean NO
             evidence — never a crash, and never a token the engine did not
-            declare."""
+            declare.
+
+            Size is judged on the SAME descriptor the content comes from:
+            a separate ``stat()`` leaves a window in which a surviving child
+            can grow or replace the file after it measured small. Reading one
+            byte past the cap is what detects an oversized file, since a
+            bounded read cannot otherwise tell "exactly the cap" from
+            "truncated at the cap"."""
             try:
-                if path.stat().st_size > _OBSERVATION_MAX_BYTES:
+                with path.open("rb") as handle:
+                    raw = handle.read(_OBSERVATION_MAX_BYTES + 1)
+                if len(raw) > _OBSERVATION_MAX_BYTES:
                     return set()
-                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload = json.loads(raw)
             except (OSError, ValueError):
                 return set()
             if (not isinstance(payload, dict)

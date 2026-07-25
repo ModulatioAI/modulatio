@@ -18,7 +18,7 @@ import pytest
 
 from modulatio import conventions
 from modulatio import orchestration as orch_mod
-from modulatio.orchestration import Orchestrator
+from modulatio.orchestration import _OBSERVATION_MAX_BYTES, Orchestrator
 from modulatio.types import Task
 
 #: The real gate, captured before any per-test stub replaces it — the
@@ -1260,6 +1260,16 @@ class _ObservationShell(_DeterministicRunShell):
 #: How the gate must read each shape of observation data. Anything it cannot
 #: recognise supplies NO evidence — never a crash, and never a token the
 #: engine did not declare for this goal.
+def _padded(tok: str, total: int) -> str:
+    """A genuine payload grown to exactly ``total`` bytes with trailing
+    whitespace, which JSON ignores. Pins the read boundary: the reader takes
+    at most one byte past the cap, so a file AT the cap still parses and one
+    byte OVER is rejected — the size is enforced by the read itself, with no
+    separate ``stat()`` a later write could race."""
+    base = '{"schema": 1, "tokens": ["%s"]}' % tok
+    return base + " " * (total - len(base))
+
+
 _OBSERVATION_PAYLOADS = {
     "genuine": (lambda tok: '{"schema": 1, "tokens": ["%s"]}' % tok, True),
     "absent": (lambda tok: None, False),
@@ -1274,6 +1284,9 @@ _OBSERVATION_PAYLOADS = {
     "unhashable-member": (lambda tok: '{"schema": 1, "tokens": [{}]}', False),
     "undeclared-token": (
         lambda tok: '{"schema": 1, "tokens": ["cvc-000000000000"]}', False),
+    "at-cap": (lambda tok: _padded(tok, _OBSERVATION_MAX_BYTES), True),
+    "one-past-cap": (lambda tok: _padded(tok, _OBSERVATION_MAX_BYTES + 1),
+                     False),
     "oversized": (
         lambda tok: '{"schema": 1, "tokens": ["%s"]}' % tok + " " * 70_000,
         False),
@@ -1284,10 +1297,10 @@ _OBSERVATION_PAYLOADS = {
 def test_only_recognisable_observation_data_is_evidence(
     project, monkeypatch, shape,
 ):
-    """One control and ten refusals through the same reader: the genuine
-    token binds, and every unreadable, unrecognised, oversized, or
-    undeclared form falls back to no evidence without raising out of the
-    gate."""
+    """The reader through its whole vocabulary: a genuine token binds and a
+    payload exactly at the size cap still binds, while every unreadable,
+    unrecognised, over-cap, or undeclared form falls back to no evidence
+    without raising out of the gate."""
     from modulatio import store as store_mod
 
     orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
