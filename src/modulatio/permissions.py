@@ -12,24 +12,24 @@ room that only ever says NO is a brick wall. This module turns the refusal into 
 
 and **remembers** session/always answers so it never nags twice.
 
-Design: ``docs/design/operator-permissions-and-autonomy.md``. The §6 invariants are binding:
+Five invariants bind this module:
 
-- **§6.A auto-grant bypasses the ASK, never the SUBSTRATE.** ``/yolo`` skips the
+- **Auto-grant bypasses the ASK, never the SUBSTRATE.** ``/yolo`` skips the
   human prompt; it never runs a sandbox-requiring capability unsandboxed. A
   ``requires_sandbox`` capability under yolo, on a host without a live sandbox,
   falls back to the ask (or denies headless) — never auto-runs open.
-- **§6.B typed, scope-aware keys; durability ⇒ specificity.** The plain-English
+- **Typed, scope-aware keys; durability ⇒ specificity.** The plain-English
   label is never the policy key. ``once`` is exact, ``session`` per-origin,
   ``always``/JT per-domain — an ``always`` key is never coarser than a ``session``
   key. Keys are schema-validated on write AND load.
-- **§6.C fail-closed.** Unknown/malformed decision → DENY. ``ask`` raising → DENY.
+- **Fail closed.** Unknown/malformed decision → DENY. ``ask`` raising → DENY.
   Headless (no ``ask``) + no preauthorization → DENY. ``fail_closed=False`` is an
   operator/admin knob, never reachable from model/frontmatter/JT/tool args.
-- **§6.D/E trusted write authority.** ``record(ALLOW_ALWAYS)`` happens only as the
+- **Trusted write authority.** ``record(ALLOW_ALWAYS)`` happens only as the
   result of an operator answer through the trusted ``ask`` channel — model/tool
   code can *request* a grant but never *record* one. The persistent store is
   engine-owned, ``0600``, schema-validated; a corrupt file fails closed with audit.
-- **§6.F ``/goal`` is orthogonal to access** — delegating judgment never auto-grants
+- **``/goal`` is orthogonal to access** — delegating judgment never auto-grants
   a capability; access never bypasses the metered/budget gate.
 """
 from __future__ import annotations
@@ -65,14 +65,14 @@ class RunMode(enum.Enum):
     @property
     def auto_grants_capabilities(self) -> bool:
         """``/yolo`` and ``/yolo-goal`` auto-approve the access questions — the
-        padded room stays ON (§6.A), only the *asking* is skipped."""
+        padded room stays ON, only the *asking* is skipped."""
         return self in (RunMode.YOLO, RunMode.YOLO_GOAL)
 
     @property
     def delegates_judgment(self) -> bool:
         """``/goal`` and ``/yolo-goal`` let the Leader decide *how* without asking.
-        Read by the converse/verify loop — NOT by the access questions (§6.F:
-        ``/goal`` alone still asks before reaching for a capability)."""
+        Read by the converse/verify loop — NOT by the access questions:
+        ``/goal`` alone still asks before reaching for a capability."""
         return self in (RunMode.GOAL, RunMode.YOLO_GOAL)
 
     @classmethod
@@ -113,7 +113,7 @@ class Decision(enum.Enum):
     @classmethod
     def coerce(cls, value: object) -> "Decision":
         """Map a surface's answer to a Decision. Anything unrecognized → DENY
-        (§6.C fail-closed)."""
+        (fail closed)."""
         if isinstance(value, Decision):
             return value
         # Don't stringify arbitrary objects — a hostile
@@ -130,7 +130,7 @@ class Decision(enum.Enum):
         }.get(key, cls.DENY)
 
 
-# ── capabilities + typed scope-aware keys (§6.B) ───────────────────────────
+# ── capabilities + typed scope-aware keys ──────────────────────────────────
 @dataclass(frozen=True)
 class Capability:
     """What the team is asking for. ``label`` is plain-language (for the ask);
@@ -144,7 +144,7 @@ class Capability:
     kind: str                      # "network" | "shell" | "secret" | "file-write" | "tool:<n>"
     label: str                     # plain-language ask
     detail: str = ""               # specifics shown to the operator
-    requires_sandbox: bool = False  # §6.A: needs the bwrap substrate to run
+    requires_sandbox: bool = False  # needs the bwrap substrate to run
 
     def __post_init__(self) -> None:
         # The constructor consumes the declared inventory — an undeclared
@@ -176,8 +176,8 @@ class Capability:
 def mode_status_rows(
     mode: "RunMode", *, sandbox_available: bool, profile: str, bypass: bool
 ) -> "tuple[str, str]":
-    """§2.5 — two INDEPENDENT status rows the surface renders, so an autonomy mode
-    can never HIDE the substrate posture (§6.A/§4): a `/yolo` that auto-grants the
+    """Two INDEPENDENT status rows the surface renders, so an autonomy mode
+    can never HIDE the substrate posture: a `/yolo` that auto-grants the
     ask must still show plainly when the sandbox is off/unavailable. Pure logic
     (web-UI-safe): the caller supplies the live substrate state.
 
@@ -206,7 +206,7 @@ def _host_of(url: str) -> str:
 # multi-label public suffix (``x.co.uk`` → ``co.uk``) into a registrar-wide grant.
 # Without a full public-suffix-list dependency, we derive a registrable domain ONLY
 # when we're confident, and otherwise return "" so an ``always`` grant falls back to
-# the exact HOST (never broader than a session grant — the §6.B floor).
+# the exact HOST (never broader than a session grant — the specificity floor).
 _COMPOUND_SUFFIXES = frozenset({
     "co.uk", "org.uk", "gov.uk", "ac.uk", "me.uk", "net.uk", "sch.uk", "ltd.uk", "plc.uk",
     "com.au", "net.au", "org.au", "edu.au", "gov.au", "id.au",
@@ -334,7 +334,7 @@ def validate_capability_dispatch() -> None:
 
 
 def capability_for(tool_name: str, args: "dict | None" = None) -> Capability:
-    """Map a tool call to its typed, scope-aware Capability (§6.B).
+    """Map a tool call to its typed, scope-aware Capability.
 
     ``Capability.label``/``detail`` are the HUMAN utterance a surface speaks
     in the Leader's voice ("access the internet"), never the policy key —
@@ -1249,7 +1249,7 @@ def build_authorization_coordinator(
     return authorize
 
 
-# ── grant key schema validation (§6.B/D) ───────────────────────────────────
+# ── grant key schema validation ────────────────────────────────────────────
 _VALID_GRANT_PREFIXES = (
     "network:url=", "network:host=", "network:domain=",
     "shell:argv=", "shell:profile=",
@@ -1258,18 +1258,18 @@ _VALID_GRANT_PREFIXES = (
 
 
 def is_valid_grant_key(key: object) -> bool:
-    """A persisted/preauthorized key must match the typed schema (§6.B). Unknown
+    """A persisted/preauthorized key must match the typed schema. Unknown
     shapes are denied on load rather than blindly trusted."""
     return isinstance(key, str) and any(key.startswith(p) for p in _VALID_GRANT_PREFIXES)
 
 
-# ── grant store (§6.D — engine-owned, 0600, schema-validated, audited) ─────
+# ── grant store (engine-owned, 0600, schema-validated, audited) ────────────
 class GrantStore:
     """Remembers what the operator allowed. SESSION grants live in memory for the
     life of the broker; ALWAYS grants persist to an engine-owned ``0600`` JSON.
     ONCE grants are never remembered. Thread-safe.
 
-    §6.D: only valid typed keys are loaded (a poisoned/corrupt file fails closed —
+    Only valid typed keys are loaded (a poisoned/corrupt file fails closed —
     bad keys are dropped + flagged via ``on_corrupt``, not blindly trusted)."""
 
     def __init__(
@@ -1288,7 +1288,7 @@ class GrantStore:
         if not self._persist_path or not self._persist_path.exists():
             return set()
         try:
-            # tighten perms on load even for a legacy/foreign file (§6.D)
+            # tighten perms on load even for a legacy/foreign file
             try:
                 os.chmod(self._persist_path, 0o600)
             except OSError:
@@ -1356,7 +1356,7 @@ class GrantStore:
     def record(self, cap: Capability, decision: Decision, *,
                strict: bool = False) -> None:
         """Persist a SESSION/ALWAYS grant for the scoped key. ONCE/DENY persist
-        nothing. (§6.D: only ever called by the broker as the result of an operator
+        nothing. (Only ever called by the broker as the result of an operator
         answer through the trusted ``ask`` channel — never by model/tool code.)
         ``strict`` re-raises a durable-write failure so an authorization
         transaction can roll back instead of executing on a swallowed error."""
@@ -1451,8 +1451,8 @@ class PermissionBroker:
     """Decides whether a tool call is allowed, asking the operator (in the Leader's
     voice, via ``ask``) with the four scoped options only when it must.
 
-    §6.A substrate preflight, §6.C fail-closed, §6.D operator-only record,
-    §6.F orthogonal ``/goal`` + spend≠access (the metered gate is separate, applied
+    Substrate preflight, fail-closed decisions, operator-only record, and an
+    orthogonal ``/goal`` + spend≠access (the metered gate is separate, applied
     by the runner after this broker)."""
 
     def __init__(
@@ -1470,7 +1470,7 @@ class PermissionBroker:
         self.mode = mode
         self.grants = grants if grants is not None else GrantStore()
         self.ask = ask
-        # §6.E: preauthorized comes ONLY from validated bound-JT state. We defensively
+        # Preauthorized comes ONLY from validated bound-JT state. We defensively
         # drop any key that doesn't match the typed schema.
         self.preauthorized = frozenset(
             k for k in (preauthorized or frozenset()) if is_valid_grant_key(k)
@@ -1507,7 +1507,7 @@ class PermissionBroker:
         state, cap = self.resolve_capability(tool_name, args)
         if state != "ask":
             return state == "allow"
-        # Must ask. Headless (no ask) → fail-closed deny (§6.C).
+        # Must ask. Headless (no ask) → fail-closed deny.
         if self.ask is None:
             return not self.fail_closed
         try:
@@ -1532,7 +1532,7 @@ class PermissionBroker:
         if cap.kind.startswith("tool:"):
             return "allow", None
 
-        # §6.A — the substrate is the HULL, not a preflight. A sandbox-requiring
+        # The substrate is the HULL, not a preflight. A sandbox-requiring
         # capability cannot run without a live
         # sandbox by ANY path — not yolo, not a remembered/preauthorized grant, and
         # NOT a fresh operator ALLOW through the ask. The ONLY override is an
@@ -1564,7 +1564,7 @@ class PermissionBroker:
         if not decision.allows:
             self._emit(cap, Decision.DENY)
             return False
-        # §6.D: record happens ONLY here, as the result of the operator's answer.
+        # Record happens ONLY here, as the result of the operator's answer.
         self.grants.record(cap, decision, strict=strict)
         self._emit(cap, decision)
         return True
