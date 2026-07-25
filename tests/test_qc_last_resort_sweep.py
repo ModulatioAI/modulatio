@@ -25,6 +25,16 @@ from modulatio.types import (
     TaskStatus,
 )
 
+
+def _seed_task_record(code, task, body="", run_id=None):
+    """Create-or-update seeding: the engine's ordinary saves never create,
+    and tests seed records the production paths assume already exist."""
+    from modulatio.types import ToolBudgetConflict
+    try:
+        return store.create_task(code, task, body=body, run_id=run_id)
+    except ToolBudgetConflict:
+        return store.save_task(code, task, body=body, run_id=run_id)
+
 PROJECT_CODE = "QLS"
 
 
@@ -95,6 +105,7 @@ def test_sweep_builds_a_cascade_blocked_leaf(project: Project):
     goal = _goal(project.id)
     t = _task(project.id, "QLS-T-001")
     _cascade_block(t, "QLS-T-000")
+    _seed_task_record(project.code, t)
     prompts = _qc_answers(orch)
     summary = RunSummary(project=project)
 
@@ -118,6 +129,8 @@ def test_sweep_builds_in_dep_order_and_feeds_dep_context(project: Project):
         project.id, "QLS-T-002", depends_on=["QLS-T-001"], deliverable=True,
     )
     _cascade_block(assembler, "QLS-T-001")
+    _seed_task_record(project.code, sibling)
+    _seed_task_record(project.code, assembler)
 
     order: list[str] = []
     bodies = {"QLS-T-001": "SIBLING-CONTENT-XYZZY", "QLS-T-002": "ASSEMBLY"}
@@ -237,7 +250,7 @@ def test_disappointed_exit_sweeps_then_reverifies_once(project: Project):
     t = _task(project.id, "QLS-T-001", deliverable=True)
     _cascade_block(t, "QLS-T-000")
     store.save_goal(project.code, goal)
-    store.save_task(project.code, t)
+    _seed_task_record(project.code, t)
     _qc_answers(orch)
     summary = RunSummary(project=project)
 
@@ -258,7 +271,7 @@ def test_sweep_is_one_shot_per_goal(project: Project):
     t = _task(project.id, "QLS-T-001", deliverable=True)
     _cascade_block(t, "QLS-T-000")
     store.save_goal(project.code, goal)
-    store.save_task(project.code, t)
+    _seed_task_record(project.code, t)
     _qc_answers(orch)
     summary = RunSummary(project=project)
 
@@ -281,7 +294,7 @@ def test_zero_completed_redo_sweeps_instead_of_settling(project: Project):
     t = _task(project.id, "QLS-T-001", deliverable=True)
     t.status = TaskStatus.QC_REJECTED
     store.save_goal(project.code, goal)
-    store.save_task(project.code, t)
+    _seed_task_record(project.code, t)
     _qc_answers(orch)
 
     def _redo_run(task, summary, initial_corrective_notes=""):

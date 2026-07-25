@@ -16,6 +16,16 @@ from modulatio.orchestration import Orchestrator, RunSummary, TaskExecutionResul
 from modulatio.types import Goal, GoalStatus, Project, Task, TaskStatus
 
 
+def _seed_task_record(code, task, body="", run_id=None):
+    """Create-or-update seeding: the engine's ordinary saves never create,
+    and tests seed records the production paths assume already exist."""
+    from modulatio.types import ToolBudgetConflict
+    try:
+        return store.create_task(code, task, body=body, run_id=run_id)
+    except ToolBudgetConflict:
+        return store.save_task(code, task, body=body, run_id=run_id)
+
+
 def _orch(tmp_path, monkeypatch, code="CPL"):
     monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
     vault.init_project(code, "continuous-pull test", "obj")
@@ -53,7 +63,7 @@ def _goal():
 
 def _run(orch, tasks):
     for t in tasks:
-        store.save_task(orch.project.code, t, run_id=orch.project.run_id)
+        _seed_task_record(orch.project.code, t, run_id=orch.project.run_id)
     summary = RunSummary(project=orch.project)
     orch._run_task_waves(_goal(), tasks, summary, {t.id: t for t in tasks})
     return summary
@@ -116,7 +126,7 @@ def test_continuous_pull_before_slow_sibling(tmp_path, monkeypatch):
     b = _task("CPL-T-B")
     c = _task("CPL-T-C", deps=["CPL-T-A"])
     for t in (a, b, c):
-        store.save_task(orch.project.code, t, run_id=orch.project.run_id)
+        _seed_task_record(orch.project.code, t, run_id=orch.project.run_id)
     summary = RunSummary(project=orch.project)
 
     runner = threading.Thread(
@@ -228,7 +238,7 @@ def test_continuous_global_cap_limits_concurrency(tmp_path, monkeypatch):
     t1 = _task("CPL-T-1")
     t2 = _task("CPL-T-2")  # both NO_CONSTRAINT; 4 producers free
     for t in (t1, t2):
-        store.save_task(orch.project.code, t, run_id=orch.project.run_id)
+        _seed_task_record(orch.project.code, t, run_id=orch.project.run_id)
     summary = RunSummary(project=orch.project)
     runner = threading.Thread(
         target=orch._run_task_waves,
@@ -287,7 +297,7 @@ def test_pull_loop_repumps_while_a_call_hangs(tmp_path, monkeypatch):
     a = _task("CPL-T-A", skills=["drafter"])
     b = _task("CPL-T-B", skills=["drafter"])
     for t in (a, b):
-        store.save_task(orch.project.code, t, run_id=orch.project.run_id)
+        _seed_task_record(orch.project.code, t, run_id=orch.project.run_id)
     summary = RunSummary(project=orch.project)
     runner = threading.Thread(
         target=orch._run_task_waves,

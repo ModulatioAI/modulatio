@@ -22,6 +22,16 @@ from modulatio.types import (
 )
 
 
+def _seed_task_record(code, task, body="", run_id=None):
+    """Create-or-update seeding: the engine's ordinary saves never create,
+    and tests seed records the production paths assume already exist."""
+    from modulatio.types import ToolBudgetConflict
+    try:
+        return store.create_task(code, task, body=body, run_id=run_id)
+    except ToolBudgetConflict:
+        return store.save_task(code, task, body=body, run_id=run_id)
+
+
 CODE = "TDN"
 RUN = "20260605T180000Z-aaa111"
 
@@ -68,8 +78,8 @@ def test_teardown_abandons_nonterminal_and_closes_tickets(orch):
     store.save_goal(CODE, _goal("TDN-G-001", GoalStatus.BLOCKED), run_id=RUN)
     store.save_goal(CODE, _goal("TDN-G-002", GoalStatus.IN_PROGRESS), run_id=RUN)
     store.save_goal(CODE, _goal("TDN-G-003", GoalStatus.COMPLETED), run_id=RUN)
-    store.save_task(CODE, _task("TDN-T-001", TaskStatus.PENDING), run_id=RUN)
-    store.save_task(CODE, _task("TDN-T-002", TaskStatus.COMPLETED), run_id=RUN)
+    _seed_task_record(CODE, _task("TDN-T-001", TaskStatus.PENDING), run_id=RUN)
+    _seed_task_record(CODE, _task("TDN-T-002", TaskStatus.COMPLETED), run_id=RUN)
     store.create_ticket(project_id=pid, project_code=CODE, priority=TicketPriority.CRITICAL,
                         title="ALX-style wedge", run_id=RUN)
 

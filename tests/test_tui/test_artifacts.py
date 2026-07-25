@@ -26,6 +26,17 @@ from modulatio.tui.widgets import export_dialog as ed_mod
 from modulatio.tui.widgets.export_dialog import ExportDialog
 
 
+def _seed_task_record(code, task, body="", run_id=None):
+    """Create-or-update seeding: the engine's ordinary saves never create,
+    and tests seed records the production paths assume already exist."""
+    from modulatio import store
+    from modulatio.types import ToolBudgetConflict
+    try:
+        return store.create_task(code, task, body=body, run_id=run_id)
+    except ToolBudgetConflict:
+        return store.save_task(code, task, body=body, run_id=run_id)
+
+
 PROJECT_CODE = "ART"
 
 
@@ -897,7 +908,6 @@ async def test_finished_product_is_flagged_and_hoisted(tui_vault_with_artifacts)
     from uuid import uuid4
     from textual.widgets import ListView, TabbedContent
     from modulatio.tui.app import ModulatioApp
-    from modulatio import store
     from modulatio.types import Task
 
     run_id = "20260101T000000Z-abc123"
@@ -907,7 +917,7 @@ async def test_finished_product_is_flagged_and_hoisted(tui_vault_with_artifacts)
     art.mkdir(parents=True, exist_ok=True)
     (art / "final.md").write_text("# Final Report\n\nThe product.\n")
     # A deliverable-tagged task points at it.
-    store.save_task(
+    _seed_task_record(
         PROJECT_CODE,
         Task(
             id="T-001", project_id=uuid4(), goal_id="G-001",
@@ -938,7 +948,6 @@ async def test_finished_products_stay_starred_across_all_runs(tui_vault_with_art
     from uuid import uuid4
     from textual.widgets import ListView, TabbedContent
     from modulatio.tui.app import ModulatioApp
-    from modulatio import store
     from modulatio.types import Task
 
     # TWO runs, each with its own finished product; the SECOND is the latest.
@@ -948,7 +957,7 @@ async def test_finished_products_stay_starred_across_all_runs(tui_vault_with_art
         art = vault.project_dir(PROJECT_CODE) / "artifacts" / rid / "drafts"
         art.mkdir(parents=True, exist_ok=True)
         (art / fname).write_text(f"# {fname}\n")
-        store.save_task(
+        _seed_task_record(
             PROJECT_CODE,
             Task(id=f"T-{rid[-3:]}", project_id=uuid4(), goal_id="G-001",
                  description="deliverable", deliverable=True,

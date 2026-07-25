@@ -33,6 +33,16 @@ from modulatio.orchestration import (
 )
 from modulatio.types import Goal, GoalStatus, Project, Task, TaskStatus
 
+
+def _seed_task_record(code, task, body="", run_id=None):
+    """Create-or-update seeding: the engine's ordinary saves never create,
+    and tests seed records the production paths assume already exist."""
+    from modulatio.types import ToolBudgetConflict
+    try:
+        return store.create_task(code, task, body=body, run_id=run_id)
+    except ToolBudgetConflict:
+        return store.save_task(code, task, body=body, run_id=run_id)
+
 PROJECT_CODE = "OPC"
 
 
@@ -92,7 +102,7 @@ def _run_verify_capture(project: Project, *, operator_present: bool) -> str:
         output_path="out.md",
         status=TaskStatus.COMPLETED,
     )
-    store.save_task(project.code, task)
+    _seed_task_record(project.code, task)
 
     orch, captured = _capturing_orch(project, operator_present=operator_present)
     orch._leader_verify_goal(goal, [task], RunSummary(project=project))

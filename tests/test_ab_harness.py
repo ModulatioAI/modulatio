@@ -61,6 +61,17 @@ from modulatio.ab_harness import (
 )
 
 
+def _seed_task_record(code, task, body="", run_id=None):
+    """Create-or-update seeding: the engine's ordinary saves never create,
+    and tests seed records the production paths assume already exist."""
+    from modulatio import store
+    from modulatio.types import ToolBudgetConflict
+    try:
+        return store.create_task(code, task, body=body, run_id=run_id)
+    except ToolBudgetConflict:
+        return store.save_task(code, task, body=body, run_id=run_id)
+
+
 # ── fixtures + builders ─────────────────────────────────────────────────
 
 
@@ -341,8 +352,8 @@ def test_extract_qc_metrics_against_real_engine_state(tmp_path, monkeypatch) -> 
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
-    store.save_task(project.code, task_a, run_id="run-001")
-    store.save_task(project.code, task_b, run_id="run-001")
+    _seed_task_record(project.code, task_a, run_id="run-001")
+    _seed_task_record(project.code, task_b, run_id="run-001")
 
     # Now ask the extractor for the snapshot using the same surface
     # run_experiment uses.

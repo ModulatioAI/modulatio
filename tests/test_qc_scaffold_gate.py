@@ -21,6 +21,16 @@ from modulatio import store, vault
 from modulatio.orchestration import Orchestrator
 from modulatio.types import Project, Task
 
+
+def _seed_task_record(code, task, body="", run_id=None):
+    """Create-or-update seeding: the engine's ordinary saves never create,
+    and tests seed records the production paths assume already exist."""
+    from modulatio.types import ToolBudgetConflict
+    try:
+        return store.create_task(code, task, body=body, run_id=run_id)
+    except ToolBudgetConflict:
+        return store.save_task(code, task, body=body, run_id=run_id)
+
 LEAKED = (
     "I now have all the data I need. Let me write the corrected artifact.\n\n"
     "**Operation:** Produce Research Note\n"
@@ -67,7 +77,7 @@ def test_leaked_scaffold_is_rejected_before_the_llm_can_pass_it(project):
     that is the whole point (five Sonnet passes missed it live)."""
     orch = _orch(project)  # qc stub passes everything
     task = _task(project)
-    store.save_task(project.code, task)
+    _seed_task_record(project.code, task)
     draft = _draft(project, LEAKED)
 
     verdict, notes, defect = orch._qc_review(task, draft, checksum="sha256:0")
@@ -80,7 +90,7 @@ def test_leaked_scaffold_is_rejected_before_the_llm_can_pass_it(project):
 def test_clean_document_draft_falls_through_to_llm_verdict(project):
     orch = _orch(project)
     task = _task(project, tid="QSG-T-002")
-    store.save_task(project.code, task)
+    _seed_task_record(project.code, task)
     draft = _draft(project, "# Clean Note\n\nSubstantive body.\n" * 3, "clean.md")
 
     verdict, _notes, _defect = orch._qc_review(task, draft, checksum="sha256:1")
@@ -93,7 +103,7 @@ def test_code_family_artifact_is_exempt_from_the_gate(project):
     gate must not fire outside the document family."""
     orch = _orch(project)
     task = _task(project, kind="code", tid="QSG-T-003")
-    store.save_task(project.code, task)
+    _seed_task_record(project.code, task)
     body = (
         '"""Operation: batch runner."""\n'
         "# main entry\n"

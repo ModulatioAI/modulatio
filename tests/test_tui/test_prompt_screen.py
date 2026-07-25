@@ -24,6 +24,17 @@ from rich.markup import escape
 import inspect
 
 
+def _seed_task_record(code, task, body="", run_id=None):
+    """Create-or-update seeding: the engine's ordinary saves never create,
+    and tests seed records the production paths assume already exist."""
+    from modulatio import store
+    from modulatio.types import ToolBudgetConflict
+    try:
+        return store.create_task(code, task, body=body, run_id=run_id)
+    except ToolBudgetConflict:
+        return store.save_task(code, task, body=body, run_id=run_id)
+
+
 PROJECT_CODE = "PRP"
 
 
@@ -1479,7 +1490,6 @@ async def test_push_run_telemetry_reads_the_run_state(
 
     from textual.widgets import Static
 
-    from modulatio import store
     from modulatio.tui.app import ModulatioApp
     from modulatio.tui.screens.prompt import PromptScreen
     from modulatio.types import Task, TaskStatus
@@ -1487,12 +1497,12 @@ async def test_push_run_telemetry_reads_the_run_state(
     run_id = vault.generate_run_id()
     vault.init_run(PROJECT_CODE, run_id, "obj")
     pid = uuid4()
-    store.save_task(
+    _seed_task_record(
         PROJECT_CODE,
         Task(id="T-1", project_id=pid, goal_id="G-1", description="d",
              status=TaskStatus.COMPLETED),
         run_id=run_id)
-    store.save_task(
+    _seed_task_record(
         PROJECT_CODE,
         Task(id="T-2", project_id=pid, goal_id="G-1", description="d",
              status=TaskStatus.DISPATCHED),
