@@ -19,6 +19,7 @@ import hashlib
 import json
 import logging
 import os
+import tempfile
 import re
 import shlex as _shlex
 import threading
@@ -2292,64 +2293,91 @@ def _extract_iterate_decision(response: str) -> dict | None:
 
 # ─── Orchestrator ───────────────────────────────────────────────────────────
 
-#: Engine-authored bootstrap for the test-binding observation.
+#: Schema version of the observation file. A reader that does not recognise
+#: the version supplies NO observation rather than guessing.
+_OBSERVATION_SCHEMA = 1
+
+#: Largest observation file the engine will read back. The content is a short
+#: token list; anything larger is not the engine's own output.
+_OBSERVATION_MAX_BYTES = 64 * 1024
+
+#: Engine-authored bootstrap proving a test suite loaded the shipped
+#: components. Everything a producer can author is kept out of the evidence:
 #:
-#: Two things a producer controls must not be able to forge this evidence:
-#: the RUNNER and the OBSERVATION.
+#: * the RUNNER — launched with ``-I`` so the producer's working directory is
+#:   off the import path and a file named ``pytest.py`` beside the code
+#:   cannot stand in for the real one;
+#: * the STATE — the observed set and the serialisers live in this function's
+#:   locals, never module globals a test could reach through ``__main__``,
+#:   and the engine arguments are removed from ``sys.argv`` before pytest
+#:   sees them;
+#: * the EVENT — a proxy loader records a component only after
+#:   ``exec_module()`` RETURNS, so a resolution whose load then raises is not
+#:   evidence, and neither is a ``sys.modules`` entry a test assigned;
+#: * the ORIGIN — a component counts only when the module executed from
+#:   inside that contract's own absolute source root, so a same-named module
+#:   elsewhere in the tree belongs to no contract. Submodules count too,
+#:   which is how a namespace package (no ``__init__``) is observed at all.
 #:
-#: The runner is protected by launching with ``-I``. A bare ``-c`` puts the
-#: working directory — the producer's own repository — on the import path,
-#: so a file named ``pytest.py`` at its root is imported instead of the real
-#: one, and its ``main()`` can return zero without running a single test.
-#:
-#: The observation is protected by recording a LOADER EXECUTION rather than
-#: reading ``sys.modules`` afterwards. Final membership is a value any test
-#: can assign: a fabricated module carrying the real component's ``__file__``
-#: is indistinguishable from an import that happened. A finder installed
-#: ahead of ``pytest.main()`` sees the load itself, and records the component
-#: only when the module actually executed from inside its own sealed source
-#: root — so a same-named module found elsewhere in the tree does not count.
+#: The file is written only after the run finishes: an absent file means the
+#: wrapper never finalised and supplies no observation, whatever the exit code.
 _IMPORT_OBSERVER_BOOTSTRAP = """
-import importlib.util, json, os, sys
-
-_origins = json.loads(os.environ["MODULATIO_OBSERVE_ORIGINS"])
-_out = os.environ["MODULATIO_OBSERVE_OUT"]
-_root = os.path.realpath(os.getcwd())
-_seen = set()
+import json, os, sys
 
 
-class _LoadWitness:
-    # Ahead of every other finder: records the load, then steps aside and
-    # lets the real machinery resolve it.
-    def find_spec(self, name, path=None, target=None):
-        if name not in _origins:
-            return None
-        rest = [f for f in sys.meta_path if f is not self]
-        for finder in rest:
-            try:
+def _run():
+    _spec, _out = sys.argv[1], sys.argv[2]
+    _rest = sys.argv[4:] if sys.argv[3:4] == ["--"] else sys.argv[3:]
+    sys.argv = [sys.argv[0]] + _rest
+    _origins = {t: (n, os.path.realpath(r))
+                for t, (n, r) in json.loads(_spec).items()}
+    _seen = set()
+    _dump, _open, _schema = json.dump, open, 1
+
+    def _under(path, root):
+        real = os.path.realpath(path or "")
+        return bool(real) and (real == root or real.startswith(root + os.sep))
+
+    class _Proxy:
+        def __init__(self, inner, token):
+            self._inner, self._token = inner, token
+
+        def create_module(self, spec):
+            return self._inner.create_module(spec)
+
+        def exec_module(self, module):
+            self._inner.exec_module(module)
+            _seen.add(self._token)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    class _Witness:
+        def find_spec(self, name, path=None, target=None):
+            top = name.split(".")[0]
+            wanted = [(t, r) for t, (n, r) in _origins.items() if n == top]
+            if not wanted:
+                return None
+            for finder in [f for f in sys.meta_path if f is not self]:
                 spec = finder.find_spec(name, path, target)
-            except Exception:
-                continue
-            if spec is None:
-                continue
-            origin = getattr(spec, "origin", None) or ""
-            try:
-                real = os.path.realpath(origin)
-            except Exception:
-                real = ""
-            wanted = os.path.realpath(os.path.join(_root, _origins[name]))
-            if real == wanted or real.startswith(wanted + os.sep):
-                _seen.add(name)
-            return spec
-        return None
+                if spec is None:
+                    continue
+                for token, root in wanted:
+                    if _under(getattr(spec, "origin", None), root) and spec.loader:
+                        spec.loader = _Proxy(spec.loader, token)
+                        break
+                return spec
+            return None
+
+    sys.meta_path.insert(0, _Witness())
+    import pytest
+    _code = pytest.main(sys.argv[1:])
+    with _open(_out, "w", encoding="utf-8") as _fh:
+        _dump({"schema": _schema, "tokens": sorted(_seen)}, _fh)
+    return int(_code)
 
 
-sys.meta_path.insert(0, _LoadWitness())
-import pytest
-_code = pytest.main(sys.argv[1:])
-with open(_out, "w", encoding="utf-8") as _fh:
-    json.dump(sorted(_seen), _fh)
-sys.exit(int(_code))
+sys.exit(_run())
 """
 
 
@@ -12718,8 +12746,28 @@ class Orchestrator:
         if run_shell is None:
             return None, "run_shell tool unavailable (no artifacts root bound)"
 
+        def _read_observation(path: "Path") -> set:
+            """The finalized observation, or an empty set. Absent, oversized,
+            malformed, wrong-schema, and unknown-token data all mean NO
+            evidence — never a crash, and never a token the engine did not
+            declare."""
+            try:
+                if path.stat().st_size > _OBSERVATION_MAX_BYTES:
+                    return set()
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return set()
+            if (not isinstance(payload, dict)
+                    or payload.get("schema") != _OBSERVATION_SCHEMA):
+                return set()
+            tokens = payload.get("tokens")
+            if not isinstance(tokens, list):
+                return set()
+            return {t for t in tokens
+                    if isinstance(t, str) and t in declared_origins}
+
         def _run_pytest(root: "Path", rel: str, noconftest: bool,
-                        observe: "tuple | None" = None):
+                        observe: bool = False):
             """Run the engine-selected test files under ``root``. Returns
             ``(exit_code, result_text)``, or ``(None, reason)`` when the gate
             is UNAVAILABLE (tool refusal / pytest not installed / unparseable).
@@ -12735,17 +12783,30 @@ class Orchestrator:
                 if noconftest else ""
             args = (f"-q --color=no {flag}-o addopts= "
                     f"-p no:cacheprovider {rel}")
-            if observe is None:
+            obs_path = None
+            if not observe or not declared_origins:
                 cmd = f"pytest {args}"
             else:
                 # ONE invocation supplies both the green result and the
                 # import observation: the engine's own bootstrap runs the
                 # same arguments in-process and records what got loaded.
-                cmd = (f"MODULATIO_OBSERVE_ORIGINS={_shlex.quote(observe[0])} "
-                       f"MODULATIO_OBSERVE_OUT={_shlex.quote(str(observe[1]))} "
-                       f"python3 -I -c "
+                # A fresh name per invocation, removed first, so a file left
+                # behind — by an earlier run or by the suite itself — can
+                # never be read as this run's evidence, and two concurrent
+                # verifications cannot collide.
+                fd, tmp = tempfile.mkstemp(
+                    prefix=".modulatio-observation-", suffix=".json",
+                    dir=str(root))
+                os.close(fd)
+                obs_path = Path(tmp)
+                obs_path.unlink(missing_ok=True)
+                # Engine arguments travel as ISOLATED argv, not environment
+                # assignments: the runner execs argv directly, so a
+                # ``NAME=value`` prefix would be taken for the binary.
+                cmd = (f"python3 -I -c "
                        f"{_shlex.quote(_IMPORT_OBSERVER_BOOTSTRAP)} "
-                       f"{args}")
+                       f"{_shlex.quote(json.dumps(declared_origins))} "
+                       f"{_shlex.quote(str(obs_path))} -- {args}")
             try:
                 result = run_shell.call(
                     cmd=cmd,
@@ -12754,15 +12815,23 @@ class Orchestrator:
                 )
             except (RuntimeError, ValueError, OSError) as exc:
                 _logger.warning("pytest gate could not run: %s", exc)
-                return None, f"gate could not run in {root}: {exc}"
+                if obs_path is not None:
+                    obs_path.unlink(missing_ok=True)
+                return None, f"gate could not run in {root}: {exc}", set()
+            finally_seen: set = set()
+            if obs_path is not None:
+                try:
+                    finally_seen = _read_observation(obs_path)
+                finally:
+                    obs_path.unlink(missing_ok=True)
             head = result.split("\n", 1)[0]
             try:
                 code = int(head.removeprefix("exit_code:").strip())
             except ValueError:
-                return None, f"unparseable shell result in {root}"
+                return None, f"unparseable shell result in {root}", set()
             if code == -1 and "[TIMEOUT" not in result and "[INFO]" in result:
-                return None, "pytest is not installed on this host"
-            return code, result
+                return None, "pytest is not installed on this host", set()
+            return code, result, finally_seen
 
         # A real assertion/test FAILURE ("N failed") vs a setup/collection
         # ERROR ("N error"): a failure surfacing HOOK-FREE is authoritative RED
@@ -12804,24 +12873,14 @@ class Orchestrator:
             # stripped, a test the producer tried to hide/deselect/xfail RUNS
             # and its failure surfaces — the engine cannot be tricked by code
             # it did not run.
-            observe_path = repo_root / ".modulatio-import-observation.json"
-            observe = (
-                (json.dumps(declared_origins), observe_path)
-                if declared_origins else None
-            )
-            code, res = _run_pytest(
-                repo_root, rel, noconftest=True, observe=observe)
-            if observe is not None:
-                try:
-                    observed_imports |= set(
-                        json.loads(observe_path.read_text(encoding="utf-8")))
-                except (OSError, ValueError):
-                    pass          # absent observation == nothing imported
-                finally:
-                    observe_path.unlink(missing_ok=True)
+            code, res, hookfree_seen = _run_pytest(
+                repo_root, rel, noconftest=True, observe=True)
             if code is None:
                 return None, res  # UNAVAILABLE (tool refusal / no pytest)
             if code == 0:
+                # This invocation's green is the one being reported, so its
+                # observation is the evidence for this root.
+                observed_imports |= hookfree_seen
                 reports.append(
                     f"engine-run pytest (hook-free, cwd: {repo_root}) — "
                     + _snip(res))
@@ -12848,22 +12907,15 @@ class Orchestrator:
             # imports). Fall back to a conftest-enabled run — but its result is
             # ADVISORY: the engine cannot verify it hook-free, so a green here
             # is evidence, not a tamper-proof attestation.
-            # The observation must ride the invocation whose green is
-            # REPORTED. The hook-free attempt above errored, so its
-            # observation describes a run nobody is trusting; this one is
-            # the evidence, advisory label and all.
-            code_cf, res_cf = _run_pytest(
-                repo_root, rel, noconftest=False, observe=observe)
+            # Evidence rides the invocation whose green is REPORTED. The
+            # hook-free attempt above errored, so its observation describes
+            # a run nobody is trusting and is discarded — this one is the
+            # evidence, advisory label and all.
+            code_cf, res_cf, advisory_seen = _run_pytest(
+                repo_root, rel, noconftest=False, observe=True)
             if code_cf is None:
                 return None, res_cf
-            if observe is not None:
-                try:
-                    observed_imports |= set(
-                        json.loads(observe_path.read_text(encoding="utf-8")))
-                except (OSError, ValueError):
-                    pass
-                finally:
-                    observe_path.unlink(missing_ok=True)
+            observed_imports |= advisory_seen
             advisory = True
             all_green = all_green and code_cf == 0
             reports.append(
@@ -12890,7 +12942,7 @@ class Orchestrator:
         # their own fixtures (or the standard library) pass exactly as
         # loudly as tests that exercise the deliverable.
         unbound = self._unimported_components(
-            set(declared_origins), observed_imports)
+            declared_origins, observed_imports)
         if unbound:
             reports.append(unbound)
             return False, "\n\n".join(reports)
@@ -12912,14 +12964,17 @@ class Orchestrator:
 
 
     def _declared_component_origins(self, tasks: "list[Task]") -> dict:
-        """Import name → the sealed source root it must load from, for every
-        non-standalone component this goal declares.
+        """Sealed contract id → ``(import name, absolute source root)`` for
+        every non-standalone component this goal declares.
 
-        The ROOT travels with the name because a same-named module elsewhere
-        in the tree (``tests/webapp.py``) is not the shipped component, and
-        an import of it is not evidence the product was exercised."""
+        Keyed by CONTRACT, not by import name: two components in separate
+        roots may legitimately share a name, and importing one is not
+        evidence for the other. The root is resolved once against the shared
+        artifacts root, so it does not change meaning when a suite runs from
+        a nested working directory."""
         from modulatio import conventions as _conv
 
+        base = self._shared_artifacts_root().resolve()
         wanted: dict = {}
         for gid in sorted({t.goal_id for t in tasks}):
             goal = store.get_goal(
@@ -12930,15 +12985,16 @@ class Orchestrator:
                 if (c.state == "resolved" and c.layout != "standalone"
                         and c.import_name
                         and _conv.validate_sealed_contract(c) is None):
-                    root = "/".join(
+                    rel = "/".join(
                         part for part in (c.component_root, c.source_root)
                         if part
-                    )
-                    wanted[c.import_name] = root or c.import_name
+                    ) or c.import_name
+                    wanted[c.contract_id] = (
+                        c.import_name, str((base / rel).resolve()))
         return wanted
 
     @staticmethod
-    def _unimported_components(wanted: set, observed: set) -> "str | None":
+    def _unimported_components(wanted: dict, observed: set) -> "str | None":
         """Reason the shipped tests never imported the shipped component, or
         None when they did.
 
@@ -12947,7 +13003,10 @@ class Orchestrator:
         a test function name reads the same in a report and proves nothing —
         so the evidence is the observation from the run, not the source
         text."""
-        missing = sorted(wanted - observed)
+        missing = sorted(
+            f"{name} ({root})"
+            for token, (name, root) in wanted.items() if token not in observed
+        )
         if not missing:
             return None
         return (

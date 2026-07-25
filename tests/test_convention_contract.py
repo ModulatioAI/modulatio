@@ -1068,6 +1068,389 @@ def test_import_smoke_red_when_package_name_diverges(project, monkeypatch):
     assert "import" in report and "webapp" in report
 
 
+# ── the observation: engine-owned launch, witnessed load, guarded transport ──
+
+
+def _run_gate(orch, tasks, monkeypatch, runner=None):
+    """Drive the real gate over a produced repo. ``runner=None`` means NO
+    execution double — the gate builds the shipping registry itself."""
+    _enforceable_sandbox(monkeypatch)
+    if runner is not None:
+        orch._pytest_gate_run_shell = runner
+    monkeypatch.setattr(Orchestrator, "_goal_pytest_gate", _REAL_PYTEST_GATE)
+    return orch._goal_pytest_gate(tasks)
+
+
+def test_the_observer_command_runs_through_the_shipping_runner(
+    project, monkeypatch,
+):
+    """The gate's command must survive the runner that SHIPS, not a
+    shell-based stand-in. Production ``run_shell`` splits the command and
+    validates argv against the profile allowlist, then execs it directly —
+    it never starts a shell — so a form the allowlist does not accept, or one
+    carrying ``NAME=value`` prefixes (a shell feature; to ``exec`` they are
+    the binary's name), cannot launch at all. A ``shell=True`` double
+    executes both happily and reports green for a gate that, in production,
+    would be permanently UNAVAILABLE.
+    """
+    from dataclasses import replace
+
+    from modulatio import sandbox as sandbox_mod
+    from modulatio import store as store_mod
+    from modulatio import tools as tools_mod
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    _gate_suite(orch._shared_artifacts_root(), shape="import")
+
+    # Which branch the runner took is OBSERVED, not assumed: the confining
+    # wrapper is what the command is actually handed to.
+    confined: list[list[str]] = []
+    build_sandboxed = sandbox_mod.build_sandboxed_argv
+
+    def _watch(payload_argv, *args, **kwargs):
+        confined.append(list(payload_argv))
+        return build_sandboxed(payload_argv, *args, **kwargs)
+
+    monkeypatch.setattr(sandbox_mod, "build_sandboxed_argv", _watch)
+
+    issued: list[str] = []
+    build = tools_mod.build_registry
+
+    def _recording_registry(**kwargs):
+        registry = build(**kwargs)
+        shell = registry["run_shell"]
+
+        def _record(*, cmd, **rest):
+            issued.append(cmd)
+            return shell.call(cmd=cmd, **rest)
+
+        registry["run_shell"] = replace(shell, call=_record)
+        return registry
+
+    monkeypatch.setattr(tools_mod, "build_registry", _recording_registry)
+
+    state, report = _run_gate(orch, tasks, monkeypatch)   # no double
+
+    assert state is True, report
+    observer = [c for c in issued if " -c " in c]
+    assert observer, f"the gate issued no observer command: {issued}"
+    assert any("-c" in argv for argv in confined), (
+        "the observer command did not go through the confining wrapper")
+    # The refused form, proven refused by the same registry that just ran the
+    # accepted one — so this is a property of the validator, not of the host.
+    registry = build(
+        artifacts_root=orch._shared_artifacts_root(),
+        tool_calls_dir=orch._shared_artifacts_root() / "tool_calls",
+        project_code=PROJECT_CODE)
+    with pytest.raises(ValueError):
+        registry["run_shell"].call(
+            cmd="OBSERVE_ORIGINS={} " + observer[0],
+            profile="full", cwd=str(orch._shared_artifacts_root()), timeout=30)
+
+
+def test_the_observed_set_is_unreachable_from_the_suite(project, monkeypatch):
+    """The observed tokens and the serialisers live in the bootstrap's
+    locals. Held as module globals they would be one ``import __main__``
+    away from any test in the run."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    root = orch._shared_artifacts_root()
+    _gate_suite(root, shape="none")
+    # The full chain a leak would give a suite: read the declared tokens out
+    # of one global, then write them into the other.
+    (root / "tests" / "test_ok.py").write_text(
+        "import __main__\n\n\ndef test_reach():\n"
+        "    reachable = [getattr(__main__, n) for n in dir(__main__)]\n"
+        "    tokens = {k for v in reachable if isinstance(v, dict)\n"
+        "              for k in v if isinstance(k, str)}\n"
+        "    for value in reachable:\n"
+        "        if isinstance(value, set):\n"
+        "            value |= tokens\n"
+        "    assert True\n", encoding="utf-8")
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
+
+    assert state is False, report
+
+
+def test_a_load_that_raises_is_not_an_import(project, monkeypatch):
+    """Evidence is the completed execution, not the lookup that preceded it.
+    A component whose module body raises during the run — caught by a test
+    that stays green — resolved but never loaded, so it was not exercised.
+    The component still imports outside the suite, so the RED comes from the
+    observation rather than from an unimportable package."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    root = orch._shared_artifacts_root()
+    _gate_suite(root, shape="none")
+    (root / "webapp" / "__init__.py").write_text(
+        "import builtins\n\n"
+        "if getattr(builtins, 'SUITE_IS_RUNNING', False):\n"
+        "    raise RuntimeError('boom')\n", encoding="utf-8")
+    (root / "tests" / "test_ok.py").write_text(
+        _PATH_SETUP + "import builtins\n\n\ndef test_try():\n"
+        "    builtins.SUITE_IS_RUNNING = True\n"
+        "    try:\n        import webapp\n"
+        "    except RuntimeError:\n        pass\n    assert True\n",
+        encoding="utf-8")
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
+
+    assert state is False, report
+    assert "no test imported webapp" in report
+
+
+def test_a_run_that_never_finishes_leaves_no_observation(project, monkeypatch):
+    """The file is written only after ``pytest.main()`` returns. A test that
+    exits the process reports zero to the caller while the wrapper never
+    finalised — and a file left on disk under an older name is not this
+    run's evidence, because the name is fresh per invocation."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    root = orch._shared_artifacts_root()
+    _gate_suite(root, shape="none")
+    stale = root / ".modulatio-observation-stale.json"
+    stale.write_text('{"schema": 1, "tokens": ["cvc-anything"]}',
+                     encoding="utf-8")
+    (root / "tests" / "test_ok.py").write_text(
+        "import os\n\n\ndef test_exit():\n    os._exit(0)\n", encoding="utf-8")
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
+
+    assert state is False, report
+    assert stale.exists(), "a file the engine never wrote was consumed"
+
+
+class _ObservationShell(_DeterministicRunShell):
+    """Runner double standing in for the bootstrap at the TRANSPORT boundary:
+    for the observer invocation it writes the observation file the gate reads
+    back and reports a green run, without executing anything. The shipped
+    writer is engine-owned, so this is the only way to present the reader
+    with the data a broken, truncated, or hostile writer would leave behind.
+    Every other command the gate issues still runs for real."""
+
+    def __init__(self, payload: str | None = None):
+        self.payload = payload
+        self.out_paths: list[str] = []
+
+    def call(self, *, cmd, profile, cwd, timeout):
+        import shlex
+        argv = shlex.split(cmd)
+        if "--" not in argv:
+            return super().call(
+                cmd=cmd, profile=profile, cwd=cwd, timeout=timeout)
+        out = argv[argv.index("--") - 1]
+        self.out_paths.append(out)
+        if self.payload is not None:
+            Path(out).write_text(self.payload, encoding="utf-8")
+        return "exit_code: 0\n1 passed in 0.01s\n"
+
+
+#: How the gate must read each shape of observation data. Anything it cannot
+#: recognise supplies NO evidence — never a crash, and never a token the
+#: engine did not declare for this goal.
+_OBSERVATION_PAYLOADS = {
+    "genuine": (lambda tok: '{"schema": 1, "tokens": ["%s"]}' % tok, True),
+    "absent": (lambda tok: None, False),
+    "empty": (lambda tok: "", False),
+    "not-json": (lambda tok: "not json at all", False),
+    "wrong-container": (lambda tok: '["%s"]' % tok, False),
+    "no-schema": (lambda tok: '{"tokens": ["%s"]}' % tok, False),
+    "future-schema": (lambda tok: '{"schema": 99, "tokens": ["%s"]}' % tok,
+                      False),
+    "tokens-not-a-list": (lambda tok: '{"schema": 1, "tokens": {"%s": 1}}' % tok,
+                          False),
+    "unhashable-member": (lambda tok: '{"schema": 1, "tokens": [{}]}', False),
+    "undeclared-token": (
+        lambda tok: '{"schema": 1, "tokens": ["cvc-000000000000"]}', False),
+    "oversized": (
+        lambda tok: '{"schema": 1, "tokens": ["%s"]}' % tok + " " * 70_000,
+        False),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_OBSERVATION_PAYLOADS))
+def test_only_recognisable_observation_data_is_evidence(
+    project, monkeypatch, shape,
+):
+    """One control and ten refusals through the same reader: the genuine
+    token binds, and every unreadable, unrecognised, oversized, or
+    undeclared form falls back to no evidence without raising out of the
+    gate."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    _gate_suite(orch._shared_artifacts_root(), shape="none")
+    (goal,) = store_mod.list_goals(PROJECT_CODE)
+    (contract,) = goal.convention_contracts
+    build, expected = _OBSERVATION_PAYLOADS[shape]
+
+    state, report = _run_gate(
+        orch, tasks, monkeypatch,
+        _ObservationShell(build(contract.contract_id)))
+
+    assert state is expected, report
+
+
+def test_each_invocation_reads_back_only_its_own_file(project, monkeypatch):
+    """A fixed path would let two verifications running at once read each
+    other's evidence, and would let anything left over be read as this
+    run's. Every invocation gets a fresh name, and removes it afterwards."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    _gate_suite(orch._shared_artifacts_root(), shape="none")
+    (goal,) = store_mod.list_goals(PROJECT_CODE)
+    (contract,) = goal.convention_contracts
+    runner = _ObservationShell(
+        '{"schema": 1, "tokens": ["%s"]}' % contract.contract_id)
+
+    _run_gate(orch, tasks, monkeypatch, runner)
+    _run_gate(orch, tasks, monkeypatch, runner)
+
+    assert len(set(runner.out_paths)) == len(runner.out_paths) == 2
+    assert not any(Path(p).exists() for p in runner.out_paths)
+
+
+def test_binding_comes_from_the_run_whose_result_is_reported(
+    project, monkeypatch,
+):
+    """The hook-free pass is the authoritative one, but when it cannot RUN
+    the gate falls back to a conftest-loading pass and reports THAT green.
+    The observation has to follow: evidence from a run nobody is trusting
+    cannot bind, even though it named the component."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    root = orch._shared_artifacts_root()
+    _gate_suite(root, shape="none")
+    # Only the conftest-loading pass can run this suite — and only the
+    # hook-free pass imports the component.
+    (root / "tests" / "conftest.py").write_text(
+        "import os\n\nimport pytest\n\n"
+        "os.environ['SUITE_HOOKS_LOADED'] = '1'\n\n\n"
+        "@pytest.fixture\ndef supplied():\n    return 1\n", encoding="utf-8")
+    (root / "tests" / "test_ok.py").write_text(
+        "import os\n\nif not os.environ.get('SUITE_HOOKS_LOADED'):\n"
+        "    import pathlib, sys\n"
+        "    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))\n"
+        "    import webapp\n\n\n"
+        "def test_ok(supplied):\n    assert supplied == 1\n", encoding="utf-8")
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
+
+    assert "ADVISORY" in report
+    assert state is False, report
+    assert "no test imported webapp" in report
+
+
+def test_a_namespace_package_is_observed_through_its_submodule(
+    project, monkeypatch,
+):
+    """A package with no ``__init__.py`` has no module body to execute, so
+    the top-level name alone can never be witnessed. Loading any module
+    under the sealed source root is the component being exercised."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    root = orch._shared_artifacts_root()
+    _gate_suite(root, shape="none")
+    (root / "webapp" / "__init__.py").unlink()
+    (root / "tests" / "test_ok.py").write_text(
+        _PATH_SETUP + "import webapp.server\n\n\ndef test_ok():\n"
+        "    assert webapp.server is not None\n", encoding="utf-8")
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
+
+    assert state is True, report
+
+
+@pytest.mark.parametrize("paths, expected", [
+    (["webapp/__init__.py", "webapp/server.py"], "webapp"),
+    (["src/webapp/__init__.py", "src/webapp/server.py"], "src/webapp"),
+    (["services/api/src/app/__init__.py", "services/api/src/app/m.py"],
+     "services/api/src/app"),
+])
+def test_declared_origin_is_the_component_directory_on_disk(
+    project, monkeypatch, paths, expected,
+):
+    """The witness compares a resolved module origin against this root, so a
+    root that is relative, or that omits the component boundary, matches
+    nothing at all. Each layout must name the directory the code lives in."""
+    from modulatio import store as store_mod
+
+    orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
+    root = orch._shared_artifacts_root()
+    (root / "services" / "api").mkdir(parents=True, exist_ok=True)
+    (root / "services" / "api" / "pyproject.toml").write_text(
+        '[project]\nname = "api"\nversion = "0"\n', encoding="utf-8")
+    for path in paths:
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text("", encoding="utf-8")
+    goal.convention_contracts = _derive(
+        [_code_task(f"T{i}", path) for i, path in enumerate(paths)],
+        root).contracts
+    store_mod.save_goal(PROJECT_CODE, goal)
+
+    ((name, origin),) = orch._declared_component_origins(tasks).values()
+
+    assert origin == str((root / expected).resolve())
+    assert Path(origin).is_dir()
+    assert name == Path(expected).name
+
+
+def test_two_components_sharing_a_name_need_their_own_evidence(
+    project, monkeypatch,
+):
+    """Separate components may legitimately expose the same import name.
+    Keyed by name, loading one would discharge the other; keyed by sealed
+    contract, each root must be loaded on its own."""
+    from modulatio import store as store_mod
+
+    orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
+    root = orch._shared_artifacts_root()
+    for component in ("api", "worker"):
+        (root / "services" / component).mkdir(parents=True, exist_ok=True)
+        (root / "services" / component / "pyproject.toml").write_text(
+            f'[project]\nname = "{component}"\nversion = "0"\n',
+            encoding="utf-8")
+    goal.convention_contracts = _derive([
+        _code_task("T1", "services/api/src/app/__init__.py"),
+        _code_task("T2", "services/api/src/app/m.py"),
+        _code_task("T3", "services/worker/src/app/__init__.py"),
+        _code_task("T4", "services/worker/src/app/m.py"),
+    ], root).contracts
+    store_mod.save_goal(PROJECT_CODE, goal)
+
+    origins = orch._declared_component_origins(tasks)
+
+    assert len(origins) == 2
+    assert {name for name, _ in origins.values()} == {"app"}
+    assert len({origin for _, origin in origins.values()}) == 2
+    discharged, _other = sorted(origins)
+    assert Orchestrator._unimported_components(
+        origins, {discharged}) is not None
+
+
 # ── the dispatch gate: only committed plans run; recovery never guesses ─────
 
 

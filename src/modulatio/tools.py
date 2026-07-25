@@ -911,10 +911,15 @@ def _check_full(argv: list[str], root: Path | None = None, extra_roots=()) -> bo
             and _is_safe_file_arg(argv[1], root, extra_roots)
         ):
             return True
-        # python3 -c '<any body>'  — full profile authorizes execution,
-        # so any -c body is fair game (the model needs to run code to
-        # verify behavior, not just probe imports).
-        if len(argv) == 3 and argv[1] == "-c":
+        # python3 [-I] -c '<any body>' [args…] — full profile authorizes
+        # execution, so any -c body is fair game (the model needs to run
+        # code to verify behavior, not just probe imports). Trailing
+        # arguments are DATA for that body, not additional capability, and
+        # ``-I`` only narrows the interpreter: it drops the working
+        # directory from the import path, so a file dropped beside the code
+        # cannot shadow a stdlib or installed module the body relies on.
+        _c = 2 if len(argv) > 1 and argv[1] == "-I" else 1
+        if len(argv) > _c + 1 and argv[_c] == "-c":
             return True
         # python3 -m <module> [<any args>]  — full -m execution shape
         if len(argv) >= 3 and argv[1] == "-m":
