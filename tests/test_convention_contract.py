@@ -102,6 +102,33 @@ def test_single_flat_package_target_is_a_package(tmp_path):
     assert contract.source_root == "webapp"
 
 
+@pytest.mark.parametrize("name", ["proj_T_001", "sitegen_t_42"])
+def test_component_named_after_a_run_artifact_is_unresolved(tmp_path, name):
+    """The identifier ships inside the product, so it must describe what the
+    component IS. A task id is engine bookkeeping — a valid identifier, which
+    is exactly why nothing else rejects it."""
+    result = _derive([
+        _code_task("T1", f"{name}/__init__.py"),
+        _code_task("T2", f"{name}/main.py"),
+    ], tmp_path)
+
+    assert result.contracts == []
+    (why,) = result.unresolved
+    assert "run artifact" in why.reason
+    assert sorted(why.task_ids) == ["T1", "T2"]
+
+
+def test_ordinary_component_names_still_resolve(tmp_path):
+    """The guard reads a shape, not a blocklist: real names that merely
+    contain a 't' segment or digits must keep resolving."""
+    for name in ("webapp", "api_client", "t_shirt_store", "layer2"):
+        (contract,) = _derive([
+            _code_task("T1", f"{name}/__init__.py"),
+            _code_task("T2", f"{name}/main.py"),
+        ], tmp_path).contracts
+        assert contract.import_name == name
+
+
 def test_single_package_shaped_target_with_a_bad_name_is_unresolved(tmp_path):
     """The naming rules apply to a one-task component exactly as they do to
     a many-task one — a standalone reading must not smuggle it past them."""

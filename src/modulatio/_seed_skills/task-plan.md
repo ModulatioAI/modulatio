@@ -156,6 +156,12 @@ Each task fields:
   task's single artifact, e.g. `"src/index.py"`. Must be relative;
   absolute paths or `..` reject plan. Omit / null = default
   `drafts/<task_id>.md`.
+  NAME THE COMPONENT AFTER THE WORK, never after a task or run id. The
+  first path segment becomes the package the user installs and imports,
+  so it must read like the thing being built (`weather_cli/`, `src/
+  invoice_parser/`) — a directory named for the task that happened to
+  write it is meaningless to whoever receives the product, and the
+  engine rejects a plan that names one that way.
 - deliverable: true/false (default false). Set TRUE on the task(s) whose
   artifact is a FINISHED PRODUCT the user receives — the final paper, the
   shipped report, the document they asked for — NOT intermediate scaffolding

@@ -181,6 +181,15 @@ def _sealed(**fields) -> ConventionContract:
         update={"digest": digest, "contract_id": f"cvc-{digest[:12]}"})
 
 
+#: Identifiers shaped like the engine's own bookkeeping rather than the work:
+#: a task id (``<something>_T_007``) or a run id (``20260720T013151Z``). These
+#: are valid Python identifiers, so nothing else rejects them — and a package
+#: named for the task that happened to write it is meaningless to whoever
+#: installs the product.
+_RUN_ARTIFACT_NAME = re.compile(
+    r"(?i)^(?:.*_t_\d+|\d{8}t\d{6}z.*)$")
+
+
 def _valid_import_name(name: str) -> str | None:
     """Mechanism reason the name cannot be a Python import identifier, or
     None when it can. Distribution naming is validated separately."""
@@ -190,6 +199,10 @@ def _valid_import_name(name: str) -> str | None:
         return f"{name!r} is a Python reserved word"
     if name in sys.stdlib_module_names:
         return f"{name!r} collides with a standard-library module"
+    if _RUN_ARTIFACT_NAME.match(name):
+        return (f"{name!r} is named after a run artifact (a task or run id), "
+                f"not after what the component IS — the identifier ships in "
+                f"the product and must come from the objective")
     return None
 
 
