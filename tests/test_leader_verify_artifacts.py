@@ -24,8 +24,17 @@ import pytest
 from modulatio import store, vault
 from modulatio.orchestration import Orchestrator, RunSummary
 from modulatio.types import (
-    Goal, GoalStatus, Project, Task, TaskStatus,
+    Goal, GoalStatus, Project, Task, TaskStatus, ToolBudgetConflict,
 )
+
+
+def _seed_task_record(code, task, body="", run_id=None):
+    """Create-or-update seeding: the engine's ordinary saves never create,
+    and tests seed records the production paths assume already exist."""
+    try:
+        return store.create_task(code, task, body=body, run_id=run_id)
+    except ToolBudgetConflict:
+        return store.save_task(code, task, body=body, run_id=run_id)
 
 
 PROJECT_CODE = "LVA"
@@ -92,7 +101,7 @@ def test_leader_verify_finds_artifact_at_task_output_path(project: Project, tmp_
         output_path="WLT_crypto_wallets_guide.md",
         status=TaskStatus.COMPLETED,
     )
-    store.save_task(project.code, task)
+    _seed_task_record(project.code, task)
 
     orch, captured = _capturing_orch(project)
     summary = RunSummary(project=project)
@@ -137,7 +146,7 @@ def test_leader_verify_includes_artifact_content_in_prompt(project: Project, tmp
         output_path="guide.md",
         status=TaskStatus.COMPLETED,
     )
-    store.save_task(project.code, task)
+    _seed_task_record(project.code, task)
 
     orch, captured = _capturing_orch(project)
     summary = RunSummary(project=project)
@@ -170,7 +179,7 @@ def test_leader_verify_prompt_carries_measured_artifact_size(project: Project, t
         description="Draft", output_path="sized.md",
         status=TaskStatus.COMPLETED,
     )
-    store.save_task(project.code, task)
+    _seed_task_record(project.code, task)
 
     orch, captured = _capturing_orch(project)
     orch._leader_verify_goal(goal, [task], RunSummary(project=project))
@@ -205,7 +214,7 @@ def test_leader_verify_falls_back_to_drafts_convention(project: Project, tmp_pat
         output_path="",  # ← no output_path → fall back to drafts/
         status=TaskStatus.COMPLETED,
     )
-    store.save_task(project.code, task)
+    _seed_task_record(project.code, task)
 
     orch, captured = _capturing_orch(project)
     summary = RunSummary(project=project)
@@ -289,7 +298,7 @@ def test_leader_verify_chat_loop_widens_registry_and_grants_run_dir(
         id="LVA-T-009", project_id=project.id, goal_id=goal.id,
         description="t", output_path="doc.md", status=TaskStatus.COMPLETED,
     )
-    store.save_task(project.code, task)
+    _seed_task_record(project.code, task)
 
     orch, _ = _capturing_orch(project)
     orch.tool_registry = tools.build_registry(
@@ -412,7 +421,7 @@ def test_leader_verify_retries_an_unparseable_verdict(project: Project, tmp_path
         id="LVA-T-RETRY", project_id=project.id, goal_id=goal.id,
         description="t", output_path="doc.md", status=TaskStatus.COMPLETED,
     )
-    store.save_task(project.code, task)
+    _seed_task_record(project.code, task)
 
     calls = {"n": 0}
 
@@ -510,7 +519,7 @@ def test_leader_verify_report_rides_outside_the_verdict_json(project: Project, t
         id="LVA-T-PQR", project_id=project.id, goal_id=goal.id,
         description="t", output_path="doc.md", status=TaskStatus.COMPLETED,
     )
-    store.save_task(project.code, task)
+    _seed_task_record(project.code, task)
 
     # Prose that WOULD break JSON if inlined: literal newlines + unescaped quotes.
     report_prose = (
@@ -565,7 +574,7 @@ def test_leader_verify_records_verdict_on_summary(project: Project, tmp_path: Pa
         id="LVA-T-VERD", project_id=project.id, goal_id=goal.id,
         description="t", output_path="doc.md", status=TaskStatus.COMPLETED,
     )
-    store.save_task(project.code, task)
+    _seed_task_record(project.code, task)
 
     def _leader(prompt: str) -> str:
         return (
@@ -632,7 +641,7 @@ def test_leader_verify_deadlock_bows_out_on_qc_authored(project: Project, tmp_pa
         description="Draft", output_path="doc.md",
         status=TaskStatus.COMPLETED, qc_authored_fix=True,  # QC had to fix it
     )
-    store.save_task(project.code, task)
+    _seed_task_record(project.code, task)
 
     orch, calls = _disappointed_orch(project)
     summary = RunSummary(project=project)
@@ -674,7 +683,7 @@ def test_leader_verify_no_midrun_budget_reset_on_date_roll(project: Project, tmp
         description="Draft", output_path="doc.md",
         status=TaskStatus.COMPLETED, qc_authored_fix=False,  # not a qc deadlock — pure budget cap
     )
-    store.save_task(project.code, task)
+    _seed_task_record(project.code, task)
 
     orch, calls = _disappointed_orch(project)
     summary = RunSummary(project=project)
@@ -713,7 +722,7 @@ def test_leader_verify_tool_loop_prompt_grounds_reviewer_in_the_files(
         id="LVA-T-010", project_id=project.id, goal_id=goal.id,
         description="t", output_path="doc.md", status=TaskStatus.COMPLETED,
     )
-    store.save_task(project.code, task)
+    _seed_task_record(project.code, task)
 
     orch, _ = _capturing_orch(project)
     orch.tool_registry = tools.build_registry(
@@ -776,7 +785,7 @@ def test_leader_verify_churn_settles_completed_goal_without_crashing(
         id="LVA-T-001", project_id=project.id, goal_id=goal.id,
         description="Write it", output_path="book.md", status=TaskStatus.COMPLETED,
     )
-    store.save_task(project.code, task)
+    _seed_task_record(project.code, task)
 
     def _churn_leader(prompt: str) -> str:
         raise context_budget.CompressionChurnExceeded(compressions=4, limit=3)
