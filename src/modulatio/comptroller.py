@@ -269,28 +269,6 @@ def _count_metered_cost_today(project_code: str, cost_class: str) -> int:
     return count
 
 
-def _count_daily_spend(project_code: str, cost_class: str) -> int:
-    """Total of today's paid-cloud/premium-cloud spend for ``cost_class``
-    across BOTH accounting streams (agent escalations *and* metered-tool
-    calls). The daily cap declared in ``comptroller.md`` is a single
-    real-money budget per cost_class; both ``authorize_escalation`` and
-    ``authorize_metered_tool`` debit it, so the cap check must see the
-    combined count. Counting only one stream lets the other slip a second
-    full budget's worth of paid calls through under one declared cap.
-    """
-    return _count_today(project_code, cost_class) + _count_metered_cost_today(
-        project_code, cost_class
-    )
-
-
-def _append_ledger(project_code: str, cost_class: str, agent_id: str) -> None:
-    ledger = _ledger_path(project_code)
-    ledger.parent.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    with ledger.open("a", encoding="utf-8") as f:
-        f.write(f"{ts} {cost_class} {agent_id}\n")
-
-
 def _lock_timeout_seconds() -> float:
     """Effective lock-acquire deadline. ``MODULATIO_COMPTROLLER_LOCK_TIMEOUT``
     overrides the default; a non-positive or unparseable value falls back to
@@ -357,85 +335,6 @@ def _ledger_lock(project_code: str):
         if acquired:
             fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
-
-
-def authorize_escalation(
-    project_code: str,
-    cost_class: str | None,
-    agent_id: str,
-) -> Authorization:
-    """Decide whether to authorize a producer escalation to an agent
-    of the given cost class.
-
-    - ``free-local`` is always authorized and does NOT record to the
-      ledger — no API cost to gate.
-    - Unknown or missing ``cost_class`` degrades gracefully to
-      allowed (we can't reason about a bucket we don't recognize).
-    - ``paid-cloud`` / ``premium-cloud`` consult the project's
-      declared daily cap. Unlimited (no config / no field) always
-      allows. At/over the cap → deny with ``refresh_at`` set to
-      tomorrow UTC midnight.
-    - Authorized calls append to the ledger. Denied calls leave the
-      ledger unchanged.
-    """
-    if cost_class == "free-local":
-        return Authorization(
-            allowed=True,
-            refresh_at=None,
-            reason="free-local tier bypasses budget",
-        )
-    if cost_class not in ("paid-cloud", "premium-cloud"):
-        # Unknown tier: degrade gracefully. Record to ledger so the
-        # audit trail still shows the authorization happened.
-        _append_ledger(project_code, cost_class or "unknown", agent_id)
-        return Authorization(
-            allowed=True,
-            refresh_at=None,
-            reason=f"unknown cost_class {cost_class!r} — allowed by default",
-        )
-
-    budget = load_budget(project_code)
-    cap = (
-        budget.paid_cloud_per_day
-        if cost_class == "paid-cloud"
-        else budget.premium_cloud_per_day
-    )
-    if cap is None:
-        # Unlimited for this tier.
-        _append_ledger(project_code, cost_class, agent_id)
-        return Authorization(
-            allowed=True,
-            refresh_at=None,
-            reason=f"unlimited {cost_class} budget",
-        )
-
-    # Lock the count→check→append so concurrent escalations can't both
-    # slip under the cap and overshoot the daily budget. ``spent`` sums
-    # BOTH the escalation and metered-tool streams: the declared cap is one
-    # shared real-money budget per cost_class, so the gate must see every
-    # paid call against it (else escalation + metered each spend a full cap).
-    with _ledger_lock(project_code) as locked:
-        # If the lock couldn't be acquired (wedged holder), escalation keeps
-        # its degrade-OPEN posture: still do the count→check→append, accepting
-        # the small unserialized-overshoot risk the lock guards against rather
-        # than wedging the producer. The warning is logged inside _ledger_lock.
-        spent = _count_daily_spend(project_code, cost_class)
-        if spent >= cap:
-            return Authorization(
-                allowed=False,
-                refresh_at=_tomorrow_utc_midnight(),
-                reason=(
-                    f"daily {cost_class} escalation budget exhausted "
-                    f"({spent}/{cap} used); refreshes at UTC midnight"
-                ),
-            )
-        _append_ledger(project_code, cost_class, agent_id)
-        _ = locked  # posture is identical whether or not the lock was held
-    return Authorization(
-        allowed=True,
-        refresh_at=None,
-        reason=f"{cost_class} budget ok ({spent + 1}/{cap} after this call)",
-    )
 
 
 def _scan_metered_today(
@@ -619,7 +518,6 @@ def authorize_metered_tool(
 __all__ = [
     "Authorization",
     "Budget",
-    "authorize_escalation",
     "authorize_metered_tool",
     "load_budget",
 ]

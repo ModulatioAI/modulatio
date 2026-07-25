@@ -529,73 +529,6 @@ def _meets_capability_floor(
     return qc_rank >= producer_rank
 
 
-def select_escalation_agent(
-    task: Task,
-    current_agent_id: str | None,
-    current_model_tier: str | None,
-    agents: list[Agent],
-    skill_floor_for: SkillFloorLookup | None = None,
-    domain_floor_for: DomainFloorLookup | None = None,
-) -> Agent | None:
-    """Pick a strictly-higher-tier escalation agent for a producer that
-    exhausted its retry budget on QC rejection, or ``None`` when no
-    qualifying escalation candidate exists.
-
-    Filter (all required):
-    1. ``Agent.id != current_agent_id`` — escalation is a different
-       mind. Same-agent retry is the orchestrator's job to handle when
-       this helper returns ``None``; it is never a valid escalation
-       target.
-    2. ``tier == "producer"`` — escalation targets a producer, like
-       first-pick dispatch. Skills no longer gate (they're checked out at
-       run-time), so skill-cover is not a constraint.
-    3. Covers the effective required capabilities — union of
-       ``task.required_capabilities`` and each required skill's floor
-       (slice #9b). Escalation is NOT a relaxation of the capability
-       gate.
-    4. ``model_tier`` strictly higher than ``current_model_tier`` per
-       ``_TIER_RANK``. When either tier is unknown or uncomparable,
-       "strictly higher" is undefined and no escalation is picked —
-       consistent with #6f-F graceful degradation.
-
-    Ranking among qualifying candidates: cheapest ``cost_class`` first,
-    then lexicographic ``id``. Deterministic and reproducible.
-
-    Orchestrator contract: a ``None`` return means "no valid escalation
-    in the roster." The caller may then choose to retry once more with
-    the current agent as a last-ditch attempt (slice #9c orchestration
-    policy) — that behavior is the orchestrator's, not this helper's.
-    """
-    current_rank = _TIER_RANK.get(current_model_tier) if current_model_tier else None
-    if current_rank is None:
-        return None
-
-    effective_caps = _effective_required_capabilities(
-        task, skill_floor_for, domain_floor_for
-    )
-
-    def _strictly_higher(candidate: Agent) -> bool:
-        c_rank = _TIER_RANK.get(candidate.model_tier) if candidate.model_tier else None
-        if c_rank is None:
-            return False
-        return c_rank > current_rank
-
-    candidates = [
-        a for a in agents
-        if a.id != current_agent_id
-        and a.tier == "producer"
-        and a.covers_capabilities(effective_caps)
-        and _strictly_higher(a)
-    ]
-    if not candidates:
-        return None
-
-    def sort_key(a: Agent) -> tuple[int, str]:
-        return (_cost_rank(a.cost_class), a.id)
-
-    return min(candidates, key=sort_key)
-
-
 def select_qc_agent(
     producer_agent_id: str | None,
     producer_model_tier: str | None,
@@ -676,7 +609,6 @@ __all__ = [
     "plan_dispatch",
     "schedule_wave",
     "select_agent",
-    "select_escalation_agent",
     "select_qc_agent",
     "WaveSchedule",
 ]

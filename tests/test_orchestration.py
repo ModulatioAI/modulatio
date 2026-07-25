@@ -9540,42 +9540,6 @@ def test_read_deliverable_rejects_oversize_file(tmp_path, monkeypatch):
 
 # ── Security sweep fixes (post-§5 merge) ─────────────────────────────────────
 
-def test_open_budget_ticket_defers_store_write_in_isolated_worker(tmp_path, monkeypatch):
-    """Security sweep MAJOR fix: the Comptroller-deny ticket is reachable from a
-    wave worker (QC-reject → escalation → deny), so its store write must DEFER to
-    the main-thread merge, not write the shared store from the worker."""
-    from datetime import datetime, timezone
-    from modulatio import vault, store
-    from modulatio.orchestration import Orchestrator, RunSummary
-    from modulatio.types import Project
-    from modulatio.comptroller import Authorization
-    from modulatio.roster import Agent
-    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
-    vault.init_project("BGT", "budget", "obj")
-    vault.init_run("BGT", "run-1", "obj")
-    proj = Project(code="BGT", name="B", objective="obj", leader_model="stub",
-                   wiki_path=str(tmp_path / "bgt"), run_id="run-1")
-    orch = Orchestrator(proj, {"leader": _leader_stub})
-    task = _wave_task("BGT-T-001")
-    denied = Agent(id="a-hi", name="Hi", model="m", model_tier="reasoning-heavy",
-                   cost_class="premium-cloud")
-    auth = Authorization(allowed=False,
-                         refresh_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
-                         reason="daily cap hit")
-    summary = RunSummary(project=proj)
-
-    # In a worker (deferred_writes buffer present): NOT written to the store.
-    buf: list = []
-    orch._tls.deferred_writes = buf
-    orch._open_budget_ticket(task, denied, auth, summary)
-    orch._tls.deferred_writes = None
-    assert store.list_tickets("BGT", run_id="run-1") == [], "no worker-side write"
-    assert len(buf) == 1
-    # Main thread runs the deferred write → ticket lands.
-    buf[0]()
-    assert len(store.list_tickets("BGT", run_id="run-1")) == 1
-
-
 def test_concurrent_waves_kill_switch_tolerates_whitespace(monkeypatch):
     """Security sweep MINOR: the kill-switch is the safety valve now that
     concurrency is default-on — a padded ' 0 ' must still force sequential."""
@@ -12082,47 +12046,6 @@ def _orch_r3(project: Project):
 
 
 # ── Finding #1 ──────────────────────────────────────────────────────────────
-def test_deny_ticket_carries_affected_goal_id(project: Project):
-    """The Comptroller escalation-budget deny BLOCKER must bind affected_goal_id
-    (= task.goal_id), or _auto_resume_refreshable_goals — which skips
-    affected_goal_id-only tickets — can never honor the ticket's auto-resume
-    promise."""
-    from modulatio import comptroller, roster
-    from modulatio.orchestration import RunSummary
-
-    orch = _orch_r3(project)
-    summary = RunSummary(project=project)
-
-    task = Task(
-        id="R3O-T-001",
-        project_id=project.id,
-        goal_id="R3O-G-001",
-        description="produce a unit",
-        status=TaskStatus.QC_REJECTED,
-    )
-    denied = roster.Agent(
-        id="premium-1",
-        name="Premium",
-        model_tier="reasoning",
-        cost_class="premium-cloud",
-    )
-    refresh_at = datetime.now(timezone.utc) + timedelta(days=1)
-    auth = comptroller.Authorization(
-        allowed=False, refresh_at=refresh_at, reason="daily budget exhausted"
-    )
-
-    orch._open_budget_ticket(task, denied, auth, summary)
-
-    tickets = [
-        t
-        for t in store.list_tickets(project.code)
-        if t.priority is TicketPriority.BLOCKER
-    ]
-    assert tickets, "expected a BLOCKER ticket"
-    assert tickets[0].affected_goal_id == "R3O-G-001"
-    assert tickets[0].affected_task_id == "R3O-T-001"
-
-
 # ── Finding #2 ──────────────────────────────────────────────────────────────
 def test_qc_review_survives_similar_verdicts_failure(project: Project, monkeypatch):
     """Advisory QC-history precedent must never fail a task: a raising

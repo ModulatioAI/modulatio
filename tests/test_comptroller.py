@@ -18,7 +18,7 @@ from __future__ import annotations
 import fcntl
 import os
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -89,132 +89,6 @@ def test_load_budget_missing_field_defaults_to_unlimited(project_vault):
 
 
 # ── authorization ──────────────────────────────────────────────────────────
-
-def test_authorize_escalation_allows_free_local_unconditionally(project_vault):
-    """free-local agents never consume budget — no API cost to gate.
-    Always authorized regardless of config state, and no ledger entry
-    written."""
-    result = comptroller.authorize_escalation(
-        PROJECT_CODE, cost_class="free-local", agent_id="local-agent"
-    )
-    assert result.allowed is True
-    assert result.refresh_at is None
-    ledger = project_vault / "comptroller-ledger.md"
-    assert not ledger.exists()  # no write on free-local
-
-
-def test_authorize_escalation_allows_when_no_config(project_vault):
-    """No comptroller.md → unlimited → always allowed for any tier.
-    Ledger entry IS written because the authorization happened
-    (replay value), but doesn't affect future authorizations."""
-    result = comptroller.authorize_escalation(
-        PROJECT_CODE, cost_class="premium-cloud", agent_id="premium-a"
-    )
-    assert result.allowed is True
-    ledger = project_vault / "comptroller-ledger.md"
-    assert ledger.exists()
-    assert "premium-cloud" in ledger.read_text()
-    assert "premium-a" in ledger.read_text()
-
-
-def test_authorize_escalation_allows_while_under_budget(project_vault):
-    """Budget = 3 premium-cloud/day. First call is under, allowed, and
-    records a ledger entry. Subsequent call sees count=1 and remains
-    under (count+1=2 <= 3)."""
-    (project_vault / "comptroller.md").write_text(
-        "---\npremium_cloud_escalations_per_day: 3\n---\n"
-    )
-    r1 = comptroller.authorize_escalation(
-        PROJECT_CODE, cost_class="premium-cloud", agent_id="a"
-    )
-    r2 = comptroller.authorize_escalation(
-        PROJECT_CODE, cost_class="premium-cloud", agent_id="b"
-    )
-    assert r1.allowed is True
-    assert r2.allowed is True
-
-
-def test_authorize_escalation_denies_at_budget_ceiling(project_vault):
-    """Budget = 2 premium-cloud/day. After two authorizations the third
-    is denied with refresh_at = tomorrow UTC midnight. Denied call does
-    NOT write to the ledger (it didn't authorize anything)."""
-    (project_vault / "comptroller.md").write_text(
-        "---\npremium_cloud_escalations_per_day: 2\n---\n"
-    )
-    comptroller.authorize_escalation(
-        PROJECT_CODE, cost_class="premium-cloud", agent_id="a"
-    )
-    comptroller.authorize_escalation(
-        PROJECT_CODE, cost_class="premium-cloud", agent_id="b"
-    )
-    ledger_before = (project_vault / "comptroller-ledger.md").read_text()
-
-    denied = comptroller.authorize_escalation(
-        PROJECT_CODE, cost_class="premium-cloud", agent_id="c"
-    )
-    assert denied.allowed is False
-    assert denied.refresh_at is not None
-    # refresh_at is future (tomorrow UTC midnight).
-    now = datetime.now(timezone.utc)
-    assert denied.refresh_at > now
-    # No ledger write on deny.
-    ledger_after = (project_vault / "comptroller-ledger.md").read_text()
-    assert ledger_before == ledger_after
-
-
-def test_authorize_escalation_counts_only_today_utc(project_vault):
-    """Yesterday's ledger entries don't count against today's budget.
-    Budget = 1 premium-cloud/day; inject a yesterday entry; today's
-    fresh call is still allowed."""
-    (project_vault / "comptroller.md").write_text(
-        "---\npremium_cloud_escalations_per_day: 1\n---\n"
-    )
-    # Simulate a ledger entry from yesterday.
-    yesterday = datetime.now(timezone.utc) - timedelta(days=1, hours=2)
-    ledger = project_vault / "comptroller-ledger.md"
-    ledger.write_text(
-        f"{yesterday.isoformat(timespec='seconds')} premium-cloud old-agent\n"
-    )
-
-    result = comptroller.authorize_escalation(
-        PROJECT_CODE, cost_class="premium-cloud", agent_id="today-a"
-    )
-    assert result.allowed is True
-
-
-def test_authorize_escalation_separate_tier_budgets_independent(project_vault):
-    """paid-cloud and premium-cloud buckets are independent. Exhausting
-    one does not deny the other. Business-harness level: a project can
-    tune each tier's risk tolerance separately."""
-    (project_vault / "comptroller.md").write_text(
-        "---\n"
-        "paid_cloud_escalations_per_day: 0\n"
-        "premium_cloud_escalations_per_day: 5\n"
-        "---\n"
-    )
-    paid = comptroller.authorize_escalation(
-        PROJECT_CODE, cost_class="paid-cloud", agent_id="p"
-    )
-    premium = comptroller.authorize_escalation(
-        PROJECT_CODE, cost_class="premium-cloud", agent_id="q"
-    )
-    assert paid.allowed is False  # zero budget → any call denied
-    assert premium.allowed is True
-
-
-def test_authorize_escalation_unknown_cost_class_allowed(project_vault):
-    """An agent with an unknown or missing cost_class degrades
-    gracefully — authorization allowed rather than denied. Same
-    pattern as #6f-F's tier floor: don't invent an ordering or a
-    budget bucket for values we can't reason about."""
-    (project_vault / "comptroller.md").write_text(
-        "---\npremium_cloud_escalations_per_day: 0\n---\n"
-    )
-    result = comptroller.authorize_escalation(
-        PROJECT_CODE, cost_class=None, agent_id="unknown"
-    )
-    assert result.allowed is True
-
 
 # ── metered-tool tier (Part B4) — fail-closed authorization ────────────────
 
@@ -314,44 +188,23 @@ def test_metered_idempotency_is_per_task_not_global(project_vault):
 # ── shared daily cap across escalation + metered streams (H5) ──────────────
 
 
-def test_escalation_then_metered_share_one_daily_cap(project_vault):
-    """H5: the declared daily cap is ONE real-money budget per cost_class.
-    An agent escalation and a metered-tool call both debit it — the second
-    stream must NOT get a fresh full cap. With paid_cloud=1, one escalation
-    exhausts the budget, so the metered call is denied (and vice-versa)."""
+def test_legacy_ledger_entries_still_debit_the_shared_cap(project_vault):
+    """The declared daily cap is ONE real-money budget per cost_class, and
+    the counter reads BOTH ledger streams. Entries written by an earlier
+    install must keep debiting it, so an upgrade cannot hand a project a
+    fresh full cap."""
+    from datetime import datetime, timezone
+
     _set_budget(project_vault, paid=1)
-    esc = comptroller.authorize_escalation(PROJECT_CODE, "paid-cloud", "agent-1")
-    assert esc.allowed
+    ledger = comptroller._ledger_path(PROJECT_CODE)
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).isoformat()
+    ledger.write_text(f"{stamp} paid-cloud agent-1\n", encoding="utf-8")
+
     metered = comptroller.authorize_metered_tool(
         PROJECT_CODE, "paid-cloud", "render", "T-1", "k1", "agent-1")
     assert not metered.allowed and "budget exhausted" in metered.reason
     assert metered.refresh_at is not None
-
-
-def test_metered_then_escalation_share_one_daily_cap(project_vault):
-    """H5 symmetric: a metered call first spends the cap, so a subsequent
-    agent escalation under the same cost_class is denied."""
-    _set_budget(project_vault, paid=1)
-    metered = comptroller.authorize_metered_tool(
-        PROJECT_CODE, "paid-cloud", "render", "T-1", "k1", "agent-1")
-    assert metered.allowed
-    esc = comptroller.authorize_escalation(PROJECT_CODE, "paid-cloud", "agent-1")
-    assert not esc.allowed and "budget exhausted" in esc.reason
-    assert esc.refresh_at is not None
-
-
-def test_shared_cap_respects_cost_class_isolation(project_vault):
-    """The shared count is per cost_class: a premium-cloud metered call must
-    not consume the paid-cloud budget. With paid=1/premium=1, one paid
-    escalation + one premium metered call both fit."""
-    _set_budget(project_vault, paid=1, premium=1)
-    assert comptroller.authorize_escalation(
-        PROJECT_CODE, "paid-cloud", "agent-1").allowed
-    assert comptroller.authorize_metered_tool(
-        PROJECT_CODE, "premium-cloud", "render", "T-1", "k1", "agent-1").allowed
-    # paid-cloud budget now exhausted by the escalation
-    assert not comptroller.authorize_escalation(
-        PROJECT_CODE, "paid-cloud", "agent-2").allowed
 
 
 # ═══ fold: comptroller audit-family (low/preship/r2/resweep_r3) ═══
@@ -385,16 +238,6 @@ def test_zero_cap_preserved(project_vault):
     budget = comptroller.load_budget(PROJECT_CODE)
     assert budget.paid_cloud_per_day == 0
     assert budget.premium_cloud_per_day == 0
-
-
-def test_negative_cap_escalation_degrades_to_unlimited(project_vault):
-    """With the fix, a negative paid cap reads as unconfigured → the
-    escalation path's unlimited back-compat applies (allowed), rather than
-    denying every escalation forever with a useless refresh_at."""
-    _write_caps(project_vault, "-1", "-1")
-    auth = comptroller.authorize_escalation(PROJECT_CODE, "paid-cloud", "agent-a")
-    assert auth.allowed is True
-    assert auth.refresh_at is None
 
 
 def test_negative_cap_metered_denies_with_honest_no_budget_reason(project_vault):
@@ -501,19 +344,6 @@ def test_load_budget_non_utf8_config_degrades_open(project_vault):
     budget = comptroller.load_budget(PROJECT_CODE)  # must not raise
     assert isinstance(budget, comptroller.Budget)
     assert budget.paid_cloud_per_day == 5
-
-
-def test_authorize_escalation_non_utf8_ledger_does_not_crash(project_vault):
-    """A non-UTF8 byte in the ledger (torn multibyte write from a crashed
-    appender) must not raise out of the count path; the escalation still
-    resolves rather than wedging the budget gate (degrade-open)."""
-    _set_budget_ten_ten(project_vault)
-    ledger = project_vault / "comptroller-ledger.md"
-    ledger.write_bytes(b"\xff\xfe not valid utf8 line\n")
-    result = comptroller.authorize_escalation(
-        PROJECT_CODE, cost_class="paid-cloud", agent_id="agent-1"
-    )  # must not raise
-    assert result.allowed is True
 
 
 def test_metered_non_utf8_ledger_does_not_crash(project_vault):
@@ -641,27 +471,6 @@ def test_metered_tool_fails_closed_when_lock_wedged(project_vault, monkeypatch):
     # Nothing was charged: the metered ledger line was never appended.
     ledger = comptroller._ledger_path(PROJECT_CODE)
     assert not ledger.exists() or "metered" not in ledger.read_text()
-
-
-def test_escalation_degrades_open_when_lock_wedged(project_vault, monkeypatch):
-    """Agent escalation keeps its degrade-OPEN posture: even when the lock
-    can't be acquired it still authorizes (and records) rather than wedging
-    the producer behind a stuck holder."""
-    _write_budget(project_vault, paid=5)
-    monkeypatch.setenv("MODULATIO_COMPTROLLER_LOCK_TIMEOUT", "0.2")
-    held = _hold_lock(PROJECT_CODE)
-    try:
-        auth = comptroller.authorize_escalation(
-            PROJECT_CODE, "paid-cloud", "producer-1"
-        )
-    finally:
-        fcntl.flock(held, fcntl.LOCK_UN)
-        os.close(held)
-    assert auth.allowed is True
-    # The escalation was recorded to the ledger despite the contended lock.
-    ledger = comptroller._ledger_path(PROJECT_CODE)
-    assert ledger.exists()
-    assert "paid-cloud producer-1" in ledger.read_text()
 
 
 def test_bad_timeout_env_falls_back_to_default(project_vault, monkeypatch):

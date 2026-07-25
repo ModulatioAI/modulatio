@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 from uuid import uuid4
 
-from modulatio import comptroller, dispatch, job_template_library, job_templates, kickoff_history, lessons, qc_history, qc_notes, recoveries, research, roster, skill_git, skills, standards, standards_proposals, store, tools
+from modulatio import dispatch, job_template_library, job_templates, kickoff_history, lessons, qc_history, qc_notes, recoveries, research, roster, skill_git, skills, standards, standards_proposals, store, tools
 from modulatio.job_templates import DeliverableSpec, JobTemplate
 from modulatio import context_budget as _ctx_budget_module
 from modulatio import dispatch_breaker as _dispatch_breaker_module
@@ -14538,87 +14538,6 @@ class Orchestrator:
         )
 
     # ── Budget tickets (slice #9d) ──────────────────────────────────────
-    def _open_budget_ticket(
-        self,
-        task: Task,
-        denied_pick: "roster.Agent",
-        authorization: "comptroller.Authorization",
-        summary: RunSummary,
-    ) -> None:
-        """Record a Comptroller-denied escalation as a BLOCKER ticket.
-
-        The ticket carries ``refresh_at`` so #7e's auto-resume path
-        picks it up on the next kickoff past tomorrow-midnight-UTC.
-        The orchestrator falls back to the same-agent last-ditch
-        attempt regardless — budget denial means "we didn't upgrade
-        the mind" not "we give up on the task."
-        """
-        if authorization.refresh_at is None:
-            # Always set on deny per the budget contract; if it's
-            # None we have an engine bug. Raise explicitly so `-O`
-            # builds don't strip the guard.
-            raise RuntimeError(
-                "budget deny-path invariant: authorization.refresh_at "
-                f"must be set on a denied authorization (task {task.id})"
-            )
-        refresh_at = authorization.refresh_at
-
-        # Isolation: this runs inside a wave worker (QC-reject exhaustion →
-        # escalation → Comptroller deny), so the ticket create + persist must NOT
-        # write the shared store from the worker thread — defer it to the
-        # deterministic main-thread merge, exactly like _block_for_environmental /
-        # _block_for_context_budget. (Sequential path runs it immediately.)
-        def _open_deny_ticket() -> None:
-            ticket = store.create_ticket(
-                project_id=self.project.id,
-                project_code=self.project.code,
-                run_id=self.project.run_id,
-                priority=TicketPriority.BLOCKER,
-                title=f"Escalation budget exhausted for task {task.id}",
-                body=(
-                    f"Comptroller denied a producer escalation for task "
-                    f"**{task.id}** because the daily "
-                    f"**{denied_pick.cost_class}** escalation budget is "
-                    f"exhausted.\n\n"
-                    f"Task description: {task.description}\n\n"
-                    f"Would-be escalation target: `{denied_pick.id}` "
-                    f"(model_tier: {denied_pick.model_tier}, "
-                    f"cost_class: {denied_pick.cost_class}).\n\n"
-                    f"Comptroller reason: {authorization.reason}\n\n"
-                    f"Budget refreshes at: {refresh_at.isoformat()}\n\n"
-                    f"The orchestrator ran a same-agent last-ditch attempt "
-                    f"in place of the tier escalation — see the task "
-                    f"transitions for the outcome.\n\n"
-                    f"Human options:\n"
-                    f"- **Wait for refresh** (default): next kickoff past "
-                    f"the refresh time auto-resumes tasks with fresh budget.\n"
-                    f"- **Raise the cap**: edit `comptroller.md` in the "
-                    f"project vault and re-run.\n"
-                    f"- **Route to a different cost tier**: add a lower-cost "
-                    f"higher-tier agent to the roster.\n"
-                ),
-                affected_task_id=task.id,
-                # also bind the goal so _auto_resume_refreshable_goals
-                # (which skips affected_goal_id-only tickets) can actually fulfil the
-                # ticket's "next kickoff past refresh auto-resumes" promise — without
-                # it the BLOCKER's refresh_at was dead and recovery never fired.
-                affected_goal_id=task.goal_id,
-                actor="comptroller",
-            )
-            ticket.refresh_at = refresh_at
-            from modulatio.store import _ticket_path, _write_entity
-            _write_entity(
-                _ticket_path(self.project.code, ticket.id), ticket, ticket.body
-            )
-            self._emit_ticket_opened(ticket, role="comptroller")
-            summary.errors.append(
-                f"{task.id}: escalation budget exhausted "
-                f"({denied_pick.cost_class}) — ticket {ticket.id} opened "
-                f"(auto-resumes after {refresh_at.isoformat()})"
-            )
-
-        self._store_write_deferrable(_open_deny_ticket)
-
     # ── Capability tickets (slice #6d) ──────────────────────────────────
     # ── Brick 4: autonomous self-codification (the Alfred loop) ──────────
     @staticmethod
