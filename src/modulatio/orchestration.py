@@ -2301,16 +2301,21 @@ _OBSERVATION_SCHEMA = 1
 #: token list; anything larger is not the engine's own output.
 _OBSERVATION_MAX_BYTES = 64 * 1024
 
-#: Engine-authored bootstrap proving a test suite loaded the shipped
-#: components. Everything a producer can author is kept out of the evidence:
+#: Engine-authored bootstrap observing which shipped components a test suite
+#: loads. This is ADVISORY, not an attestation: the suite is arbitrary Python
+#: sharing this interpreter, so it can reach the observer's own state through
+#: live call frames and can read this process's real argv from
+#: ``/proc/self/cmdline`` — same-process observation cannot be made
+#: producer-unforgeable. What the mechanisms below DO buy is that ordinary,
+#: accidental, and lexical false positives are excluded, so a green suite that
+#: never went near the component is still caught:
 #:
 #: * the RUNNER — launched with ``-I`` so the producer's working directory is
 #:   off the import path and a file named ``pytest.py`` beside the code
 #:   cannot stand in for the real one;
-#: * the STATE — the observed set and the serialisers live in this function's
-#:   locals, never module globals a test could reach through ``__main__``,
-#:   and the engine arguments are removed from ``sys.argv`` before pytest
-#:   sees them;
+#: * the STATE — the observed set and the serialisers are function locals, and
+#:   the engine arguments are dropped from ``sys.argv`` before pytest sees
+#:   them; this raises the effort to reach them, it does not seal them;
 #: * the EVENT — a proxy loader records a component only after
 #:   ``exec_module()`` RETURNS, so a resolution whose load then raises is not
 #:   evidence, and neither is a ``sys.modules`` entry a test assigned;
@@ -2321,6 +2326,8 @@ _OBSERVATION_MAX_BYTES = 64 * 1024
 #:
 #: The file is written only after the run finishes: an absent file means the
 #: wrapper never finalised and supplies no observation, whatever the exit code.
+#: A producer-unforgeable binding needs an observer the test interpreter cannot
+#: inspect or write — an out-of-process trust boundary, not this bootstrap.
 _IMPORT_OBSERVER_BOOTSTRAP = """
 import json, os, sys
 

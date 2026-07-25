@@ -1150,10 +1150,13 @@ def test_the_observer_command_runs_through_the_shipping_runner(
             profile="full", cwd=str(orch._shared_artifacts_root()), timeout=30)
 
 
-def test_the_observed_set_is_unreachable_from_the_suite(project, monkeypatch):
-    """The observed tokens and the serialisers live in the bootstrap's
-    locals. Held as module globals they would be one ``import __main__``
-    away from any test in the run."""
+def test_the_observed_set_is_not_exposed_through_main(project, monkeypatch):
+    """The observed tokens and the serialisers are bootstrap locals, so the
+    ``import __main__`` channel does not reach them — held as module globals
+    they would be one attribute lookup away from any test. This closes the
+    casual channel only: a suite sharing the interpreter can still reach the
+    same state through live call frames, which is why the binding signal is
+    advisory rather than tamper-proof."""
     from modulatio import store as store_mod
 
     orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
