@@ -478,6 +478,10 @@ class ModulatioApp(App):
         #: agent display-name → (glyph, verb) — each floor producer's live
         #: doing-what, tracked off the activity feed for the telemetry rail.
         self._floor_verbs: dict[str, tuple[str, str]] = {}
+        #: Roster state owed to the floor rail, painted once at the end of the
+        #: loop turn so an event burst collapses into a single repaint.
+        self._rail_pending: "tuple[list[str], bool] | None" = None
+        self._rail_flush_queued: bool = False
         #: (byte offset, tokens, compressions) — the running audit.jsonl
         #: tally behind the rail's ctx gauge; offset-read on the 1s tick.
         self._audit_tally: tuple[int, int, int] = (0, 0, 0)
@@ -1929,8 +1933,27 @@ class ModulatioApp(App):
         """Push the live producer roster (+ each one's doing-what verb) onto
         the MOD SQUAD floor rail. Actors with a live verb but no task in
         flight — QC mid-review — join the floor too, and leave when their
-        verb is popped (verdict landed)."""
+        verb is popped (verdict landed).
+
+        A producer storm delivers many events per loop turn, and each one
+        would otherwise repaint the roster — work the operator can never see,
+        since only the last state of a turn reaches the screen. The paint is
+        deferred to the end of the turn instead, so a burst collapses into
+        one repaint carrying the latest roster."""
+        self._rail_pending = (list(producers), running)
+        if self._rail_flush_queued:
+            return
+        self._rail_flush_queued = True
+        self.call_later(self._flush_team_rail)
+
+    def _flush_team_rail(self) -> None:
+        """Paint the roster state left by the turn's last rail update."""
         from modulatio.tui.screens.prompt import PromptScreen
+        self._rail_flush_queued = False
+        pending, self._rail_pending = self._rail_pending, None
+        if pending is None:
+            return
+        producers, running = pending
         extras = [a for a in self._floor_verbs if a not in producers]
         try:
             self.query_one(PromptScreen).update_team_rail(

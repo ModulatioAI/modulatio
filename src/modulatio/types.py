@@ -870,6 +870,12 @@ class Project(BaseModel):
         return v
 
 
+#: Task id the conversational loop rides so per-call metering and budget
+#: routing have a key to work with. It is a PSEUDO-task — no plan, no record,
+#: no producer — so surfaces that enumerate or count real work must exclude it.
+CONVERSE_TASK_ID = "conversation"
+
+
 # ─── Activity events (slice #17) ────────────────────────────────────────────
 
 @dataclass(frozen=True)

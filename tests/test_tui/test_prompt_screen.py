@@ -1406,10 +1406,50 @@ async def test_activity_events_feed_the_rail_verbs(project_with_roster):
             task_id="t1", timestamp=datetime.now(timezone.utc),
             detail={"tool": "http_get"},
         ))
+        await pilot.pause()   # the rail paints once per loop turn
         screen = app.query_one(PromptScreen)
         line = _static_text(screen.query_one("#rail-producers", Static))
         assert "Marlow" in line          # roster name, never the raw id
         assert "▼▼ reading a page" in line
+
+
+async def test_rail_repaints_coalesce_under_a_producer_storm(
+    project_with_roster,
+):
+    """A burst of team events must not repaint the roster once per event —
+    the paints collapse to one per loop turn, and the surviving paint still
+    shows the LAST state."""
+    from textual.widgets import Static
+
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        paints: list = []
+        real = screen.update_team_rail
+
+        def _counting(producers, **kw):
+            paints.append(list(producers))
+            return real(producers, **kw)
+
+        screen.update_team_rail = _counting  # type: ignore[assignment]
+
+        app._record_activity_impl(
+            _ev("drafter", "task_dispatched", agent_id="writer", task_id="t1"))
+        for i in range(24):
+            app._record_activity_impl(ActivityEvent(
+                agent_id="writer", role="drafter", phase="tool_call_ended",
+                task_id="t1", timestamp=datetime.now(timezone.utc),
+                detail={"tool": "http_get" if i % 2 else "read_file"},
+            ))
+        await pilot.pause()
+
+        assert len(paints) < 5, f"{len(paints)} repaints for 25 events"
+        line = _static_text(screen.query_one("#rail-producers", Static))
+        assert "Marlow" in line
 
 
 async def test_event_counters_drive_the_task_and_qc_gauges(project_with_roster):

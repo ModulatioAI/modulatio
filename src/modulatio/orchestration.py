@@ -47,6 +47,7 @@ from modulatio.types import (
     ActivityEvent,
     ArtifactEvidence,
     AssertionEvidence,
+    CONVERSE_TASK_ID,
     ConventionContractConflict,
     DecomposeMintConflict,
     ToolBudgetConflict,
@@ -252,7 +253,7 @@ _PATH_CONFLICT_MARKER = "artifact-path conflict"
 #: sides reference it: the converse call site, and the metered-authorizer
 #: builder that grants converse a wide-open per-task allowance (the operator
 #: is present; the daily budget is the only wall).
-_CONVERSE_TASK_ID = "conversation"
+_CONVERSE_TASK_ID = CONVERSE_TASK_ID
 
 #: QC's metered ceiling relative to the service's per-task cap. QC shares
 #: the producer's task-scoped spend counter, so on a cap-1 service the

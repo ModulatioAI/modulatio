@@ -76,6 +76,27 @@ async def test_concurrent_settled_lines_keep_own_agent_task_pairing(_isolate):
         assert "modulatio1-T-002" not in jimmy_line, jimmy_line
 
 
+@pytest.mark.asyncio
+async def test_conversation_pseudo_task_is_not_a_task_on_screen(_isolate):
+    """The converse loop rides a pseudo-task id so metering can route it, but
+    it is not work: it must not render a task suffix and must not be counted
+    as a producer in flight."""
+    from modulatio.types import CONVERSE_TASK_ID
+
+    app = ModulatioApp(project_code="STRMX", stub=True)
+    async with app.run_test(size=(200, 60)) as pilot:
+        await pilot.pause()
+        tv = app.query_one("#stream-team", StreamView)
+        tv.add_event(_event("leader", CONVERSE_TASK_ID, "task_dispatched"))
+        tv.add_event(_event("nemotron", "proj1-T-001", "task_dispatched"))
+        await pilot.pause()
+
+        assert tv.active_tasks.get(CONVERSE_TASK_ID) is None
+        assert len(tv.active_producer_names()) == 1
+        assert not any(CONVERSE_TASK_ID in m for m in tv.messages), tv.messages
+        assert any("proj1-T-001" in m for m in tv.messages), tv.messages
+
+
 def test_leader_role_covers_leader_star_and_planner():
     for r in ("leader", "leader-decompose", "leader-reflect", "leader-iterate",
               "leader-chat", "planner"):

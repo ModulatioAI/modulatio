@@ -33,7 +33,7 @@ from textual.containers import VerticalScroll
 from textual.widgets import Static
 
 from modulatio.tui.feng_theme import LEADER_HIGHLIGHT_BG, theme_tiers
-from modulatio.types import ActivityEvent
+from modulatio.types import CONVERSE_TASK_ID, ActivityEvent
 
 # Lane membership by the event ``role`` the orchestrator emits. AGENT-AGNOSTIC by
 # design: a producer is a model endpoint running ANY composable skill (no fixed
@@ -294,7 +294,7 @@ class StreamView(VerticalScroll):
         one agent stay distinct and a terminal-failed task never lingers. (The
         run-boundary reset lives in the app, which sees the leader-role kickoff
         events this lane filters out.)"""
-        if not event.task_id:
+        if not event.task_id or event.task_id == CONVERSE_TASK_ID:
             return
         if event.phase == "task_dispatched":
             self.active_tasks[event.task_id] = (
@@ -376,7 +376,7 @@ class StreamView(VerticalScroll):
         line.append(f"{glyph} ", style=f"bold {accent}")
         line.append(name, style=f"bold {accent}")
         line.append(f" {verb}", style=base)
-        if event.task_id:
+        if event.task_id and event.task_id != CONVERSE_TASK_ID:
             line.append(f"  ·{event.task_id}", style=dim)
         self._append(line)
         self._coalesce_sig = sig

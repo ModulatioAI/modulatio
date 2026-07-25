@@ -1786,6 +1786,29 @@ _PDF_STDERR_CAP = 65536
 _PDF_HELPER_ENV = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
 
 
+def _decode_text(data: bytes) -> str:
+    """Decode a text payload, detecting UTF-16 before falling back to UTF-8.
+
+    UTF-16 puts a NUL beside every ASCII character, and NUL is valid UTF-8 —
+    so a UTF-16 file decodes with zero replacement characters, slips past the
+    binary guard below, and reaches the caller as text riddled with NULs. A
+    byte-order mark names the encoding outright; without one, NULs filling
+    one side of the byte pairs do.
+    """
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return data.decode("utf-16", "replace")
+    sample = data[:4096]
+    if sample:
+        nul_at_odd = sample[1::2].count(0)
+        nul_at_even = sample[0::2].count(0)
+        floor = max(len(sample) // 2, 1) * 0.9
+        if nul_at_odd >= floor > nul_at_even:
+            return data.decode("utf-16-le", "replace")
+        if nul_at_even >= floor > nul_at_odd:
+            return data.decode("utf-16-be", "replace")
+    return data.decode("utf-8", "replace")
+
+
 def _pdf_text(data: bytes, path: str) -> str:
     """A PDF read returns its TEXT LAYER (the reader-parity contract),
     extracted by the host's ``pdftotext`` (poppler) run as a CONTAINED helper:
@@ -1918,7 +1941,7 @@ def make_read_file(
         data = target.read_bytes()
         if data[:5] == b"%PDF-":
             return _pdf_text(data, path)
-        text = data[:_READ_FILE_MAX_BYTES].decode("utf-8", "replace")
+        text = _decode_text(data[:_READ_FILE_MAX_BYTES])
         # A binary file (image, archive) decode-replaces into a sea of
         # U+FFFD — a megabyte of it blows the model's context window. Refuse
         # with one honest line instead; the head sample keeps huge text files

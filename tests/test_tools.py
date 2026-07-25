@@ -2743,6 +2743,31 @@ def test_read_file_refuses_binary_reads_accented_text(tmp_path):
     assert "héllo" in registry["read_file"].call(path="t.txt")
 
 
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le", "utf-16-be"])
+def test_read_file_decodes_utf16_text(tmp_path, encoding):
+    """UTF-16 IS text. Decoded as UTF-8 it survives the binary guard — an
+    ASCII payload interleaved with NULs replaces nothing — and reaches the
+    caller as mojibake, so the encoding is detected before decoding."""
+    (tmp_path / "note.txt").write_bytes(
+        "hello world\nsecond line\n".encode(encoding))
+    registry = tools.build_registry(artifacts_root=tmp_path)
+
+    out = registry["read_file"].call(path="note.txt")
+
+    assert "hello world" in out and "second line" in out
+    assert "\x00" not in out
+
+
+def test_read_file_still_refuses_utf16_shaped_binary(tmp_path):
+    """A binary file whose bytes happen to look interleaved is still binary:
+    detection must not turn the refusal into a stream of control chars."""
+    (tmp_path / "b.bin").write_bytes(bytes(range(0, 256, 2)) * 128)
+    registry = tools.build_registry(artifacts_root=tmp_path)
+
+    with pytest.raises(ValueError, match="binary"):
+        registry["read_file"].call(path="b.bin")
+
+
 _TINY_PDF_STREAM = b"BT /F1 18 Tf 20 100 Td (the owl flies at midnight) Tj ET"
 
 
