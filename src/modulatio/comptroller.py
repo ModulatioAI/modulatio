@@ -234,41 +234,6 @@ def _count_today(project_code: str, cost_class: str) -> int:
     return count
 
 
-def _count_metered_cost_today(project_code: str, cost_class: str) -> int:
-    """Count today's metered-tool ledger lines for ``cost_class``.
-
-    Mirrors ``_count_today`` for the metered stream so the shared daily
-    cap can sum both accounting streams. A metered line is
-    ``<iso-ts> metered <cost_class> <agent_id> <task_id> <key>`` — field 1
-    is the literal ``metered``, field 2 is the cost_class.
-    """
-    ledger = _ledger_path(project_code)
-    if not ledger.exists():
-        return 0
-    today = datetime.now(timezone.utc).date()
-    count = 0
-    for line in _read_ledger_lines(ledger):
-        parts = line.strip().split()
-        # Require the full 6-field metered shape, matching _scan_metered_today,
-        # so a corrupt/truncated metered line is ignored identically by both
-        # scanners (else this scanner counts a 3-5 field fragment the other one
-        # drops, double-charging the daily cap inconsistently).
-        if len(parts) < 6 or parts[1] != "metered":
-            continue
-        ts_raw, _kind, entry_cost = parts[0], parts[1], parts[2]
-        if entry_cost != cost_class:
-            continue
-        try:
-            ts = datetime.fromisoformat(ts_raw)
-        except ValueError:
-            continue
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        if ts.astimezone(timezone.utc).date() == today:
-            count += 1
-    return count
-
-
 def _lock_timeout_seconds() -> float:
     """Effective lock-acquire deadline. ``MODULATIO_COMPTROLLER_LOCK_TIMEOUT``
     overrides the default; a non-positive or unparseable value falls back to

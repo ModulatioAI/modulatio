@@ -364,11 +364,10 @@ def test_metered_non_utf8_ledger_does_not_crash(project_vault):
 
 # ── Finding 3: corrupt/truncated metered lines counted consistently ─────────
 
-def test_truncated_metered_line_ignored_by_both_scanners(project_vault):
-    """A truncated metered line (3-5 fields) must be ignored IDENTICALLY by
-    both metered scanners. Before the fix, _count_metered_cost_today counted a
-    3-field fragment that _scan_metered_today dropped, so the daily-cap view
-    disagreed between the escalation path and the metered path."""
+def test_truncated_metered_line_is_ignored(project_vault):
+    """A torn append leaves a metered line with only part of its fields. It
+    carries no usable spend record, so the scanner must drop it rather than
+    count a fragment against the daily cap."""
     _set_budget_ten_ten(project_vault)
     ledger = project_vault / "comptroller-ledger.md"
     # A truncated metered line: only 3 fields (ts, 'metered', cost_class), the
@@ -384,13 +383,10 @@ def test_truncated_metered_line_ignored_by_both_scanners(project_vault):
     )
     assert cost_count == 0
 
-    # _count_metered_cost_today must ALSO drop it (post-fix len(parts) < 6).
-    assert comptroller._count_metered_cost_today(PROJECT_CODE, "paid-cloud") == 0
 
-
-def test_wellformed_metered_line_counted_by_both_scanners(project_vault):
-    """Sanity: a full 6-field metered line IS counted by both scanners so the
-    truncation fix didn't over-tighten and drop legitimate lines."""
+def test_wellformed_metered_line_is_counted(project_vault):
+    """The complementary case: a complete metered line IS counted, so the
+    truncation rule cannot quietly drop legitimate spend."""
     _set_budget_ten_ten(project_vault)
     ledger = project_vault / "comptroller-ledger.md"
     # Write today's UTC date dynamically so the scanners' today-guard matches.
@@ -404,7 +400,6 @@ def test_wellformed_metered_line_counted_by_both_scanners(project_vault):
     )
     assert cost_count == 1
     assert task_count == 1
-    assert comptroller._count_metered_cost_today(PROJECT_CODE, "paid-cloud") == 1
 
 
 def _write_budget(vault_dir: Path, paid: int) -> None:
