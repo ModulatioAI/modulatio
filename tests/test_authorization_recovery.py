@@ -32,8 +32,9 @@ CODE = "AUTHREC"
 
 @pytest.fixture(autouse=True)
 def project(tmp_path, monkeypatch):
+    # Isolation rides the vault root alone: leader_permissions resolves its
+    # files through vault.project_dir, so redirecting the root redirects it.
     monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
-    monkeypatch.setattr(lp, "_vault_root", lambda: tmp_path, raising=False)
     vault.init_project(CODE, "auth recovery", "obj")
     yield tmp_path
 
