@@ -1668,10 +1668,12 @@ async def test_qc_joins_the_floor_while_reviewing(project_with_roster):
         await pilot.pause()
         screen = app.query_one(PromptScreen)
         app._record_activity_impl(_ev("qc", "qc_started", agent_id="qc"))
+        await pilot.pause()   # the rail paints once per loop turn
         line = _static_text(screen.query_one("#rail-producers", Static))
         assert "Quality Control" in line
         assert "○○ reviewing" in line
         app._record_activity_impl(_ev("qc", "qc_verdict", agent_id="qc"))
+        await pilot.pause()
         line = _static_text(screen.query_one("#rail-producers", Static))
         assert "Quality Control" not in line
 
