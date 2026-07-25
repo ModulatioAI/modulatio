@@ -73,6 +73,133 @@ def test_non_code_tasks_receive_no_binding(tmp_path):
     assert "T1" in result.bindings
 
 
+def test_single_package_shaped_target_is_a_package_not_standalone(tmp_path):
+    """A lone task is not evidence of a standalone file when its declared
+    path spells out a package: task COUNT never overrides path SHAPE."""
+    result = _derive([_code_task("T1", "src/webapp/server.py")], tmp_path)
+    assert result.unresolved == []
+    (contract,) = result.contracts
+    assert contract.layout == "src"
+    assert contract.import_name == "webapp"
+    assert contract.source_root == "src/webapp"
+    assert contract.component_root == ""
+
+
+def test_src_file_with_no_package_under_it_is_packageless(tmp_path):
+    """``src/<file>.py`` names no package, so nothing is invented — and a
+    component is never called "src"."""
+    (contract,) = _derive(
+        [_code_task("T1", "src/index.py")], tmp_path).contracts
+    assert contract.layout == "standalone"
+    assert contract.import_name == "index"
+
+
+def test_single_flat_package_target_is_a_package(tmp_path):
+    result = _derive([_code_task("T1", "webapp/__init__.py")], tmp_path)
+    (contract,) = result.contracts
+    assert contract.layout == "flat"
+    assert contract.import_name == "webapp"
+    assert contract.source_root == "webapp"
+
+
+def test_single_package_shaped_target_with_a_bad_name_is_unresolved(tmp_path):
+    """The naming rules apply to a one-task component exactly as they do to
+    a many-task one — a standalone reading must not smuggle it past them."""
+    result = _derive([_code_task("T1", "src/json/codec.py")], tmp_path)
+    assert result.contracts == []
+    (why,) = result.unresolved
+    assert "standard-library" in why.reason and why.task_ids == ("T1",)
+
+
+def test_single_package_target_is_root_validated_and_smoke_eligible(tmp_path):
+    """The package contract a lone task derives carries the same
+    enforcement as any other: declared roots bind, and it is not exempt
+    from the import smoke the way a standalone file is."""
+    (contract,) = _derive(
+        [_code_task("T1", "src/webapp/server.py")], tmp_path).contracts
+    assert conventions.target_root_violation(contract, "elsewhere/x.py")
+    assert conventions.target_root_violation(
+        contract, "src/webapp/server.py") is None
+    assert contract.layout != "standalone"
+
+
+# ── monorepo components: the boundary comes from the shared path shape ──────
+
+
+def _write_manifest(root: Path, component: str, name: str) -> None:
+    target = root / component if component else root
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "pyproject.toml").write_text(
+        f'[project]\nname = "{name}"\n', encoding="utf-8")
+
+
+def test_monorepo_component_resolves_at_its_own_boundary(tmp_path):
+    """``<component>/src/<package>`` is a src-layout component: the
+    component root comes from the shared path shape, and the manifest that
+    names the distribution is the one inside that exact tree."""
+    _write_manifest(tmp_path, "services/api", "api-distribution")
+    result = _derive([
+        _code_task("T1", "services/api/src/webapp/__init__.py"),
+        _code_task("T2", "services/api/src/webapp/server.py"),
+    ], tmp_path)
+    assert result.unresolved == []
+    (contract,) = result.contracts
+    assert contract.component_root == "services/api"
+    assert contract.layout == "src"
+    assert contract.source_root == "src/webapp"
+    assert contract.import_name == "webapp"
+    assert contract.distribution_name == "api-distribution"
+
+
+def test_two_monorepo_components_bind_to_distinct_exact_tree_contracts(
+    tmp_path,
+):
+    _write_manifest(tmp_path, "services/api", "api-distribution")
+    _write_manifest(tmp_path, "services/worker", "worker-distribution")
+    result = _derive([
+        _code_task("T1", "services/api/src/webapp/__init__.py"),
+        _code_task("T2", "services/worker/src/jobs/__init__.py"),
+    ], tmp_path)
+    assert result.unresolved == []
+    by_import = {c.import_name: c for c in result.contracts}
+    assert by_import["webapp"].component_root == "services/api"
+    assert by_import["webapp"].distribution_name == "api-distribution"
+    assert by_import["jobs"].component_root == "services/worker"
+    assert by_import["jobs"].distribution_name == "worker-distribution"
+    assert result.bindings["T1"] != result.bindings["T2"]
+
+
+def test_workspace_root_manifest_cannot_win_over_the_component_tree(
+    tmp_path,
+):
+    """Discovery stays inside the component: a workspace-root manifest (or
+    a sibling component's) never names another component's distribution."""
+    _write_manifest(tmp_path, "", "the-whole-monorepo")
+    _write_manifest(tmp_path, "services/other", "sibling-distribution")
+    result = _derive([
+        _code_task("T1", "services/api/src/webapp/__init__.py"),
+        _code_task("T2", "services/api/src/webapp/server.py"),
+    ], tmp_path)
+    (contract,) = result.contracts
+    assert contract.component_root == "services/api"
+    assert contract.distribution_name == "webapp"
+
+
+def test_conflicting_component_boundaries_are_unresolved(tmp_path):
+    """When manifests at more than one nesting level plausibly explain the
+    same targets, no boundary is chosen — the ambiguity is typed."""
+    _write_manifest(tmp_path, "services", "outer-distribution")
+    _write_manifest(tmp_path, "services/api", "inner-distribution")
+    result = _derive([
+        _code_task("T1", "services/api/webapp/__init__.py"),
+        _code_task("T2", "services/api/webapp/server.py"),
+    ], tmp_path)
+    assert result.contracts == []
+    (why,) = result.unresolved
+    assert sorted(why.task_ids) == ["T1", "T2"]
+    assert "boundar" in why.reason
+
+
 # ── package layouts: detected within the selected component only ────────────
 
 
@@ -877,6 +1004,168 @@ def test_dispatch_refusal_ticket_describes_the_plan_witness(
     assert "re-plan" in ticket.body
     # The mechanism reason still reaches the operator.
     assert "cvc-imposter" in ticket.body or "projection" in ticket.body
+
+
+def _reseal_with_retained_id(contract, **changes):
+    """A contract whose CONTENT changed and whose digest was recomputed to
+    match, but which kept its original identity — the shape an attacker or
+    a buggy writer produces when it edits a sealed record in place."""
+    altered = contract.model_copy(update=changes)
+    return altered.model_copy(
+        update={"digest": conventions.contract_digest(altered)})
+
+
+def test_recomputed_digest_cannot_retain_a_sealed_identity(tmp_path):
+    """Identity is derived from content, so a self-consistent digest is not
+    enough: the id must still equal the digest it claims to come from."""
+    (sealed,) = _derive([
+        _code_task("T1", "webapp/__init__.py"),
+        _code_task("T2", "webapp/server.py"),
+    ], tmp_path).contracts
+    assert conventions.validate_sealed_contract(sealed) is None
+
+    forged = _reseal_with_retained_id(sealed, import_name="evil")
+    assert forged.contract_id == sealed.contract_id
+    assert conventions.contract_digest(forged) == forged.digest
+    why = conventions.validate_sealed_contract(forged)
+    assert why is not None and "identity" in why.lower()
+
+
+def test_forged_contract_refuses_at_every_authority_consumer(
+    project, monkeypatch,
+):
+    """A content-altered, digest-recomputed, id-retaining contract must be
+    refused wherever authority is consumed — render, dispatch, and the
+    import smoke — with no producer call."""
+    from modulatio import store as store_mod
+    from modulatio.orchestration import RunSummary
+    from modulatio.types import ConventionContractConflict, TaskStatus
+
+    orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
+    bound = next(t for t in tasks if t.convention_contract_id)
+    (sealed,) = goal.convention_contracts
+    goal.convention_contracts = [
+        _reseal_with_retained_id(sealed, import_name="evil")]
+    store_mod.save_goal(PROJECT_CODE, goal)
+
+    with pytest.raises(ConventionContractConflict):
+        orch._convention_block_for(bound)
+    assert orch._task_plan_dispatch_refusal(bound) is not None
+
+    orch._producer_execute = (  # type: ignore[assignment]
+        lambda task, corrective_notes="": (_ for _ in ()).throw(
+            AssertionError("producer must not run on forged authority")))
+    orch._run_task_with_redo_inner(bound, RunSummary(project=project))
+    assert bound.status == TaskStatus.BLOCKED
+
+    smoke = orch._convention_import_smoke(
+        [bound], lambda *a, **k: (0, "", ""))
+    assert smoke is not None and smoke[0] is not True
+
+
+def test_replan_over_a_broken_sealed_record_conflicts(project, monkeypatch):
+    """A stored contract that is not valid sealed content cannot be
+    silently replaced by a fresh derivation — matching id strings are not
+    evidence that the prior record was ever authority."""
+    from modulatio.types import ConventionContractConflict
+
+    orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
+    (sealed,) = goal.convention_contracts
+    goal.convention_contracts = [
+        _reseal_with_retained_id(sealed, import_name="evil")]
+
+    with pytest.raises(ConventionContractConflict):
+        orch._seal_convention_contracts(goal, tasks)
+
+
+def test_valid_sealed_contract_survives_recovery_unchanged(
+    project, monkeypatch,
+):
+    """Re-sealing a goal whose contracts are genuinely valid preserves the
+    stored records byte-for-byte — validation is not an excuse to rewrite
+    sealed authority."""
+    orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
+    before = [c.model_dump() for c in goal.convention_contracts]
+
+    orch._seal_convention_contracts(goal, tasks)
+
+    assert [c.model_dump() for c in goal.convention_contracts] == before
+
+
+def _delete_task_record(task_id: str) -> None:
+    """Remove a task's durable record, leaving any in-memory copy intact."""
+    from modulatio import vault
+
+    path = (Path(vault.VAULT_ROOT) / PROJECT_CODE.lower() / "tasks"
+            / f"{task_id}.md")
+    assert path.exists()
+    path.unlink()
+
+
+def _assert_refuses_without_producing(orch, project, task):
+    from modulatio.orchestration import RunSummary
+    from modulatio.types import TaskStatus
+
+    assert orch._task_plan_dispatch_refusal(task) is not None
+    orch._producer_execute = (  # type: ignore[assignment]
+        lambda t, corrective_notes="": (_ for _ in ()).throw(
+            AssertionError("producer must not run on an unauthorized plan")))
+    orch._run_task_with_redo_inner(task, RunSummary(project=project))
+    assert task.status == TaskStatus.BLOCKED
+
+
+def test_committed_plan_refuses_a_dispatched_task_with_no_record(
+    project, monkeypatch,
+):
+    """A committed flag does not make a plan permanently complete. When the
+    dispatched task's durable record is gone, the retained in-memory object
+    is not a substitute — it is exactly the copy that cannot be trusted."""
+    orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
+    victim = tasks[0]
+    _delete_task_record(victim.id)
+
+    _assert_refuses_without_producing(orch, project, victim)
+
+
+def test_committed_plan_refuses_a_survivor_when_a_sibling_vanishes(
+    project, monkeypatch,
+):
+    """A missing sibling makes the durable set observationally a smaller
+    plan, so no surviving task may dispatch under it either."""
+    orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
+    _delete_task_record(tasks[0].id)
+
+    _assert_refuses_without_producing(orch, project, tasks[1])
+
+
+def test_committed_plan_refuses_when_an_unexpected_task_appears(
+    project, monkeypatch,
+):
+    """A goal-scoped task outside the manifest means the durable set is no
+    longer the planned one, whichever task asks to run."""
+    from modulatio import store as store_mod
+
+    orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
+    intruder = _code_task("CVC-T-950", "webapp/intruder.py")
+    intruder.goal_id = goal.id
+    store_mod.create_task(PROJECT_CODE, intruder)
+
+    _assert_refuses_without_producing(orch, project, tasks[0])
+
+
+def test_committed_plan_refuses_when_a_sibling_projection_drifts(
+    project, monkeypatch,
+):
+    """Projection drift anywhere in the manifest invalidates the plan, not
+    only the drifted task's own dispatch."""
+    from modulatio import store as store_mod
+
+    orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
+    sibling = tasks[0]
+    sibling.output_path = "webapp/moved.py"
+    store_mod.save_task(PROJECT_CODE, sibling)
+
+    _assert_refuses_without_producing(orch, project, tasks[1])
 
 
 def test_minted_child_rides_mint_authority_not_plan_manifest(

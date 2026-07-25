@@ -46,6 +46,7 @@ __all__ = [
     "render_contract_block",
     "target_root_violation",
     "task_plan_projection_digest",
+    "validate_sealed_contract",
 ]
 
 
@@ -140,6 +141,38 @@ def contract_digest(contract: ConventionContract) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+#: Sealed schema versions this engine can serve as authority.
+_SUPPORTED_SCHEMA_VERSIONS = frozenset({1})
+
+
+def validate_sealed_contract(contract: ConventionContract) -> str | None:
+    """Mechanism reason ``contract`` is not servable sealed authority, or
+    None when it is.
+
+    Content, identity, and schema are checked together. A digest that
+    merely agrees with its own content proves nothing — anything editing a
+    record in place can recompute it. Identity is derived FROM the digest,
+    so only the pair binds the record to the derivation that sealed it: a
+    changed convention necessarily changes the digest, and a retained
+    identity then no longer matches.
+    """
+    if contract.schema_version not in _SUPPORTED_SCHEMA_VERSIONS:
+        return (f"contract {contract.contract_id} declares schema version "
+                f"{contract.schema_version}, which this engine cannot serve")
+    if contract.state != "resolved":
+        return (f"contract {contract.contract_id} is {contract.state!r} — "
+                f"only a resolved contract is authority")
+    digest = contract_digest(contract)
+    if digest != contract.digest:
+        return (f"contract {contract.contract_id} fails its own digest — "
+                f"the sealed record was altered and is not authority")
+    if contract.contract_id != f"cvc-{digest[:12]}":
+        return (f"contract {contract.contract_id} does not derive its "
+                f"identity from its content — the record carries an "
+                f"identity its conventions did not seal")
+    return None
+
+
 def _sealed(**fields) -> ConventionContract:
     """Construct a contract with its digest-derived identity."""
     draft = ConventionContract(contract_id="", digest="", **fields)
@@ -183,6 +216,44 @@ def _distribution_name(
     return import_name, "pyproject.toml"
 
 
+def _component_of(
+    path: PurePosixPath, inspect_root: Path,
+) -> "tuple[str, str, str] | None":
+    """``(component_root, import_name, layout)`` for a declared target, or
+    None when more than one component boundary plausibly explains it.
+
+    The boundary comes from the declared path SHAPE, never from how many
+    tasks happen to share it. A ``src`` directory marks the boundary
+    explicitly: everything before it is the component, the directory after
+    it is the package. A flat path has no such marker, so a nesting level
+    is only a component boundary when a manifest sits there; with no
+    manifest anywhere the path is one package with subdirectories, and
+    with several the choice is not the engine's to guess.
+    """
+    dirs = list(path.parts[:-1])
+    src_at = [i for i, part in enumerate(dirs) if part == "src"]
+    if len(src_at) > 1:
+        return None
+    if src_at:
+        i = src_at[0]
+        if i == len(dirs) - 1:
+            # ``src`` declares a src layout but names no package under it.
+            return None
+        return "/".join(dirs[:i]), dirs[i + 1], "src"
+    if len(dirs) == 1:
+        return "", dirs[0], "flat"
+    manifested = [
+        j for j in range(1, len(dirs))
+        if (inspect_root / "/".join(dirs[:j]) / "pyproject.toml").is_file()
+    ]
+    if not manifested:
+        return "", dirs[0], "flat"
+    if len(manifested) == 1:
+        j = manifested[0]
+        return "/".join(dirs[:j]), dirs[j], "flat"
+    return None
+
+
 def _standalone_contract(path: PurePosixPath | None) -> ConventionContract:
     stem = path.stem if path is not None else ""
     import_name = stem if (stem and _valid_import_name(stem) is None) else ""
@@ -212,24 +283,20 @@ def derive_convention_contracts(
         else:
             targets.append((t, None))
 
-    # A single code task is a standalone component by construction —
-    # nothing to cohere with, no package invented.
-    if len(targets) == 1:
-        task, path = targets[0]
-        if path is not None and path.suffix and path.suffix != ".py" \
-                and path.name.lower() not in _COMPONENT_NEUTRAL_FILES:
-            return DerivationResult(outside_claim=[UnresolvedConvention(
-                reason=(f"non-Python target {str(path)!r} — outside the v1 "
-                        f"closure claim; runs without a convention claim"),
-                task_ids=(task.id,))])
-        contract = _standalone_contract(path)
+    # A task that declares NO target has no path shape to classify, and a
+    # lone undeclared code task is the standalone form. Every DECLARED
+    # path is classified by its shape below, whatever the task count — a
+    # package-shaped target is a package even when only one task writes to
+    # it.
+    if len(targets) == 1 and targets[0][1] is None:
+        task = targets[0][0]
+        contract = _standalone_contract(None)
         return DerivationResult(
             contracts=[contract], bindings={task.id: contract.contract_id})
 
-    # Multi-file plan: group targets into components by their top-level
-    # directory (with ``src/<pkg>`` recognized as the src layout). Root-
-    # level test targets attach to the single component; loose root
-    # PYTHON scripts beside a package are ambiguity, not membership;
+    # Group targets into components by the boundary their declared paths
+    # imply. Root-level test targets attach to the single component; loose
+    # root PYTHON scripts beside a package are ambiguity, not membership;
     # non-Python targets are outside the claim, never poison it.
     outside_claim: list[UnresolvedConvention] = []
     pathless = [t for t, p in targets if p is None]
@@ -244,8 +311,10 @@ def derive_convention_contracts(
     root_tests: list[tuple[Task, PurePosixPath]] = []
     loose_py: list[tuple[Task, PurePosixPath]] = []
     foreign_loose: list[tuple[Task, PurePosixPath]] = []
-    groups: dict[str, list[tuple[Task, PurePosixPath]]] = {}
-    layouts: dict[str, set[str]] = {}
+    ambiguous: list[tuple[Task, PurePosixPath]] = []
+    #: (component root, import name) → the targets that component owns.
+    groups: dict[tuple[str, str], list[tuple[Task, PurePosixPath]]] = {}
+    layouts: dict[tuple[str, str], set[str]] = {}
     for task, path in targets:
         if path is None:
             continue
@@ -257,14 +326,27 @@ def derive_convention_contracts(
                 pass  # root manifest/docs carry no component membership
             else:
                 foreign_loose.append((task, path))
-        elif parts[0] == "tests":
+            continue
+        if parts[0] == "tests":
             root_tests.append((task, path))
-        elif parts[0] == "src" and len(parts) >= 3:
-            groups.setdefault(parts[1], []).append((task, path))
-            layouts.setdefault(parts[1], set()).add("src")
-        else:
-            groups.setdefault(parts[0], []).append((task, path))
-            layouts.setdefault(parts[0], set()).add("flat")
+            continue
+        if parts[-2] == "src":
+            # ``src/<file>.py`` declares the src layout but names no
+            # package under it, so the file belongs to no package — the
+            # same standing as a root-level script, and never a component
+            # called "src".
+            if path.suffix == ".py":
+                loose_py.append((task, path))
+            elif path.name.lower() not in _COMPONENT_NEUTRAL_FILES:
+                foreign_loose.append((task, path))
+            continue
+        component = _component_of(path, component_inspect_root)
+        if component is None:
+            ambiguous.append((task, path))
+            continue
+        component_root, name, layout = component
+        groups.setdefault((component_root, name), []).append((task, path))
+        layouts.setdefault((component_root, name), set()).add(layout)
 
     if foreign_loose:
         outside_claim.append(UnresolvedConvention(
@@ -275,6 +357,13 @@ def derive_convention_contracts(
     unresolved: list[UnresolvedConvention] = []
     contracts: list[ConventionContract] = []
     bindings: dict[str, str] = {}
+
+    if ambiguous:
+        unresolved.append(UnresolvedConvention(
+            reason=("more than one component boundary explains target(s) "
+                    + ", ".join(sorted(str(p) for _, p in ambiguous))
+                    + " — the component root cannot be chosen"),
+            task_ids=tuple(sorted(t.id for t, _ in ambiguous))))
 
     if loose_py and groups:
         unresolved.append(UnresolvedConvention(
@@ -289,9 +378,10 @@ def derive_convention_contracts(
             contracts.append(contract)
             bindings[task.id] = contract.contract_id
 
-    resolved_names: list[str] = []
-    for name in sorted(groups):
-        members = groups[name]
+    resolved_components: list[ConventionContract] = []
+    for key in sorted(groups):
+        component_root, name = key
+        members = groups[key]
         member_ids = tuple(t.id for t, _ in members)
         py_members = [p for _, p in members if p.suffix == ".py"]
         foreign = [
@@ -314,7 +404,7 @@ def derive_convention_contracts(
                         f"ambiguous"),
                 task_ids=member_ids))
             continue
-        if len(layouts[name]) > 1:
+        if len(layouts[key]) > 1:
             unresolved.append(UnresolvedConvention(
                 reason=(f"component {name!r} targeted through both src and "
                         f"flat layouts — one immutable layout cannot be "
@@ -326,17 +416,20 @@ def derive_convention_contracts(
             unresolved.append(UnresolvedConvention(
                 reason=why_invalid, task_ids=member_ids))
             continue
-        layout = layouts[name].pop()
+        layout = layouts[key].pop()
+        # Roots are stored RELATIVE to the component root, which is what
+        # the import smoke and the target check both resolve against.
         source_root = f"src/{name}" if layout == "src" else name
-        component_root = ""
         test_root = ""
         component_tests = [
             (t, p) for t, p in members
             if len(p.parts) >= 2 and p.parts[-2] == "tests"
         ]
         if component_tests:
-            test_root = str(component_tests[0][1].parent)
-        elif root_tests:
+            suite = component_tests[0][1].parent
+            test_root = str(
+                suite.relative_to(component_root) if component_root else suite)
+        elif root_tests and not component_root:
             test_root = "tests"
         distribution, manifest = _distribution_name(
             component_inspect_root, component_root, name)
@@ -346,16 +439,13 @@ def derive_convention_contracts(
             test_root=test_root, import_name=name,
             distribution_name=distribution, manifest_filename=manifest)
         contracts.append(contract)
-        resolved_names.append(name)
+        resolved_components.append(contract)
         for tid in member_ids:
             bindings[tid] = contract.contract_id
 
     if root_tests:
-        if len(resolved_names) == 1:
-            target_id = next(
-                c.contract_id for c in contracts
-                if c.layout != "standalone"
-                and c.import_name == resolved_names[0])
+        if len(resolved_components) == 1:
+            target_id = resolved_components[0].contract_id
             for task, _ in root_tests:
                 bindings[task.id] = target_id
         elif groups:
@@ -386,9 +476,12 @@ def target_root_violation(
     path = PurePosixPath(output_path.lstrip("./"))
     if path.name.lower() in _COMPONENT_NEUTRAL_FILES:
         return None
-    allowed = [contract.source_root]
+    # The contract's roots are relative to its component, so a declared
+    # target is compared against the component-qualified roots.
+    prefix = f"{contract.component_root}/" if contract.component_root else ""
+    allowed = [f"{prefix}{contract.source_root}"]
     if contract.test_root:
-        allowed.append(contract.test_root)
+        allowed.append(f"{prefix}{contract.test_root}")
     for root in allowed:
         if root and str(path).startswith(root + "/"):
             return None

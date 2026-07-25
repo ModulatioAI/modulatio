@@ -4246,16 +4246,30 @@ class Orchestrator:
             _logger.warning(
                 "convention closure does not cover tasks %s — %s",
                 ", ".join(outside.task_ids), outside.reason)
+        sealed = list(result.contracts)
         if goal.convention_contracts:
-            prior = {c.contract_id for c in goal.convention_contracts}
-            fresh = {c.contract_id for c in result.contracts}
-            if prior != fresh:
+            # A prior record is only evidence of a seal if it IS valid
+            # sealed content — a matching id string on an altered record
+            # would otherwise license silent replacement.
+            for stored in goal.convention_contracts:
+                why_invalid = _conv.validate_sealed_contract(stored)
+                if why_invalid is not None:
+                    raise _conv.ConventionContractConflict(
+                        f"goal {goal.id}'s stored convention authority is "
+                        f"not valid sealed content ({why_invalid}) — a "
+                        f"re-plan cannot replace it")
+            prior = {c.contract_id: c for c in goal.convention_contracts}
+            fresh = {c.contract_id: c for c in result.contracts}
+            if set(prior) != set(fresh):
                 raise _conv.ConventionContractConflict(
                     f"goal {goal.id} already sealed convention authority "
                     f"{sorted(prior)}; a re-plan derived {sorted(fresh)} — "
                     f"sealed contracts never mutate; a correction needs a "
                     f"new plan")
-        goal.convention_contracts = list(result.contracts)
+            # The same derivation: keep the SEALED records, not equivalent
+            # fresh objects, so recovery preserves them byte-for-byte.
+            sealed = list(goal.convention_contracts)
+        goal.convention_contracts = sealed
         by_id = {c.contract_id: c for c in result.contracts}
         for t in tasks:
             t.convention_contract_id = result.bindings.get(t.id)
@@ -4288,11 +4302,16 @@ class Orchestrator:
             raise _PlanError(
                 "prepared task-plan manifest failed readback verification")
 
-    def _commit_task_plan(self, goal: Goal) -> None:
-        """Verify the exact expected task set + projections from the store,
-        then flip the Goal to the committed dispatch authority. Raises
-        ``_PlanError`` on a missing/extra task or any projection drift —
-        a partial or altered plan is never mistaken for a complete one."""
+    def _durable_plan_violation(self, goal: Goal) -> str | None:
+        """Mechanism reason the goal's DURABLE task set no longer matches
+        its recorded manifest, or None when it does.
+
+        Read-only, and the only place the exact-set rule lives: the stored
+        goal-scoped set must be exactly the expected ids — nothing missing,
+        nothing extra — and every immutable projection must still match.
+        Committing a plan and dispatching under one ask the same question,
+        because a committed flag records that the set matched ONCE, not
+        that it still does."""
         from modulatio import conventions as _conv
         stored = store.list_tasks(
             self.project.code, goal_id=goal.id, run_id=self.project.run_id)
@@ -4301,16 +4320,25 @@ class Orchestrator:
         if stored_ids != expected:
             missing = sorted(expected - stored_ids)
             extra = sorted(stored_ids - expected)
-            raise _PlanError(
-                f"task-plan commit refused: stored set differs from the "
-                f"prepared manifest (missing {missing}, unexpected {extra})")
+            return (f"the stored task set differs from the plan manifest "
+                    f"(missing {missing}, unexpected {extra})")
         by_id = {t.id: t for t in stored}
         for tid in goal.expected_task_ids:
             digest = _conv.task_plan_projection_digest(by_id[tid])
             if digest != goal.expected_task_digests.get(tid):
-                raise _PlanError(
-                    f"task-plan commit refused: task {tid} projection "
-                    f"differs from the prepared manifest")
+                return (f"task {tid}'s immutable projection differs from "
+                        f"the plan manifest")
+        return None
+
+    def _commit_task_plan(self, goal: Goal) -> None:
+        """Verify the exact expected task set + projections from the store,
+        then flip the Goal to the committed dispatch authority. Raises
+        ``_PlanError`` on a missing/extra task or any projection drift —
+        a partial or altered plan is never mistaken for a complete one."""
+        from modulatio import conventions as _conv
+        why = self._durable_plan_violation(goal)
+        if why is not None:
+            raise _PlanError(f"task-plan commit refused: {why}")
         goal.task_plan_state = "committed"
         goal.task_plan_digest = _conv.plan_digest(
             goal.expected_task_ids, goal.expected_task_digests)
@@ -4350,10 +4378,9 @@ class Orchestrator:
                 f"task {task.id}'s bound contract "
                 f"{task.convention_contract_id} is not among goal "
                 f"{goal.id}'s sealed contracts")
-        if _conv.contract_digest(contract) != contract.digest:
-            raise ConventionContractConflict(
-                f"contract {contract.contract_id} fails its own digest — "
-                f"the sealed record was altered and is not authority")
+        why_invalid = _conv.validate_sealed_contract(contract)
+        if why_invalid is not None:
+            raise ConventionContractConflict(why_invalid)
         if goal.task_plan_state != "committed":
             raise ConventionContractConflict(
                 f"goal {goal.id}'s task plan is "
@@ -4392,14 +4419,41 @@ class Orchestrator:
             return (
                 f"task {t.id} is not in goal {goal.id}'s committed plan "
                 f"manifest")
+        # The whole durable set is re-verified on every dispatch: a plan
+        # that committed once can still lose, gain, or alter a record
+        # afterwards, and any of those makes the remainder a different
+        # plan than the one that was witnessed.
+        why = self._durable_plan_violation(goal)
+        if why is not None:
+            return (
+                f"goal {goal.id}'s committed task plan no longer matches "
+                f"durable storage — {why}")
         stored = store.get_task(
             self.project.code, t.id, run_id=self.project.run_id)
-        subject = stored if stored is not None else t
-        if _conv.task_plan_projection_digest(subject) != expected:
+        if stored is None:
+            # A witnessed task with no durable record is a refusal. The
+            # in-memory copy is precisely the thing that cannot vouch for
+            # itself.
+            return (
+                f"task {t.id} is in goal {goal.id}'s manifest but has no "
+                f"durable record")
+        if _conv.task_plan_projection_digest(stored) != expected:
             return (
                 f"task {t.id}'s immutable projection differs from the "
                 f"committed manifest — the stored record is not the "
                 f"planned one")
+        if t.convention_contract_id is not None:
+            contract = next(
+                (c for c in goal.convention_contracts
+                 if c.contract_id == t.convention_contract_id), None)
+            if contract is None:
+                return (
+                    f"task {t.id}'s bound contract "
+                    f"{t.convention_contract_id} is not among goal "
+                    f"{goal.id}'s sealed contracts")
+            why_invalid = _conv.validate_sealed_contract(contract)
+            if why_invalid is not None:
+                return why_invalid
         return None
 
     # ── Leader between-task reflection ──────────
@@ -12575,15 +12629,23 @@ class Orchestrator:
         claim to check); ``(None, reason)`` = could not run (UNAVAILABLE);
         ``(False, report)`` = the declared component does not import —
         conformance RED regardless of producer test results."""
+        from modulatio import conventions as _conv
         contracts = []
         for gid in sorted({t.goal_id for t in tasks}):
             goal = store.get_goal(
                 self.project.code, gid, run_id=self.project.run_id)
             if goal is None:
                 continue
-            contracts.extend(
-                c for c in goal.convention_contracts
-                if c.state == "resolved" and c.layout != "standalone")
+            for c in goal.convention_contracts:
+                if c.state != "resolved" or c.layout == "standalone":
+                    continue
+                why_invalid = _conv.validate_sealed_contract(c)
+                if why_invalid is not None:
+                    # Conformance cannot be checked against authority that
+                    # is not sealed content: that is RED, never a pass.
+                    return (False, f"convention authority is unusable: "
+                                   f"{why_invalid}")
+                contracts.append(c)
         if not contracts:
             return None
         root = self._shared_artifacts_root()
