@@ -863,12 +863,21 @@ class _DeterministicRunShell:
                 f"{proc.stdout}{proc.stderr}")
 
 
-def _gate_suite(root):
+def _gate_suite(root, *, binds: bool = True):
+    """A produced repo with a runnable suite. ``binds`` writes tests that
+    actually reach the shipped component; False models the suite that is
+    green about something else entirely."""
     (root / "pyproject.toml").write_text(
         '[project]\nname = "webapp"\nversion = "0"\n', encoding="utf-8")
     (root / "tests").mkdir(exist_ok=True)
-    (root / "tests" / "test_ok.py").write_text(
-        "def test_ok():\n    assert True\n", encoding="utf-8")
+    body = (
+        "import pathlib\nimport sys\n\n"
+        "sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))\n"
+        "import webapp\n\n\n"
+        "def test_ok():\n    assert webapp is not None\n"
+        if binds else "def test_ok():\n    assert True\n"
+    )
+    (root / "tests" / "test_ok.py").write_text(body, encoding="utf-8")
 
 
 def test_import_smoke_green_for_declared_layout(project, monkeypatch):
@@ -888,6 +897,28 @@ def test_import_smoke_green_for_declared_layout(project, monkeypatch):
     state, report = orch._goal_pytest_gate(tasks)
     assert state is True
     assert "import webapp" in report
+
+
+def test_gate_is_red_when_the_suite_never_reaches_the_component(
+    project, monkeypatch,
+):
+    """A suite can pass without ever importing the deliverable. That green
+    is evidence about the suite, not the product, and it reads the same in
+    a report — so the gate refuses it."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    _gate_suite(orch._shared_artifacts_root(), binds=False)
+    _enforceable_sandbox(monkeypatch)
+    orch._pytest_gate_run_shell = _DeterministicRunShell()
+    monkeypatch.setattr(Orchestrator, "_goal_pytest_gate", _REAL_PYTEST_GATE)
+
+    state, report = orch._goal_pytest_gate(tasks)
+
+    assert state is False
+    assert "never reaches webapp" in report
 
 
 def test_import_smoke_red_when_package_name_diverges(project, monkeypatch):

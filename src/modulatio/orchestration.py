@@ -12729,6 +12729,15 @@ class Orchestrator:
             if not smoke_state:
                 return False, "\n\n".join(reports)
 
+        # A green suite that never reaches the shipped component proves the
+        # suite runs, not that the product works. Tests that exercise only
+        # their own fixtures (or the standard library) pass exactly as
+        # loudly as tests that exercise the deliverable.
+        unbound = self._unbound_test_suites(tasks, roots)
+        if unbound:
+            reports.append(unbound)
+            return False, "\n\n".join(reports)
+
         if not any_tests:
             # Suite roots existed but not one engine-discoverable test file —
             # no green evidence to show, same as no suite at all (RED).
@@ -12742,6 +12751,53 @@ class Orchestrator:
                 "that producer code did not influence the result. Treat it as "
                 "evidence, not a tamper-proof attestation.")
         return all_green, "\n\n".join(reports)
+
+    def _unbound_test_suites(
+        self, tasks: "list[Task]", roots: "list[Path]",
+    ) -> "str | None":
+        """Reason the shipped tests do not reach the shipped component, or
+        None when they do.
+
+        The component's declared import name is the one thing every test of
+        it must name. A suite that never mentions it is not testing the
+        product — it is green about something else, which reads identically
+        in a report."""
+        from modulatio import conventions as _conv
+
+        wanted: set = set()
+        for gid in sorted({t.goal_id for t in tasks}):
+            goal = store.get_goal(
+                self.project.code, gid, run_id=self.project.run_id)
+            if goal is None:
+                continue
+            for c in goal.convention_contracts:
+                if (c.state == "resolved" and c.layout != "standalone"
+                        and c.import_name
+                        and _conv.validate_sealed_contract(c) is None):
+                    wanted.add(c.import_name)
+        if not wanted:
+            return None
+
+        seen: set = set()
+        for repo_root in roots:
+            for path in self._discover_test_files(repo_root):
+                try:
+                    body = path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                for name in wanted:
+                    if re.search(rf"\b{re.escape(name)}\b", body):
+                        seen.add(name)
+        missing = sorted(wanted - seen)
+        if not missing:
+            return None
+        return (
+            "engine-run pytest is green but the suite never reaches "
+            + ", ".join(missing)
+            + " — no discovered test file names the shipped component, so "
+              "the green result is evidence about something other than the "
+              "deliverable"
+        )
 
     def _convention_import_smoke(
         self, tasks: "list[Task]", run_shell,
