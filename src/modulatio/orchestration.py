@@ -4302,6 +4302,58 @@ class Orchestrator:
             raise _PlanError(
                 "prepared task-plan manifest failed readback verification")
 
+    def _minted_child_dispatch_violation(
+        self, goal: Goal, t: Task,
+    ) -> str | None:
+        """Mechanism reason a task claiming mint parentage may not dispatch
+        outside the plan manifest, or None when the claim is backed.
+
+        ``minted_by`` travels on the task itself, so it is a claim, not the
+        authority: the authority is the parent's durable mint record.
+        Exactly one goal-scoped parent must hold that mint id, its
+        transaction must describe exactly this child, the child's own
+        durable record must exist under the same mint, and the object about
+        to run, the record on disk, and the birth descriptor must share one
+        immutable birth projection."""
+        stored = store.list_tasks(
+            self.project.code, goal_id=goal.id, run_id=self.project.run_id)
+        parents = [
+            p for p in stored
+            if p.decompose_mint is not None
+            and p.decompose_mint.mint_id == t.minted_by
+        ]
+        if len(parents) != 1:
+            return (
+                f"task {t.id} claims mint {t.minted_by!r}, which {len(parents)} "
+                f"goal-scoped parent records hold — exactly one durable mint "
+                f"authorizes a child")
+        record = parents[0].decompose_mint
+        descriptors = [
+            d for d in record.child_descriptors if d.get("id") == t.id
+        ]
+        if len(descriptors) != 1:
+            return (
+                f"mint {t.minted_by!r} describes task {t.id} "
+                f"{len(descriptors)} times — a child rides exactly one birth "
+                f"descriptor")
+        durable = store.get_task(
+            self.project.code, t.id, run_id=self.project.run_id)
+        if durable is None:
+            return f"minted task {t.id} has no durable record"
+        if durable.minted_by != record.mint_id:
+            return (
+                f"task {t.id}'s durable record does not carry mint "
+                f"{t.minted_by!r}")
+        birth = self._mint_child_authority(Task.model_validate(descriptors[0]))
+        if (
+            self._mint_child_authority(t) != birth
+            or self._mint_child_authority(durable) != birth
+        ):
+            return (
+                f"task {t.id}'s immutable birth projection differs from the "
+                f"descriptor mint {t.minted_by!r} committed")
+        return None
+
     def _goal_manifest_violation(self, goal: Goal) -> str | None:
         """Mechanism reason the goal's OWN manifest is not self-consistent,
         or None when it is.
@@ -4435,12 +4487,27 @@ class Orchestrator:
         completeness claim. Decompose-minted children ride the mint's
         durable authority, never the plan manifest."""
         from modulatio import conventions as _conv
-        if t.minted_by is not None:
-            return None
         goal = store.get_goal(
             self.project.code, t.goal_id, run_id=self.project.run_id)
         if goal is None or goal.task_plan_state == "none":
             return None
+        if t.id not in goal.expected_task_digests:
+            # Outside the plan manifest the only other authority is a mint,
+            # and ``minted_by`` is the task's own CLAIM to one. The claim is
+            # checked against the parent's durable record before it exempts
+            # anything.
+            if t.minted_by is not None:
+                return self._minted_child_dispatch_violation(goal, t)
+            return (
+                f"task {t.id} is not in goal {goal.id}'s committed plan "
+                f"manifest")
+        if t.minted_by is not None:
+            # Planned tasks are born without a mint marker, so one here is
+            # an edited record trying to reach the exempt lane.
+            return (
+                f"task {t.id} is in goal {goal.id}'s plan manifest and also "
+                f"claims mint {t.minted_by!r} — a marker cannot reclassify a "
+                f"planned task as a minted child")
         if goal.task_plan_state == "prepared":
             try:
                 self._commit_task_plan(goal)

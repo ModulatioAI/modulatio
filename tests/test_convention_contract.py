@@ -1259,17 +1259,118 @@ def test_committed_goal_without_a_plan_digest_refuses(project, monkeypatch):
     assert orch._task_plan_dispatch_refusal(tasks[0]) is not None
 
 
-def test_minted_child_rides_mint_authority_not_plan_manifest(
+def _mint_a_child(orch, goal, tasks, child_id="CVC-T-900", **overrides):
+    """Mint a real child: a durable parent record carrying the transaction,
+    a birth descriptor for the child, and the child's own durable record
+    under the same mint. Returns the live child."""
+    from modulatio import store as store_mod
+    from modulatio.types import DecomposeMintRecord
+
+    parent = tasks[0]
+    child = _code_task(child_id, "webapp/extra.py")
+    child.goal_id = goal.id
+    child.project_id = parent.project_id
+    child.convention_contract_id = parent.convention_contract_id
+    for field, value in overrides.items():
+        setattr(child, field, value)
+    child.minted_by = "mint-0001"
+
+    parent.decompose_mint = DecomposeMintRecord(
+        mint_id="mint-0001",
+        child_descriptors=[child.model_dump(mode="json")])
+    store_mod.save_task(PROJECT_CODE, parent)
+    store_mod.create_task(PROJECT_CODE, child)
+    return child
+
+
+def test_honest_minted_child_rides_its_durable_mint_authority(
     project, monkeypatch,
 ):
-    """Decompose children are born mid-run under the mint's durable
-    authority — the plan manifest never lists them and must not refuse
-    them."""
+    """A child born mid-run is outside the plan manifest, so its authority
+    is the parent's durable mint record: with that record, its birth
+    descriptor, and its own durable file all agreeing, it dispatches and
+    still renders the convention contract it inherited."""
     orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
-    child = _code_task("CVC-T-900", "webapp/extra.py")
-    child.goal_id = goal.id
-    child.minted_by = "mint-0001"
+    child = _mint_a_child(orch, goal, tasks)
+
     assert orch._task_plan_dispatch_refusal(child) is None
+    assert "## Project conventions" in orch._convention_block_for(child)
+
+
+def test_planned_task_cannot_be_reclassified_as_a_minted_child(
+    project, monkeypatch,
+):
+    """A mint marker on a task that IS in the plan manifest cannot move it
+    to the mint lane — planned tasks are born without one, so the marker is
+    evidence of an edited record."""
+    orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
+    live = next(t for t in tasks if t.convention_contract_id)
+    live.minted_by = "not-a-durable-mint"
+    live.output_path = "outside/the-sealed-plan.py"
+
+    _assert_refuses_without_producing(orch, project, live)
+
+
+def test_mint_marker_cannot_excuse_a_survivor_of_a_broken_plan(
+    project, monkeypatch,
+):
+    """Stamping a marker on a planned survivor must not exempt it from the
+    plan checks that would otherwise catch its deleted sibling."""
+    orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
+    _delete_task_record(tasks[0].id)
+    survivor = tasks[1]
+    survivor.minted_by = "not-a-durable-mint"
+
+    _assert_refuses_without_producing(orch, project, survivor)
+
+
+def test_child_naming_a_nonexistent_mint_refuses(project, monkeypatch):
+    orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
+    child = _code_task("CVC-T-901", "webapp/extra.py")
+    child.goal_id = goal.id
+    child.minted_by = "mint-that-was-never-committed"
+
+    assert orch._task_plan_dispatch_refusal(child) is not None
+
+
+def test_child_absent_from_its_mints_descriptors_refuses(
+    project, monkeypatch,
+):
+    """A real mint authorizes exactly the children it described — a task
+    naming it without a descriptor is not one of them."""
+    from modulatio import store as store_mod
+
+    orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
+    described = _mint_a_child(orch, goal, tasks)
+    stowaway = _code_task("CVC-T-902", "webapp/stowaway.py")
+    stowaway.goal_id = goal.id
+    stowaway.project_id = described.project_id
+    stowaway.minted_by = "mint-0001"
+    store_mod.create_task(PROJECT_CODE, stowaway)
+
+    assert orch._task_plan_dispatch_refusal(stowaway) is not None
+
+
+@pytest.mark.parametrize("where", ["live", "durable"])
+def test_minted_child_birth_projection_drift_refuses(
+    project, monkeypatch, where,
+):
+    """The descriptor is the child's birth authority: whichever copy drifts
+    from it — the object about to run, or the record on disk — the child no
+    longer matches what the mint described."""
+    from modulatio import store as store_mod
+
+    orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
+    child = _mint_a_child(orch, goal, tasks)
+
+    if where == "live":
+        child.output_path = "webapp/somewhere-else.py"
+    else:
+        durable = store_mod.get_task(PROJECT_CODE, child.id)
+        durable.output_path = "webapp/somewhere-else.py"
+        store_mod.save_task(PROJECT_CODE, durable)
+
+    assert orch._task_plan_dispatch_refusal(child) is not None
 
 
 def test_unwitnessed_goal_dispatches_without_claim(project, monkeypatch):
