@@ -23,7 +23,7 @@ from modulatio.tui.widgets.master_detail import MasterDetail
 
 _ALL = "__all__"
 
-#: Glyph per last-run status — paired with the WORD (Feng-Tui §10).
+#: Glyph per last-run status — paired with the WORD.
 _STATUS_GLYPH = {"ok": "✓", "failed": "✖", "running": "▸", "skipped": "·"}
 
 
@@ -216,7 +216,7 @@ class CronScreen(Vertical):
                 escape(j.get("name", "?")),
                 escape(j.get("project_code", "?")),
                 escape(j.get("schedule", "?")),
-                "● on" if j.get("enabled") else "○ off",   # glyph + WORD (§10)
+                "● on" if j.get("enabled") else "○ off",   # glyph + WORD
                 escape((j.get("next_run", "") or "")[:19]),
                 escape(last),
                 key=j.get("id"),

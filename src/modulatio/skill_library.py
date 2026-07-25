@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Skill library — the shared pool producers draw skills from at run-time.
 
-Brick 1 of the skill-library arc (``docs/design/skill-library.md``). A thin,
-**stateless** API over the existing skill loaders in :mod:`modulatio.skills`
-(``load_with_metadata``, ``list_skills``, and the project > shared > seed
-precedence), plus a cheap **resident index** for discovery.
+A thin, **stateless** API over the existing skill loaders in
+:mod:`modulatio.skills` (``load_with_metadata``, ``list_skills``, and the
+project > shared > seed precedence), plus a cheap **resident index** for
+discovery.
 
 The index holds only ``(name, one-line description, capability_tags)`` — never
 the prompt bodies. That is the whole context-economy lever: a producer can

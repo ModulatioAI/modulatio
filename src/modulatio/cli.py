@@ -613,7 +613,7 @@ def kickoff(
     orch = Orchestrator(
         project,
         runners,
-        deliver_products=not stub,  # §2: the engine renders finished products
+        deliver_products=not stub,  # the engine renders finished products
         semantic_matcher=semantic_matcher,
         agent_runners=agent_runners,
         qc_history_embedder=embedder,
@@ -651,7 +651,7 @@ def kickoff(
         typer.echo(f"  Goal reports: {len(summary.goal_reports)}")
         for p in summary.goal_reports:
             typer.echo(f"    - {p}")
-    # Finished products are rendered by the ENGINE now (§2 — Orchestrator.kickoff
+    # Finished products are rendered by the ENGINE now (Orchestrator.kickoff
     # with deliver_products=True), so EVERY run path delivers, not just this CLI
     # command. The CLI is a thin reporter of what the engine shipped.
     if not stub:

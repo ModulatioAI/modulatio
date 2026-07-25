@@ -636,7 +636,7 @@ def resolve_under_roots(arg: str, roots: "list[Path]") -> "Path | None":
     dotfile component / symlink escape / missing / not-a-file.
 
     This is the security choke point for read-only Leader access to its team's
-    outputs (§4 ``read_deliverable``). It is deliberately NOT a widening of the
+    outputs. It is deliberately NOT a widening of the
     ``run_shell`` sandbox: a single, unit-tested, file-only, read-only resolver
     over a fixed set of run-scoped roots is a far smaller attack surface than
     threading a second read root through the whole shell-confinement path. The

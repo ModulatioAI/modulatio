@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """Capability tools for the service-API pool.
 
-Spec: docs/design/2026-07-05-service-api-pool.md. Tools are named for what
+Tools are named for what
 they DO (generate_image, research_search, ...) — a thin adapter per cataloged
 vendor; ``api_call`` is the custom-service generic. The key is checked out of
 the slot pool and injected HERE, at the adapter layer: it never appears in

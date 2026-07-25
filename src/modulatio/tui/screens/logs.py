@@ -36,7 +36,7 @@ from modulatio.tui.widgets.send_log_modal import SendLogModal
 _fmt_ts = logstore.format_timestamp
 
 #: Glyph per log kind — paired with the WORD label (never colour alone) so the
-#: KIND reads at a glance (Feng-Tui §10 accessibility).
+#: KIND reads at a glance (glyph + word, never colour alone).
 _KIND_GLYPH = {"crash": "✖", "error": "▲", "doctor": "✚", "run": "▸"}
 
 

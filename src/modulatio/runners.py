@@ -1594,7 +1594,7 @@ def run_llm_with_tools(
     allowed_tools = set(tool_loadout)
 
     def _broker_denies(call) -> bool:
-        # The scoped PermissionBroker (§6) gates the CAPABILITY axis (network /
+        # The scoped PermissionBroker gates the CAPABILITY axis (network /
         # shell / file-write / spend) — it asks the four access questions, honors
         # remembered/preauthorized grants, and binds the substrate preflight.
         # This COMPOSES with the leader_gate (permission_callback, the FILESYSTEM

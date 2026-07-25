@@ -409,7 +409,7 @@ class Task(BaseModel):
     # it changes. The planner emits ``producer_mode: "diff"`` directly
     # for tasks known to span multiple files; the retry router can also
     # promote a multi-file mechanical defect to diff on retry.
-    # §3b adds REVISE: a SUBSTANTIVE-defect redo that builds on the existing
+    # REVISE: a SUBSTANTIVE-defect redo that builds on the existing
     # draft + the reviewer's critique (never from scratch) — the retry router
     # picks it for non-mechanical defects so neither QC nor the Leader throws
     # the prior work away.

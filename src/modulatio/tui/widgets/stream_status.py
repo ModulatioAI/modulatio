@@ -96,7 +96,7 @@ class StreamStatus(Static):
         self._done = False
         self._frame = 0
         self._started_at = 0.0
-        self._working = 1          # §5: producers in flight (TEAM lane)
+        self._working = 1          # producers in flight (TEAM lane)
         self._working_names: list[str] = []  # Phase 1: WHO is in flight, by name
 
     def on_mount(self) -> None:
@@ -115,7 +115,7 @@ class StreamStatus(Static):
         """Show the verb for the current phase, spinner running. ``actor`` is
         the worker's user-given name (used on the TEAM lane). ``working`` is the
         number of producers in flight — when > 1 the TEAM lane shows the parallel
-        count so the operator can see the concurrency (§5). ``working_names``
+        count so the operator can see the concurrency. ``working_names``
         (Phase 1) is the in-flight producers BY NAME — when present and > 1, the
         status shows *who* is running in parallel, not just how many."""
         if self._verb is None or self._error is not None or self._done:
@@ -161,7 +161,7 @@ class StreamStatus(Static):
             if self._lane == "team" and self._actor:
                 phrase = f"{self._actor} is {self._verb}"
             text.append(f"{phrase}…", style=accent)
-            # §5 + Phase 1: surface parallelism — N producers working at once, BY
+            # Surface parallelism — N producers working at once, BY
             # NAME when we have them ("· 3 producers working: a, b, c"), else the
             # count alone. Names make concurrent work read as concurrent.
             if self._lane == "team" and self._working > 1:

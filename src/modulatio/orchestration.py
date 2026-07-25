@@ -74,8 +74,7 @@ _logger = logging.getLogger("modulatio.orchestration")
 # VALIDATES it by enum membership + target identity ONLY (it never parses prose
 # to infer intent), fails CLOSED to a named defer, and defaults an absent
 # declaration on a `disappointed` verdict to the one whitelisted safe shape
-# (revise-in-place on the goal's own tasks). See
-# docs/design/leader-self-remediation.md.
+# (revise-in-place on the goal's own tasks).
 class RemediationAction(str, Enum):
     REVISE_IN_PLACE = "revise_in_place"
     DEFER = "defer"
@@ -350,15 +349,15 @@ class RunSummary:
     #: interview/decompose) fills it authoritatively, until then it stays None
     #: and delivery falls back to a slug of the project name/objective.
     job_slug: str | None = None
-    #: §2 — deliverables the ENGINE rendered to the project delivery folder at
+    #: Deliverables the ENGINE rendered to the project delivery folder at
     #: end of kickoff (so EVERY run path — CLI, converse, ACP, daemon — delivers,
     #: not just the CLI command). The CLI is now a thin reporter of these.
     rendered_deliverables: list = field(default_factory=list)
-    #: §2 — deliverable task ids withheld because they (transitively) depend on
+    #: Deliverable task ids withheld because they (transitively) depend on
     #: blocked/rejected work, or sit in a blocked goal — never shipped downstream
     #: of unresolved work, but independent completed deliverables still ship.
     withheld_deliverables: list[str] = field(default_factory=list)
-    #: §2 — the rendered Product Quality Report (always ships, advisory), or None.
+    #: The rendered Product Quality Report (always ships, advisory), or None.
     product_quality_report: object = None
     #: #97 R2 — when an explicit/cron bind was REFUSED by the fit-gate and the
     #: caller's policy is skip-the-slot (the cron default), the slot is skipped:
@@ -417,7 +416,7 @@ class TaskExecutionResult:
     #: plan-order conflict policy (NOT scheduler order). Excludes incidental
     #: run_shell byproducts (pycache, test scratch) — only declared artifacts.
     artifact_writes: list[str] = field(default_factory=list)
-    #: §5: decompose children a worker created (context-overflow → split inline).
+    #: Decompose children a worker created (context-overflow → split inline).
     #: A worker must not write the shared store, so children ride back here for
     #: the MAIN THREAD to persist + fold into ``summary.tasks`` at merge — else a
     #: child built under a concurrent wave would be invisible to the run summary.
@@ -457,7 +456,7 @@ def _merge_task_result(
         save_task(result.task)
     if result.task not in summary.tasks:
         summary.tasks.append(result.task)
-    # §5: persist + summarize decompose children the worker created in
+    # Persist + summarize decompose children the worker created in
     # isolation (the worker deferred their store writes to here). Deterministic
     # — children ride in the result, merged in the same task-id order as parents.
     for child in result.child_tasks:
@@ -2331,14 +2330,14 @@ class Orchestrator:
         #: Explicit opt-out of the single-leader-model guard for the deliberate
         #: headless override (CLI --leader-model differing from the roster).
         self._skip_leader_model_guard = skip_leader_model_guard
-        #: §2 — render finished products (DOCX) to ~/Documents/Modulatio/<proj>/
+        #: Render finished products (DOCX) to ~/Documents/Modulatio/<proj>/
         #: at the end of EVERY kickoff this orchestrator drives. Default OFF so
         #: stub/test kickoffs never write to the real delivery dir or invoke
         #: pandoc; the real run paths (CLI, TUI kickoff, converse, ACP, daemon)
         #: opt in. This is what makes delivery path-independent (the conversational
         #: Leader's run_job previously produced .md but never rendered .docx).
         self._deliver_products = deliver_products
-        #: §4 team_status liveness: True while kickoff() is driving the swarm.
+        #: team_status liveness: True while kickoff() is driving the swarm.
         #: Today's synchronous converse→run_job→kickoff path blocks the tool-loop
         #: for the whole run, so team_status reads False (the run is genuinely
         #: done by the time the loop can call it again). The flag is the seam for
@@ -2346,7 +2345,7 @@ class Orchestrator:
         #: concurrently — there it keeps team_status from reporting "done"
         #: mid-flight. GIL-atomic bool; no lock needed for the single read/write.
         self._kickoff_active = False
-        #: §3 auto-redo loop-breaker: fingerprint of a goal's deliverable
+        #: Auto-redo loop-breaker: fingerprint of a goal's deliverable
         #: artifacts captured the moment a redo is dispatched. If the next
         #: disappointed verdict sees the SAME fingerprint, the redo reproduced
         #: identical output the Leader still rejects → futile, bow out. Keyed by
@@ -2542,7 +2541,7 @@ class Orchestrator:
         #: or read a half-written thread. Held for the whole turn — converse is an
         #: operator-facing single-flight, never a parallel-wave hot path.
         self._converse_lock = threading.Lock()
-        #: §2 autonomy mode for the conversational session (set by a leading
+        #: Autonomy mode for the conversational session (set by a leading
         #: /yolo //goal //yolo-goal //default command; persists across turns).
         from modulatio.permissions import RunMode as _RunMode
         self._session_mode = _RunMode.DEFAULT
@@ -3106,7 +3105,7 @@ class Orchestrator:
 
         Activity events stream LIVE, even from a concurrent
         wave worker — so the operator watches producers work in parallel as it
-        happens, not as a burst at merge (the §5 default-on buffering left the
+        happens, not as a burst at merge (the default-on buffering left the
         TEAM TV dark while workers ran). The callback fires under
         ``self._activity_lock`` so concurrent workers can't race a non-thread-safe
         subscriber. (STORE/artifact writes still buffer for the deterministic
@@ -6531,11 +6530,11 @@ class Orchestrator:
         return runbook.rstrip() + "\n\n---\n\n" + prompt
 
     def _autonomy_block(self) -> str:
-        """§2.4 — the judgment-posture framing for the active mode, injected at the
+        """The judgment-posture framing for the active mode, injected at the
         tail of the converse prompt. /goal + /yolo-goal DELEGATE judgment (decide
         freely, don't ask how); DEFAULT + /yolo keep confirm-direction. This is the
         JUDGMENT axis only — the broker (capability access) is untouched, so the
-        §6.F orthogonality holds (the broker never reads delegates_judgment)."""
+        orthogonality holds (the broker never reads delegates_judgment)."""
         if self._session_mode.delegates_judgment:
             return ("\n\n---\n\nAUTONOMY — DELEGATED JUDGMENT (/goal): decide freely "
                     "how to proceed; don't stop to ask the operator which approach. "
@@ -7134,7 +7133,7 @@ class Orchestrator:
         }
 
     def _consume_mode_command(self, message: str) -> "tuple[bool, str]":
-        """§2 Task 1. If ``message`` leads with a mode command (/yolo //goal
+        """If ``message`` leads with a mode command (/yolo //goal
         //yolo-goal //default), set the session mode and return ``(True, remainder)``
         — the remainder is the Leader's view of the message, command token stripped
         (empty for a bare command). Returns ``(False, message)`` unchanged when the
@@ -7175,7 +7174,7 @@ class Orchestrator:
                 "choices and ask before a new capability or folder.")
 
     def _autonomy_status(self) -> "tuple[str, str]":
-        """§2.5 — the two-row autonomy status (Access · Sandbox) for the live
+        """The two-row autonomy status (Access · Sandbox) for the live
         session mode + substrate, for the TUI/ACP to render so a mode can never
         hide the sandbox posture."""
         from modulatio import permissions as _perm, sandbox as _sandbox
@@ -7267,7 +7266,7 @@ class Orchestrator:
         return cached
 
     def _build_permission_broker(self, mode, ask):
-        """§2 Task 2 — construct the per-session ``PermissionBroker`` from the
+        """Construct the per-session ``PermissionBroker`` from the
         session ``mode`` + the live sandbox substrate. The broker gates the
         CAPABILITY axis (network/shell/spend); it COMPOSES with the leader_gate
         (filesystem axis) as a separate deny-chain arm in the runner — it never
@@ -7292,7 +7291,7 @@ class Orchestrator:
 
     def _audit_permission_decision(self, cap, decision) -> None:
         """Best-effort audit of a broker grant/deny to the activity stream. The
-        broker swallows any exception this raises (§6 audit-relay safety)."""
+        broker swallows any exception this raises (audit-relay safety)."""
         self._emit_activity(
             role="leader", phase="permission", agent_id="leader",
             detail=f"{getattr(decision, 'value', decision)}: {getattr(cap, 'label', cap)}",
@@ -7330,7 +7329,7 @@ class Orchestrator:
         # the normal flow; before they can truly overlap, give the kickoff lane
         # its OWN abort Event (or drop this clear() and reset per-turn elsewhere).
         self.abort_event.clear()
-        # §2 Task 1 — autonomy mode at the converse boundary. A leading mode
+        # Autonomy mode at the converse boundary. A leading mode
         # command sets the session mode (persists on the Orchestrator) and is
         # STRIPPED so the Leader sees the task, not the command. A BARE command is
         # a mode-ack (recorded as a turn), not an empty message into the loop.
@@ -8800,7 +8799,7 @@ class Orchestrator:
         store.save_task(self.project.code, task, run_id=self.project.run_id)
 
     def _persist_child_task(self, child: Task) -> None:
-        """Persist a decompose child (§5). In an isolated worker, buffer it for
+        """Persist a decompose child. In an isolated worker, buffer it for
         the main-thread merge (which saves it + folds it into ``summary.tasks``)
         so the worker never writes the shared store; on the sequential path,
         save immediately (unchanged). Last-state-wins by child id in the buffer,
@@ -8860,7 +8859,7 @@ class Orchestrator:
         local_summary = RunSummary(project=self.project)
         deferred: list = []
         artifact_writes: list[str] = []
-        child_tasks: list = []  # §5: decompose children created in isolation
+        child_tasks: list = []  # decompose children created in isolation
         # #151/e2e Blocker 2: isolate this worker's artifact writes to a
         # per-task staging tree (seeded with the already-merged shared tree
         # so the producer keeps prior context and QC can run cross-file).
@@ -8876,7 +8875,7 @@ class Orchestrator:
         self._tls.tool_registry_override = self._staging_tool_registry(staging)
         try:
             self._run_task_with_redo(t, local_summary, initial_corrective_notes)
-            # §5: on the concurrent path a terminal-FAILED task emits no
+            # On the concurrent path a terminal-FAILED task emits no
             # ``task_completed``, so the TV's "N producers working" indicator
             # would keep counting it. Emit a terminal ``task_settled`` (live, Fix
             # B) so the producer leaves the board. Success already emitted
@@ -9766,7 +9765,7 @@ class Orchestrator:
 
     @staticmethod
     def _wave_pool_ceiling() -> int:
-        """Hard ceiling on concurrent worker THREADS per wave (§5). Bounds a very
+        """Hard ceiling on concurrent worker THREADS per wave. Bounds a very
         wide fan-out wave from spawning an unbounded pool now that concurrency is
         default-on; tasks above the ceiling queue and run as slots free.
         ``MODULATIO_WAVE_POOL_CEILING`` overrides; default 32."""
@@ -10236,7 +10235,7 @@ class Orchestrator:
     ) -> None:
         """Drive one task through up to `max_retries` redo attempts.
 
-        Per `quality-architecture.md` §8: a task that didn't ship (QC
+        A task that didn't ship (QC
         rejection OR drafter exception) must be retried with corrective
         context, not dropped. Terminal states are reached only after the
         retry budget is exhausted:
@@ -10464,7 +10463,7 @@ class Orchestrator:
                 # editing), and let the loop retry. The richer self-heal
                 # rungs (salvage → QC-patch / re-decompose) land in Slice 3;
                 # for now retry-then-graceful-terminal is the floor.
-                # §3b note: this is the deliberate exception to "never throw work
+                # This is the deliberate exception to "never throw work
                 # away" — a breaker trip means DEGENERATE output (repetition /
                 # no-commit storm), which is the "effectively a rewrite" case, not
                 # real work worth revising.
@@ -13390,7 +13389,7 @@ class Orchestrator:
             # existing draft with the Leader's critique as the instruction, never
             # destroys-and-regenerates (see _leader_auto_redo). So a present
             # deliverable the Leader is unhappy with is RECOVERED cheaply (apply
-            # the judgment), not flogged and not shipped-as-is. The §3
+            # the judgment), not flogged and not shipped-as-is. The
             # "don't redo complete work" guard is therefore retired: revise
             # neither wastes a from-scratch pass nor throws the work away. The
             # terminators are the loop-breaker + the retry budget + the deadlock
@@ -13885,7 +13884,7 @@ class Orchestrator:
         human-facing recommendations (the Product Quality Report). Tolerant
         of dict items ({concern, suggestion}) or bare strings. Advisory only
         — never affects goal status or run flow."""
-        # The §3b redo path re-enters _leader_verify_goal recursively, so for a
+        # The redo path re-enters _leader_verify_goal recursively, so for a
         # goal that redoes N-1 times the verifier (which calls this UNCONDITIONALLY
         # before the verdict branch) runs N times and would append that round's
         # reservations to the shared PQR each pass — the same (goal, concern,
@@ -14383,7 +14382,7 @@ class Orchestrator:
             # _goal_blind_deliverables.
             return None
 
-    # ── §4: Leader team-observability read helpers ──────────────────────────
+    # ── Leader team-observability read helpers ─────────────────────────────
     def _run_artifacts_root(self, run_id: "str | None") -> Path:
         """The artifacts tree for a SPECIFIC run (team_status reports on the run
         scope it was asked about, which may differ from ``self.project.run_id``).
@@ -14563,7 +14562,7 @@ class Orchestrator:
             )
         refresh_at = authorization.refresh_at
 
-        # §5 isolation: this runs inside a wave worker (QC-reject exhaustion →
+        # Isolation: this runs inside a wave worker (QC-reject exhaustion →
         # escalation → Comptroller deny), so the ticket create + persist must NOT
         # write the shared store from the worker thread — defer it to the
         # deterministic main-thread merge, exactly like _block_for_environmental /
@@ -16200,7 +16199,7 @@ class Orchestrator:
                 )
             store.save_goal(self.project.code, goal, run_id=self.project.run_id)
 
-    # ── §2: deliverable render lives in the ENGINE (every run path delivers) ──
+    # ── deliverable render lives in the ENGINE (every run path delivers) ─────
     def _deliver_finished_products(self, summary: RunSummary) -> None:
         """Render the run's grounded, completed deliverables to the project
         delivery folder + the Product Quality Report, at the END of kickoff.
@@ -16211,7 +16210,7 @@ class Orchestrator:
         the conversational Leader produced ``.md`` artifacts but never rendered
         ``.docx``).
 
-        Partial + grounded (§2): a completed deliverable ships UNLESS it
+        Partial + grounded: a completed deliverable ships UNLESS it
         transitively depends on a blocked/rejected task, or sits in a blocked
         goal — so independent completed work (e.g. 11 of 12 anthology stories)
         ships even if a sibling deliverable blocked, while never handing over a
@@ -16349,7 +16348,7 @@ class Orchestrator:
         # Disclosure outbox: recover mint disclosures whose audit row never landed
         # (durable pending markers survive even on terminal parents).
         self._recover_pending_mint_disclosures()
-        # §4 liveness: flag the run as in-flight so a concurrent team_status
+        # Liveness: flag the run as in-flight so a concurrent team_status
         # (background kickoff + converse on another thread) never says "done"
         # mid-run. try/finally so the flag always clears, even on error.
         self._kickoff_active = True
@@ -17008,7 +17007,7 @@ class Orchestrator:
             # executor and the resume gate (#1437 / #11951).
             cross_goal_status = self._cross_goal_dep_status(tasks)
             # Core rebuild B4: when the concurrent wave executor is enabled
-            # (default ON since §5 — kill-switch MODULATIO_CONCURRENT_WAVES=0
+            # (default ON — kill-switch MODULATIO_CONCURRENT_WAVES=0
             # forces sequential), it runs ALL of this goal's tasks in parallel
             # waves; the sequential loop below is then skipped wholesale. Goal
             # verification (after the loop) runs in BOTH modes.
@@ -17204,7 +17203,7 @@ class Orchestrator:
         # Brick B1b: silent per-run kickoff-history record — the substrate the
         # B4 recurrence trigger reads. Best-effort, never blocks.
         self._record_kickoff_history(summary)
-        # §2: render finished products in the ENGINE (so every run path delivers,
+        # Render finished products in the ENGINE (so every run path delivers,
         # not just the CLI command). Gated so stub/test kickoffs never touch the
         # real delivery dir; the real run paths construct with deliver_products=True.
         # Delivery + the kickoff_ended completion signal run
@@ -17241,7 +17240,7 @@ class Orchestrator:
 
 # Fallback for the leader-runbook seed — the Leader's always-on working
 # discipline, injected at the HEAD of every converse prompt (see
-# _build_converse_prompt). Modeled on the operator's own reflex deck: the §0
+# _build_converse_prompt). Modeled on the operator's own reflex deck: the
 # bar-commit spine is always-on (you can't JIT-load the reflex that tells you to
 # reach for the reflex); per-operation depth stays pullable from the skill
 # library. Source of truth is _seed_skills/leader-runbook.md; this is the

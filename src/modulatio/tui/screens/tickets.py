@@ -38,7 +38,7 @@ from modulatio.tui.widgets.master_detail import MasterDetail
 from modulatio.tui.widgets.ticket_row import ticket_row
 from modulatio.types import Ticket
 
-#: Glyph per priority / status — paired with the WORD (Feng-Tui §10), never
+#: Glyph per priority / status — paired with the WORD, never
 #: colour alone.
 _PRIO_GLYPH = {"blocker": "⛔", "critical": "▲", "minor": "◇"}
 _STATUS_GLYPH = {"open": "○", "in_progress": "▸", "resolved": "✓", "closed": "✕"}
@@ -111,7 +111,7 @@ class TicketsScreen(Vertical):
                 continue
             # escape raw (operator-authored) string cells.
             cells = [escape(c) if isinstance(c, str) else c for c in row]
-            # Priority / Status read as glyph + WORD (Feng-Tui §10).
+            # Priority / Status read as glyph + WORD.
             cells[1] = Text(f"{_PRIO_GLYPH.get(row[1], '·')} {row[1]}")
             cells[2] = Text(f"{_STATUS_GLYPH.get(row[2], '·')} {row[2]}")
             # The badge is now plain glyph+WORD text — render verbatim (no markup

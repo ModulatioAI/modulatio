@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """MCP client — connect to configured MCP servers and expose their tools.
 
-Design: docs/design/mcp-client.md. The official ``mcp`` SDK (opt-in ``[mcp]``
+The official ``mcp`` SDK (opt-in ``[mcp]``
 extra) speaks the protocol over both transports; this module is the thin
 Modulatio adapter: it opens/holds one connection per configured server,
 discovers the server's tools, and translates each into a ``tools.Tool`` that

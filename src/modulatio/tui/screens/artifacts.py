@@ -28,7 +28,7 @@ from modulatio.tui.widgets.export_dialog import ExportDialog
 from modulatio.tui.widgets.file_picker import FolderPickerModal
 from modulatio.tui.widgets.master_detail import MasterDetail
 
-#: Glyph per artifact family — paired with the filename (Feng-Tui §10).
+#: Glyph per artifact family — paired with the filename.
 _FAMILY_GLYPH = {"document": "▤", "code": "▩", "data": "▦", "media": "◈"}
 
 
@@ -207,10 +207,10 @@ class ArtifactsScreen(Vertical):
                     continue
                 # Display the path as <rel>/<rest> so the user sees
                 # which artifact subdir AND any nested folders, prefixed with a
-                # family glyph (glyph + name, §10).
+                # family glyph (glyph + name).
                 glyph = _FAMILY_GLYPH.get(
                     families.infer_artifact_family_from_path(p), "·")
-                # Research past the reuse TTL is flagged (glyph+WORD, §10): it's
+                # Research past the reuse TTL is flagged (glyph + WORD): it's
                 # kept for perusal but the team no longer reuses it for grounding.
                 suffix = ""
                 if rel == "research" and research.is_stale_file(p):
@@ -222,7 +222,7 @@ class ArtifactsScreen(Vertical):
                 except OSError:
                     is_product = p in products
                 # ★ marks the finished product — the deliverable the operator
-                # asked for — so it stands out from the research/draft pile (§1).
+                # asked for — so it stands out from the research/draft pile.
                 star = "★ " if is_product else ""
                 rows.append((p, f"{star}{glyph} {display}{suffix}", is_product))
         # Finished products first; _paths stays index-aligned with the rows so

@@ -142,7 +142,7 @@ def _build_kickoff_orchestrator(
         # the Leader DEFERS (vs JUDGE when headless). The one operator-present
         # construction site today.
         operator_present=True,
-        deliver_products=(mode != "stub"),  # §2: render products on real runs
+        deliver_products=(mode != "stub"),  # render products on real runs
         agent_runners=agent_runners,
         tool_registry=tool_registry,
         chat_runner=chat_runner,
@@ -991,7 +991,7 @@ class ModulatioApp(App):
             project, runners,
             activity_callback=self._record_activity,
             operator_present=True,
-            deliver_products=not self.stub,  # §2: render products on real runs
+            deliver_products=not self.stub,  # render products on real runs
             agent_runners=agent_runners,
             chat_runner=chat_runner,
             chat_runners=chat_runners,
@@ -1414,7 +1414,7 @@ class ModulatioApp(App):
             stream.add_event(event)
             if stream.lane == "team":
                 team_stream = stream
-        # §5: a new run starts with a clean concurrency board (the leader-role
+        # A new run starts with a clean concurrency board (the leader-role
         # kickoff events don't reach the TEAM lane's own tracker).
         if team_stream is not None and event.phase in ("kickoff_started", "kickoff_ended"):
             team_stream.active_tasks.clear()
@@ -1488,7 +1488,7 @@ class ModulatioApp(App):
             # with a climbing elapsed counter" bug).
             self._run_ended = True
         # Live status lines: the leader-lane phase drives the LEADER status;
-        # team-lane phases the TEAM status, named by the worker. §5: when more
+        # team-lane phases the TEAM status, named by the worker. When more
         # than one producer is in flight, surface the parallel count so the
         # operator can SEE the concurrency (invisible parallelism isn't shippable).
         if is_leader_role(event.role) and not getattr(self, "_run_ended", False):

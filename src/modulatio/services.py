@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """The service-API pool — outside-SaaS services and their keys.
 
-Spec: docs/design/2026-07-05-service-api-pool.md. A *service* is an outside
+A *service* is an outside
 application reachable over an API (image generation, video, speech, research,
 anything within reason). The registry (``services.json`` in the config dir)
 records which services the operator configured; the KEYS live in the existing

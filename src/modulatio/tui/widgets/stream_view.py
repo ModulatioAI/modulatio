@@ -181,7 +181,7 @@ class StreamView(VerticalScroll):
         #: the Leader's most recent reply, kept so Ctrl+C can copy it even when
         #: nothing is drag-selected (a never-a-dead-key fallback).
         self.last_leader_text: str = ""
-        #: §5 — tasks in flight on THIS lane (task_id → (agent_id, display name)),
+        #: Tasks in flight on THIS lane (task_id → (agent_id, display name)),
         #: so the TV can show parallelism the operator would otherwise not see
         #: ("3 producers working: …"). Keyed by TASK so a multi-capacity agent
         #: running two tasks doesn't collapse to one and vanish early; the
@@ -288,7 +288,7 @@ class StreamView(VerticalScroll):
 
     def _track_concurrency(self, event: ActivityEvent) -> None:
         """Keep ``active_tasks`` current so the lane can report how many
-        producers are working at once (§5 — visible parallelism). Dispatch puts
+        producers are working at once (visible parallelism). Dispatch puts
         a task on the board; its terminal event (``task_completed`` success /
         ``task_settled`` failure) takes it off. Keyed by task_id so two tasks on
         one agent stay distinct and a terminal-failed task never lingers. (The

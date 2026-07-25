@@ -21,7 +21,7 @@ Abstract ``Embedder`` protocol lets tests pass a deterministic stub
 without downloading MiniLM — the real ``FastEmbedder`` concrete impl is
 behind the same surface.
 
-Scope discipline (locked in ``quality-architecture.md`` §"Slice #6"):
+Scope discipline:
 this module is routing ONLY. No unified crew memory, no agent episodic
 memory, no auto-indexing on writes, no auto-promotion. Other embedding
 uses (qc-history similarity, research cache lookup, standards dedup)

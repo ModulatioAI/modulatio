@@ -3,7 +3,7 @@
 // The MasterDetail archetype — built once, nine pages are bindings.
 // List pane: heading + count badge + search, borderless rows in one
 // card, selected row inverts. Detail pane: a pure function of the
-// selected item. (design §1.2)
+// selected item.
 
 import { el } from "../dom.js";
 

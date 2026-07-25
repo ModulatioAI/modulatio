@@ -4,7 +4,7 @@
 
 Pure function that turns a Ticket's approval state into a compact cell
 string. Feng-Tui is monochrome, so state reads as GLYPH + WORD (never colour
-alone, §10) and the cell inherits the active theme's accent/dim tier. Plain
+alone) and the cell inherits the active theme's accent/dim tier. Plain
 notifications (approval_required=False and no decision) render blank so the
 column stays visually quiet — only gated tickets get a visible marker.
 """

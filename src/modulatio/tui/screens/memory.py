@@ -83,7 +83,7 @@ class MemoryScreen(Vertical):
     MemoryScreen #memory-table { height: 1fr; }
     """
 
-    #: Glyph per memory LAYER — paired with the WORD (Feng-Tui §10).
+    #: Glyph per memory LAYER — paired with the WORD.
     _LAYER_GLYPH = {"episodic": "◷", "semantic": "◆", "team": "⚑", "pending": "◇"}
 
     def __init__(self, **kwargs):

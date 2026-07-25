@@ -468,7 +468,7 @@ def _make_dispatch_callback(*, stub: bool):
         agent_runners = build_agent_runners(project_code) if not stub else {}
         orch = Orchestrator(
             project, runners,
-            deliver_products=not stub,  # §2: render products on real runs
+            deliver_products=not stub,  # render products on real runs
             semantic_matcher=matcher,
             agent_runners=agent_runners,
             qc_history_embedder=embedder,

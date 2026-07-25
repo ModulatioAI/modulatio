@@ -6,7 +6,7 @@ The console script always resolves (declared unconditionally in
 pyproject.toml); when the ``[web]`` extra isn't installed it prints the
 install hint and exits instead of ImportError-ing at launch.
 
-Security posture (design §3.4): binds ``127.0.0.1`` by default. A
+Security posture: binds ``127.0.0.1`` by default. A
 non-loopback ``--host`` REQUIRES the bearer token — generated once into
 the config dir (0600) and printed so the operator can pair the browser.
 """

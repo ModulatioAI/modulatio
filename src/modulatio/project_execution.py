@@ -1831,7 +1831,7 @@ def _make_default_kickoff(
         orch = Orchestrator(
             project,
             runners,
-            deliver_products=True,  # §2: real plan-mode kickoff path renders products
+            deliver_products=True,  # real plan-mode kickoff path renders products
             agent_runners=agent_runners,
             tool_registry=tool_registry,
             chat_runners=chat_runners,

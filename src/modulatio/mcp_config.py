@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """MCP servers — the operator-configured list of external MCP servers.
 
-Design: docs/design/mcp-client.md. An MCP server is an external supplier of
+An MCP server is an external supplier of
 tools reached over the Model Context Protocol, in one of two transports:
 ``stdio`` (Modulatio spawns the server subprocess) or ``http`` (Modulatio
 connects out with an auth token). The registry (``mcp_servers.json`` in the
