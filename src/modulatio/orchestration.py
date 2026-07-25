@@ -4302,6 +4302,35 @@ class Orchestrator:
             raise _PlanError(
                 "prepared task-plan manifest failed readback verification")
 
+    def _goal_manifest_violation(self, goal: Goal) -> str | None:
+        """Mechanism reason the goal's OWN manifest is not self-consistent,
+        or None when it is.
+
+        The durable sweep proves the stored tasks match the manifest; this
+        proves the manifest still matches the witness stamped over it. Both
+        are needed: editing the expected set AND the tasks together makes
+        the sweep agree, and only the whole-plan digest — which covers
+        ordered membership and every projection — still disagrees."""
+        from modulatio import conventions as _conv
+        ids = list(goal.expected_task_ids)
+        if len(set(ids)) != len(ids):
+            return "the expected task list names the same task more than once"
+        if set(ids) != set(goal.expected_task_digests):
+            return ("the expected task ids and the recorded projection "
+                    "digests name different tasks")
+        if goal.task_plan_state == "committed":
+            if not goal.task_plan_digest:
+                return "a committed plan carries no whole-plan digest"
+            if goal.task_plan_digest != _conv.plan_digest(
+                ids, goal.expected_task_digests,
+            ):
+                return ("the whole-plan digest does not match the recorded "
+                        "manifest — the manifest was altered after commit")
+        elif goal.task_plan_digest is not None:
+            return ("an uncommitted plan already carries a whole-plan "
+                    "digest — the witness is stamped only at commit")
+        return None
+
     def _durable_plan_violation(self, goal: Goal) -> str | None:
         """Mechanism reason the goal's DURABLE task set no longer matches
         its recorded manifest, or None when it does.
@@ -4336,9 +4365,10 @@ class Orchestrator:
         ``_PlanError`` on a missing/extra task or any projection drift —
         a partial or altered plan is never mistaken for a complete one."""
         from modulatio import conventions as _conv
-        why = self._durable_plan_violation(goal)
-        if why is not None:
-            raise _PlanError(f"task-plan commit refused: {why}")
+        for why in (self._goal_manifest_violation(goal),
+                    self._durable_plan_violation(goal)):
+            if why is not None:
+                raise _PlanError(f"task-plan commit refused: {why}")
         goal.task_plan_state = "committed"
         goal.task_plan_digest = _conv.plan_digest(
             goal.expected_task_ids, goal.expected_task_digests)
@@ -4352,6 +4382,10 @@ class Orchestrator:
         ):
             raise _PlanError(
                 "committed task-plan state failed readback verification")
+        why = self._goal_manifest_violation(loaded)
+        if why is not None:
+            raise _PlanError(
+                f"committed task-plan readback is not self-consistent: {why}")
 
     def _convention_block_for(self, task: Task) -> str:
         """The rendered convention truth for ``task`` — identical for
@@ -4419,15 +4453,23 @@ class Orchestrator:
             return (
                 f"task {t.id} is not in goal {goal.id}'s committed plan "
                 f"manifest")
+        # The object about to EXECUTE is this live Task, so a matching
+        # stored copy proves nothing about it: authority has to cover the
+        # thing that runs, not its durable twin.
+        if _conv.task_plan_projection_digest(t) != expected:
+            return (
+                f"task {t.id}'s live projection differs from the committed "
+                f"manifest — the task about to run is not the planned one")
         # The whole durable set is re-verified on every dispatch: a plan
         # that committed once can still lose, gain, or alter a record
         # afterwards, and any of those makes the remainder a different
         # plan than the one that was witnessed.
-        why = self._durable_plan_violation(goal)
-        if why is not None:
-            return (
-                f"goal {goal.id}'s committed task plan no longer matches "
-                f"durable storage — {why}")
+        for why in (self._goal_manifest_violation(goal),
+                    self._durable_plan_violation(goal)):
+            if why is not None:
+                return (
+                    f"goal {goal.id}'s committed task plan no longer matches "
+                    f"its witness — {why}")
         stored = store.get_task(
             self.project.code, t.id, run_id=self.project.run_id)
         if stored is None:

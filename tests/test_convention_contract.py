@@ -1168,6 +1168,97 @@ def test_committed_plan_refuses_when_a_sibling_projection_drifts(
     _assert_refuses_without_producing(orch, project, tasks[1])
 
 
+@pytest.mark.parametrize("field,value", [
+    ("output_path", "outside/the-sealed-plan.py"),
+    ("convention_contract_id", None),
+    ("description", "a different job entirely"),
+    ("depends_on", ["CVC-T-999"]),
+])
+def test_live_task_drift_refuses_even_with_a_clean_durable_record(
+    project, monkeypatch, field, value,
+):
+    """The object that EXECUTES is the live Task, so proving the stored copy
+    matches the manifest authorizes the wrong thing. Any immutable
+    projection field diverging on the live object is a refusal, whatever
+    the durable record still says."""
+    orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
+    live = next(t for t in tasks if t.convention_contract_id)
+    setattr(live, field, value)
+
+    _assert_refuses_without_producing(orch, project, live)
+
+
+def test_live_binding_removal_never_reaches_the_unbound_prompt_path(
+    project, monkeypatch,
+):
+    """Clearing the live binding must not demote a bound code task to the
+    unbound path, where it would render no convention block at all."""
+    orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
+    live = next(t for t in tasks if t.convention_contract_id)
+    live.convention_contract_id = None
+
+    assert orch._task_plan_dispatch_refusal(live) is not None
+
+
+def test_shrunken_manifest_under_an_unchanged_plan_digest_refuses(
+    project, monkeypatch,
+):
+    """The whole-plan digest is the witness that the MANIFEST itself was not
+    edited. Deleting a task and removing it from the expected set makes the
+    durable sweep agree, so only the stamped digest can still tell."""
+    from modulatio import store as store_mod
+
+    orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
+    victim, survivor = tasks[0], tasks[1]
+    _delete_task_record(victim.id)
+    goal.expected_task_ids = [i for i in goal.expected_task_ids
+                              if i != victim.id]
+    goal.expected_task_digests.pop(victim.id, None)
+    store_mod.save_goal(PROJECT_CODE, goal)   # task_plan_digest untouched
+
+    _assert_refuses_without_producing(orch, project, survivor)
+
+
+def test_reordered_expected_ids_refuse_under_the_committed_digest(
+    project, monkeypatch,
+):
+    """Order is part of the plan digest, so a reordered manifest is a
+    different plan than the one witnessed."""
+    from modulatio import store as store_mod
+
+    orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
+    goal.expected_task_ids = list(reversed(goal.expected_task_ids))
+    store_mod.save_goal(PROJECT_CODE, goal)
+
+    assert orch._task_plan_dispatch_refusal(tasks[0]) is not None
+
+
+def test_expected_digest_keys_must_match_the_expected_ids(
+    project, monkeypatch,
+):
+    """The id list and the projection map are one manifest: a key present in
+    one and absent from the other is an edited witness."""
+    from modulatio import store as store_mod
+
+    orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
+    goal.expected_task_digests["CVC-T-404"] = "0" * 64
+    store_mod.save_goal(PROJECT_CODE, goal)
+
+    assert orch._task_plan_dispatch_refusal(tasks[0]) is not None
+
+
+def test_committed_goal_without_a_plan_digest_refuses(project, monkeypatch):
+    """A committed plan with no whole-plan witness cannot be dispatch
+    authority — there is nothing to check the manifest against."""
+    from modulatio import store as store_mod
+
+    orch, goal, tasks = _committed_goal_with_tasks(project, monkeypatch)
+    goal.task_plan_digest = None
+    store_mod.save_goal(PROJECT_CODE, goal)
+
+    assert orch._task_plan_dispatch_refusal(tasks[0]) is not None
+
+
 def test_minted_child_rides_mint_authority_not_plan_manifest(
     project, monkeypatch,
 ):
