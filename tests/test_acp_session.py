@@ -88,56 +88,6 @@ def test_cancel_check_false_proceeds_normally():
     assert srv._pending._slots == {}
 
 
-def test_permission_cb_bails_when_cancel_fires_in_the_window():
-    """End-to-end: simulate the TOCTOU. The cancel flag is set *after*
-    permission_cb's entry guard but is observed by the atomic cancel_check, so
-    permission_cb returns False (deny / fail-closed) without blocking."""
-    srv = _server()
-
-    # Model the TOCTOU precisely with a session whose `cancelled` reads False on
-    # the entry guard and True thereafter: the cancel "fires" mid-request, after
-    # the guard passed but before the atomic cancel_check evaluates under the
-    # lock. Without the fix the permission frame is written and the call blocks
-    # for the full 600s timeout; with the fix cancel_check short-circuits before
-    # the write, so no frame is sent and permission_cb denies promptly.
-    class _RacingSession(ACPSession):
-        def __init__(self, sid, server):
-            super().__init__(sid, server)
-            self._reads = 0
-
-        @property
-        def cancelled(self):
-            self._reads += 1
-            return self._reads > 1  # False on the entry guard, True after
-
-        @cancelled.setter
-        def cancelled(self, _value):
-            pass  # __init__ sets it; the property drives the value in this test
-
-    session = _RacingSession("sess-1", srv)
-    srv._sessions["sess-1"] = session
-
-    wrote = []
-
-    def _record(stream, obj, lock):
-        wrote.append(obj)
-
-    real = rpc.write_message
-    try:
-        rpc.write_message = _record  # type: ignore[assignment]
-        start = time.monotonic()
-        allowed = session.permission_cb("write_file", {"path": "x"})
-        elapsed = time.monotonic() - start
-    finally:
-        rpc.write_message = real  # type: ignore[assignment]
-
-    assert allowed is False  # fail closed
-    assert elapsed < 1.0  # did not block on the 600s timeout
-    assert wrote == []  # the permission frame was never written
-    assert srv._pending._slots == {}
-    assert srv._session_pending.get("sess-1") in (None, set())
-
-
 def test_ask_operator_entry_guard_fails_closed_on_cancel():
     """ask_operator gained the same entry guard permission_cb has: a cancelled
     session returns None without issuing an input request."""

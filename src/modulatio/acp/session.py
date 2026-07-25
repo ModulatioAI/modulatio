@@ -88,26 +88,6 @@ class ACPSession:
             _logger.debug("acp: activity relay drop", exc_info=True)
 
     # ── tool call → session/request_permission (blocking) ───────────────
-    def permission_cb(self, name: str, args: dict) -> bool:
-        if self.cancelled:
-            return False
-        result = self._server.request_and_wait(
-            "session/request_permission",
-            {
-                "sessionId": self.id,
-                "toolCall": {"name": name, "rawInput": args},
-                "options": [
-                    {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
-                    {"optionId": "reject", "name": "Reject", "kind": "reject_once"},
-                ],
-            },
-            # a cancel can fire between the guard above and the rid
-            # registering; the server re-checks this atomically vs cancel's
-            # snapshot so we fail closed promptly instead of blocking the timeout.
-            cancel_check=lambda: self.cancelled,
-        )
-        return _permission_allows(result)
-
     # ── SecurityRequest → session/request_permission (the gate's bridge) ─
     def prompt_fn(self, request):
         """The ``LeaderPermissionGate`` prompt surface : render
@@ -183,7 +163,7 @@ class ACPSession:
     # ── ask_operator → input request (kickoff/JT path only in v1) ───────
     def ask_operator(self, prompt: str):
         if self.cancelled:
-            return None  # entry guard parity with permission_cb
+            return None  # entry guard: a cancelled session asks nothing
         result = self._server.request_and_wait(
             "session/request_input", {"sessionId": self.id, "prompt": prompt},
             cancel_check=lambda: self.cancelled)

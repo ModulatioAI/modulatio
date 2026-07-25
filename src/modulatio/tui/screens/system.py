@@ -95,17 +95,20 @@ class SystemScreen(Vertical):
 
         orch = getattr(self.app, "_conv_orch", None)
         if orch is not None:
+            # The live session already owns this read-out; asking it keeps
+            # one answer rather than a second assembly that could drift.
             mode_value = orch.session_mode_value()
             live = "live session"
+            access_row, sandbox_row = orch._autonomy_status()
         else:
             mode_value = _perm.RunMode.DEFAULT.value
             live = "no conversation yet — configured default"
-        access_row, sandbox_row = _perm.mode_status_rows(
-            _perm.RunMode(mode_value),
-            sandbox_available=_sandbox.is_sandbox_available(),
-            profile=_sandbox.current_profile(),
-            bypass=_sandbox.is_bypass_requested(),
-        )
+            access_row, sandbox_row = _perm.mode_status_rows(
+                _perm.RunMode(mode_value),
+                sandbox_available=_sandbox.is_sandbox_available(),
+                profile=_sandbox.current_profile(),
+                bypass=_sandbox.is_bypass_requested(),
+            )
         return "\n".join([
             f"[b]AUTONOMY[/b]  {escape(mode_value.upper())}  ({live})",
             f"  {escape(access_row)}",
