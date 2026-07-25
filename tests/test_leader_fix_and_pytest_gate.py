@@ -172,6 +172,50 @@ def test_red_pytest_clamps_satisfied_verdict(project, monkeypatch):
     assert summary.verdicts[-1]["verdict"] == "disappointed"
 
 
+def test_advisory_import_binding_does_not_clamp_a_satisfied_verdict(
+    project, monkeypatch,
+):
+    """A green gate whose report merely carries the in-process import-binding
+    advisory must NOT enter goal_spec_issues: the observation is forgeable
+    same-process evidence, so it rides in the report but never converts a
+    satisfied verdict into a measured HARD violation. Only actual pytest
+    failure and the independent convention smoke do that (see the RED test
+    above)."""
+    monkeypatch.setenv("MODULATIO_GOAL_MAX_RETRIES", "0")
+    advisory_report = (
+        "engine-run pytest (hook-free) — exit 0\n1 passed\n\n"
+        "[ADVISORY — same-process import observation] engine-run pytest is "
+        "green but the run did not report loading webapp — diagnostic only."
+    )
+    monkeypatch.setattr(
+        Orchestrator, "_goal_pytest_gate",
+        lambda self, tasks: (True, advisory_report),
+    )
+
+    def _leader_satisfied(prompt: str) -> str:
+        if "LEADER GOAL VERIFICATION" in prompt:
+            payload = {
+                "verdict": "satisfied",
+                "rationale": "looks fine to me",
+                "report_body": "## Report\n\nShip it.\n",
+            }
+            return f"```json\n{json.dumps(payload)}\n```"
+        return _leader_stub(prompt)
+
+    runners = {
+        "leader": _leader_satisfied,
+        "planner": _planner_stub,
+        "drafter": _drafter_stub,
+        "qc": _qc_stub,
+    }
+    orch = Orchestrator(project, runners)
+    summary = orch.kickoff("code goal green with an advisory")
+
+    assert summary.verdicts[-1]["verdict"] == "satisfied"
+    assert not any("clamped verdict" in e for e in summary.errors)
+    assert not any("engine-run pytest is RED" in e for e in summary.errors)
+
+
 # ------------------------------------------------- leader fix-in-place lane
 
 def _progressive_leader(verdicts: list[str], counter: dict):

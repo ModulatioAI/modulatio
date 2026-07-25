@@ -899,6 +899,15 @@ def _gate_suite(root, *, binds: bool = True, shape: str | None = None):
         _SUITE_BODIES[key], encoding="utf-8")
 
 
+def _reports_unloaded(report: str, name: str) -> bool:
+    """The advisory diagnostic fired for ``name`` — the run did not report
+    loading it. This is the observer declining to credit prose, a forged
+    ``sys.modules`` entry, a load that raised, or a same-named module outside
+    the sealed root: the component was not counted, and the gate stays green
+    because the signal is advisory, not a clamp."""
+    return "did not report loading" in report and name in report
+
+
 def test_import_smoke_green_for_declared_layout(project, monkeypatch):
     producer_calls: list[str] = []
     orch = _kickoff_orchestrator(
@@ -920,12 +929,15 @@ def test_import_smoke_green_for_declared_layout(project, monkeypatch):
 
 @pytest.mark.parametrize(
     "shape", ["comment", "docstring", "string", "func-name", "none"])
-def test_naming_the_component_without_importing_it_is_red(
+def test_naming_the_component_is_not_counted_as_a_load(
     project, monkeypatch, shape,
 ):
     """Prose is not evidence. A comment, a docstring, a string literal, or a
     test function name carrying the component's name all read like coverage
-    in a report while the suite never loads the product."""
+    in a report while the suite never loads the product — the observer does
+    not credit any of them, so the run is reported as not loading the
+    component. The gate stays green (the signal is advisory), but the report
+    tells the operator the green was about something else."""
     from modulatio import store as store_mod
 
     orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
@@ -938,8 +950,8 @@ def test_naming_the_component_without_importing_it_is_red(
 
     state, report = orch._goal_pytest_gate(tasks)
 
-    assert state is False
-    assert "no test imported webapp" in report
+    assert state is True, report
+    assert _reports_unloaded(report, "webapp")
 
 
 @pytest.mark.parametrize("shape", ["import", "from-import", "importlib"])
@@ -963,13 +975,15 @@ def test_every_real_import_form_is_observed(project, monkeypatch, shape):
 
 @pytest.mark.parametrize("shape", ["forge-real-file", "forge-no-file",
                                    "forge-missing-file", "same-name-elsewhere"])
-def test_state_a_test_can_manufacture_is_not_import_evidence(
+def test_state_a_test_can_manufacture_is_not_counted_as_a_load(
     project, monkeypatch, shape,
 ):
     """``sys.modules`` membership is a value any test can assign. Evidence is
     the LOAD, so a fabricated entry — even one carrying the real component's
     own file — and a same-named module found outside the sealed source root
-    are both RED."""
+    are neither counted: the run is reported as not loading the component.
+    (The signal is advisory, so the gate stays green; the point is that the
+    observer refuses to credit the forgery.)"""
     from modulatio import store as store_mod
 
     orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
@@ -1008,8 +1022,8 @@ def test_state_a_test_can_manufacture_is_not_import_evidence(
 
     state, report = orch._goal_pytest_gate(tasks)
 
-    assert state is False, report
-    assert "no test imported webapp" in report
+    assert state is True, report
+    assert _reports_unloaded(report, "webapp")
 
 
 def test_a_repository_local_pytest_cannot_replace_the_engine_runner(
@@ -1178,15 +1192,16 @@ def test_the_observed_set_is_not_exposed_through_main(project, monkeypatch):
 
     state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
 
-    assert state is False, report
+    assert state is True, report
+    assert _reports_unloaded(report, "webapp")
 
 
-def test_a_load_that_raises_is_not_an_import(project, monkeypatch):
+def test_a_load_that_raises_is_not_counted_as_a_load(project, monkeypatch):
     """Evidence is the completed execution, not the lookup that preceded it.
     A component whose module body raises during the run — caught by a test
-    that stays green — resolved but never loaded, so it was not exercised.
-    The component still imports outside the suite, so the RED comes from the
-    observation rather than from an unimportable package."""
+    that stays green — resolved but never loaded, so it is not counted. The
+    component still imports outside the suite, so the run being reported as
+    not loading it comes from the observation, not an unimportable package."""
     from modulatio import store as store_mod
 
     orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
@@ -1207,8 +1222,8 @@ def test_a_load_that_raises_is_not_an_import(project, monkeypatch):
 
     state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
 
-    assert state is False, report
-    assert "no test imported webapp" in report
+    assert state is True, report
+    assert _reports_unloaded(report, "webapp")
 
 
 def test_a_run_that_never_finishes_leaves_no_observation(project, monkeypatch):
@@ -1231,7 +1246,7 @@ def test_a_run_that_never_finishes_leaves_no_observation(project, monkeypatch):
 
     state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
 
-    assert state is False, report
+    assert _reports_unloaded(report, "webapp"), report
     assert stale.exists(), "a file the engine never wrote was consumed"
 
 
@@ -1297,13 +1312,15 @@ _OBSERVATION_PAYLOADS = {
 
 
 @pytest.mark.parametrize("shape", sorted(_OBSERVATION_PAYLOADS))
-def test_only_recognisable_observation_data_is_evidence(
+def test_only_recognisable_observation_data_is_credited(
     project, monkeypatch, shape,
 ):
-    """The reader through its whole vocabulary: a genuine token binds and a
-    payload exactly at the size cap still binds, while every unreadable,
-    unrecognised, over-cap, or undeclared form falls back to no evidence
-    without raising out of the gate."""
+    """The reader through its whole vocabulary: a genuine token is credited
+    (the component is reported loaded) and a payload exactly at the size cap
+    still is, while every unreadable, unrecognised, over-cap, or undeclared
+    form falls back to no evidence without raising. The gate stays green
+    throughout — the observation is advisory — so what varies is whether the
+    run is reported as loading the component, not the verdict."""
     from modulatio import store as store_mod
 
     orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
@@ -1312,13 +1329,14 @@ def test_only_recognisable_observation_data_is_evidence(
     _gate_suite(orch._shared_artifacts_root(), shape="none")
     (goal,) = store_mod.list_goals(PROJECT_CODE)
     (contract,) = goal.convention_contracts
-    build, expected = _OBSERVATION_PAYLOADS[shape]
+    build, credited = _OBSERVATION_PAYLOADS[shape]
 
     state, report = _run_gate(
         orch, tasks, monkeypatch,
         _ObservationShell(build(contract.contract_id)))
 
-    assert state is expected, report
+    assert state is True, report
+    assert (not _reports_unloaded(report, "webapp")) is credited, report
 
 
 def test_each_invocation_reads_back_only_its_own_file(project, monkeypatch):
@@ -1372,9 +1390,12 @@ def test_binding_comes_from_the_run_whose_result_is_reported(
 
     state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
 
-    assert "ADVISORY" in report
-    assert state is False, report
-    assert "no test imported webapp" in report
+    # The conftest-loading pass reported green (advisory conftest lane), and it
+    # did not import the component; the discarded hook-free observation must
+    # not bind, so the component is still reported as not loaded.
+    assert "conftest" in report
+    assert state is True, report
+    assert _reports_unloaded(report, "webapp")
 
 
 def test_a_namespace_package_is_observed_through_its_submodule(
@@ -1465,6 +1486,239 @@ def test_two_components_sharing_a_name_need_their_own_evidence(
     discharged, _other = sorted(origins)
     assert Orchestrator._unimported_components(
         origins, {discharged}) is not None
+
+
+# ── the binding is advisory: it diagnoses, it never clamps ──────────────────
+
+
+def test_advisory_binding_does_not_clamp_a_green_gate(project, monkeypatch):
+    """A green suite and a green independent convention smoke, with the
+    component never reported loaded: the gate is GREEN and the report carries
+    the advisory naming the component. The forgeable in-process observation
+    cannot, by itself, turn a passing gate RED."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    _gate_suite(orch._shared_artifacts_root(), shape="none")
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
+
+    assert state is True, report
+    assert _reports_unloaded(report, "webapp")
+
+
+def test_a_real_test_failure_still_clamps(project, monkeypatch):
+    """The advisory demotion touches only the import observation. A genuine
+    hook-free assertion failure is authoritative RED as before."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    root = orch._shared_artifacts_root()
+    _gate_suite(root, shape="import")
+    (root / "tests" / "test_ok.py").write_text(
+        _PATH_SETUP + "import webapp\n\n\ndef test_bad():\n    assert False\n",
+        encoding="utf-8")
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
+
+    assert state is False, report
+
+
+def test_a_failed_convention_smoke_still_clamps(project, monkeypatch):
+    """The engine-run convention smoke is independent of the suite and not
+    producer-authored, so it stays a hard clamp: the declared module not
+    importing is RED even when the suite is green."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    root = orch._shared_artifacts_root()
+    (root / "webapp").rename(root / "webapp2")   # declared name no longer imports
+    _gate_suite(root, shape="none")
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
+
+    assert state is False, report
+
+
+def test_a_forged_token_cannot_upgrade_a_failing_gate(project, monkeypatch):
+    """A producer who forges the observation gains nothing: the observation
+    never turns RED to GREEN. With a real hook-free failure AND a forged
+    token written to the observation file, the gate stays RED."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    root = orch._shared_artifacts_root()
+    _gate_suite(root, shape="import")
+    (root / "tests" / "test_ok.py").write_text(
+        _PATH_SETUP + "import webapp\n\n\ndef test_bad():\n    assert False\n",
+        encoding="utf-8")
+    (goal,) = store_mod.list_goals(PROJECT_CODE)
+    (contract,) = goal.convention_contracts
+
+    class _FailButForge(_DeterministicRunShell):
+        # Run for real (the suite fails), then stamp a valid token anyway.
+        def call(self, *, cmd, profile, cwd, timeout):
+            import shlex
+            out = super().call(cmd=cmd, profile=profile, cwd=cwd,
+                               timeout=timeout)
+            argv = shlex.split(cmd)
+            if "--" in argv:
+                Path(argv[argv.index("--") - 1]).write_text(
+                    '{"schema": 1, "tokens": ["%s"]}' % contract.contract_id,
+                    encoding="utf-8")
+            return out
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _FailButForge())
+
+    assert state is False, report
+
+
+@pytest.mark.parametrize("payload_a, credited_a", [
+    ('{"schema": 1, "tokens": ["%s"]}', True),   # valid A survives the swap
+    ("not json at all", False),                  # invalid A survives the swap
+])
+def test_the_size_and_content_come_from_one_descriptor(
+    project, monkeypatch, payload_a, credited_a,
+):
+    """The reader opens once and both measures and parses that descriptor, so
+    replacing the pathname after the open cannot change the decision — the
+    check/use window a separate ``stat()`` would leave is closed. Payload A is
+    what the descriptor holds; the pathname is atomically swapped to the
+    OPPOSITE payload B before the read, and the decision must follow A. The
+    swapped-in pathname is still cleaned up afterward."""
+    import os
+    import pathlib
+
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    _gate_suite(orch._shared_artifacts_root(), shape="none")
+    (goal,) = store_mod.list_goals(PROJECT_CODE)
+    (contract,) = goal.convention_contracts
+    tok = contract.contract_id
+    a_text = payload_a % tok if "%s" in payload_a else payload_a
+    b_text = "" if credited_a else '{"schema": 1, "tokens": ["%s"]}' % tok
+
+    real_open = pathlib.Path.open
+    swapped = {"done": False}
+
+    def _open_then_swap(self, *args, **kwargs):
+        handle = real_open(self, *args, **kwargs)
+        if (not swapped["done"] and args[:1] == ("rb",)
+                and self.name.startswith(".modulatio-observation-")):
+            swapped["done"] = True
+            # Atomic replace: the pathname points at a NEW inode (B) while the
+            # returned descriptor still reads the OLD inode (A).
+            tmp = self.parent / (self.name + ".swap")
+            tmp.write_text(b_text, encoding="utf-8")
+            os.replace(tmp, self)
+        return handle
+
+    monkeypatch.setattr(pathlib.Path, "open", _open_then_swap)
+    runner = _ObservationShell(a_text)
+
+    state, report = _run_gate(orch, tasks, monkeypatch, runner)
+
+    assert swapped["done"], "the observation descriptor was never opened"
+    assert state is True, report
+    # The decision follows A, not the swapped-in B.
+    assert (not _reports_unloaded(report, "webapp")) is credited_a, report
+    assert not Path(runner.out_paths[0]).exists(), "replacement not cleaned up"
+
+
+def _bootstrap_observation(body: str, tmp_path) -> dict:
+    """Run the shipped bootstrap over a one-test suite in a real subprocess
+    and return the finalized observation. Used to DOCUMENT the boundary: the
+    suite shares the interpreter, so these are the channels that make the
+    signal advisory rather than an attestation."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    from modulatio.orchestration import _IMPORT_OBSERVER_BOOTSTRAP
+
+    repo = tmp_path
+    (repo / "webapp").mkdir()
+    (repo / "tests").mkdir()
+    (repo / "webapp" / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo / "tests" / "test_ok.py").write_text(body, encoding="utf-8")
+    origins = {"cvc-abcdef012345": ["webapp", str((repo / "webapp").resolve())]}
+    out = repo / ".obs.json"
+    args = ("-q --color=no --noconftest --tb=no -o addopts= "
+            "-p no:cacheprovider tests/test_ok.py").split()
+    env = dict(os.environ)
+    env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env["PATH"]
+    proc = subprocess.run(
+        ["python3", "-I", "-c", _IMPORT_OBSERVER_BOOTSTRAP,
+         json.dumps(origins), str(out), "--", *args],
+        cwd=repo, capture_output=True, text=True, env=env)
+    return {
+        "exit": proc.returncode,
+        "tokens": (json.loads(out.read_text()).get("tokens", [])
+                   if out.exists() else None),
+        "token": "cvc-abcdef012345",
+    }
+
+
+@pytest.mark.parametrize("channel, body", [
+    ("live-frames",
+     "import sys\n\n\ndef test_reach():\n"
+     "    frame = sys._getframe()\n"
+     "    while frame is not None:\n"
+     "        local = frame.f_locals\n"
+     "        if '_origins' in local and '_seen' in local:\n"
+     "            local['_seen'].update(local['_origins'])\n"
+     "            break\n"
+     "        frame = frame.f_back\n"
+     "    assert True\n"),
+    ("proc-cmdline",
+     "import json, os\n\n\ndef test_forge():\n"
+     "    argv = open('/proc/self/cmdline', 'rb').read().split(b'\\0')\n"
+     "    argv = [a.decode() for a in argv if a]\n"
+     "    spec = json.loads(argv[argv.index('-c') + 2])\n"
+     "    out = argv[argv.index('-c') + 3]\n"
+     "    with open(out, 'w') as fh:\n"
+     "        json.dump({'schema': 1, 'tokens': sorted(spec)}, fh)\n"
+     "    os._exit(0)\n"),
+])
+def test_same_process_forgery_is_why_the_signal_is_advisory(
+    channel, body, tmp_path,
+):
+    """A suite sharing the interpreter CAN forge the observation — through
+    live call frames and through the kernel argv in ``/proc/self/cmdline``.
+    These are recorded, not hidden: they are the reason the import-binding
+    lane is advisory and never a hard clamp. If a change ever makes one of
+    these stop working, that is not a fix to celebrate in this lane — it is a
+    signal to move the observer out of the shared interpreter entirely."""
+    if _no_pytest_here():
+        pytest.skip("pytest not importable in an isolated subprocess here")
+    result = _bootstrap_observation(body, tmp_path)
+    assert result["token"] in (result["tokens"] or []), (
+        f"{channel} no longer influences the observation: {result}")
+
+
+def _no_pytest_here() -> bool:
+    import os
+    import subprocess
+    import sys
+
+    env = dict(os.environ)
+    env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env["PATH"]
+    probe = subprocess.run(
+        ["python3", "-I", "-c", "import pytest"],
+        capture_output=True, env=env)
+    return probe.returncode != 0
 
 
 # ── the dispatch gate: only committed plans run; recovery never guesses ─────

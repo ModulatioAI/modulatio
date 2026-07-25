@@ -12706,6 +12706,15 @@ class Orchestrator:
           the verdict CLAMP binds it as a measured HARD violation.
         - ``(True, report)`` — GREEN; rides into the verify prompt.
 
+        Whether the produced suite actually LOADED each shipped component is an
+        ADVISORY, in-process observation: it rides in the report as diagnostic
+        evidence but never flips the result to ``(False, …)`` on its own. The
+        observing interpreter is shared with producer code, so a same-process
+        observation cannot be made producer-unforgeable; hard RED comes only
+        from an actual pytest failure, an absent suite/tests, or the
+        independent engine-run convention smoke — none of which the suite
+        authors.
+
         Executes THROUGH the ``run_shell`` tool with EXPLICIT engine-selected
         targets (defeats producer-authored ``testpaths`` decoys), one run per
         derived suite root, all must be green.
@@ -12954,14 +12963,16 @@ class Orchestrator:
                 return False, "\n\n".join(reports)
 
         # A green suite that never reaches the shipped component proves the
-        # suite runs, not that the product works. Tests that exercise only
-        # their own fixtures (or the standard library) pass exactly as
-        # loudly as tests that exercise the deliverable.
+        # suite runs, not that the product works. Whether it reached the
+        # component is observed IN-PROCESS, where producer Python shares the
+        # interpreter and can influence the report, so this rides as ADVISORY
+        # diagnostic — never a gate RED on its own. The verdict comes from the
+        # actual pytest outcomes above and the independent engine-run
+        # convention smoke, neither of which the suite authors.
         unbound = self._unimported_components(
             declared_origins, observed_imports)
         if unbound:
             reports.append(unbound)
-            return False, "\n\n".join(reports)
 
         if not any_tests:
             # Suite roots existed but not one engine-discoverable test file —
@@ -13011,14 +13022,15 @@ class Orchestrator:
 
     @staticmethod
     def _unimported_components(wanted: dict, observed: set) -> "str | None":
-        """Reason the shipped tests never imported the shipped component, or
-        None when they did.
+        """An ADVISORY diagnostic line when the run did not report loading a
+        shipped component, or None when every component was reported.
 
-        A suite proves it tests the product by IMPORTING it while running.
-        Naming the component in a comment, a docstring, a string literal, or
-        a test function name reads the same in a report and proves nothing —
-        so the evidence is the observation from the run, not the source
-        text."""
+        A suite tests the product by IMPORTING it while running; naming the
+        component in a comment, a docstring, a string literal, or a test
+        function name reads the same in a report and proves nothing. But the
+        observation is made in-process, so it is diagnostic evidence rather
+        than a gate failure — the caller rides it in the report and never
+        turns it into RED."""
         missing = sorted(
             f"{name} ({root})"
             for token, (name, root) in wanted.items() if token not in observed
@@ -13026,12 +13038,16 @@ class Orchestrator:
         if not missing:
             return None
         return (
-            "engine-run pytest is green but no test imported "
+            "[ADVISORY — same-process import observation] engine-run pytest is "
+            "green but the run did not report loading "
             + ", ".join(missing)
-            + " — the suite ran without loading the shipped component, so "
-              "the green result is evidence about something other than the "
-              "deliverable. Import it from a test (or add a one-line import "
-              "probe) so the run exercises what shipped."
+            + ". The suite passed without the observer recording a load of the "
+              "shipped component, so the green result may be about something "
+              "other than the deliverable. This observation is made in-process, "
+              "where producer-authored Python shares the interpreter and can "
+              "influence what is reported — it is diagnostic evidence, not a "
+              "gate failure. Import the component from a test (or add a "
+              "one-line import probe) so the run exercises what shipped."
         )
 
     def _convention_import_smoke(
@@ -13360,10 +13376,13 @@ class Orchestrator:
         # #43: engine-run test-suite evidence for CODE goals. GREEN rides into
         # the verify prompt as evidence; RED joins goal_spec_issues so the
         # verdict clamp binds it as a measured HARD violation — a code goal
-        # cannot be waved through without a recorded green pytest run.
-        # UNAVAILABLE is surfaced (never silent) but does not clamp. The
-        # report text is model-authored test OUTPUT — untrusted; its fences
-        # are defused before it rides into any prompt.
+        # cannot be waved through without a recorded green pytest run. Hard RED
+        # comes only from an actual pytest failure, an absent suite/tests, or
+        # the independent convention smoke; the in-process import-binding
+        # observation rides in the report as ADVISORY diagnostic and never
+        # enters goal_spec_issues. UNAVAILABLE is surfaced (never silent) but
+        # does not clamp. The report text is model-authored test OUTPUT —
+        # untrusted; its fences are defused before it rides into any prompt.
         pytest_gate = self._goal_pytest_gate(tasks)
         if pytest_gate is not None:
             gate_green, gate_report = pytest_gate
