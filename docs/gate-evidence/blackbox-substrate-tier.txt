@@ -1,10 +1,10 @@
 # Designated Linux gate — black-box substrate tier
 
 ## Provenance (captured BEFORE the run, from the clean commit under test)
-git rev-parse HEAD : e441e7f4ef9851f10f6ae17aa50e99d7d337d107
+git rev-parse HEAD : 9c49066aff613a508d81f2f9c0d837a696c8be26
 git status --porcelain:
- M docs/gate-evidence/blackbox-substrate-tier.txt
-run-started-utc     : 2026-07-25T22:16:38Z
+<empty — clean worktree>
+run-started-utc     : 2026-07-29T23:04:05Z
 
 ## Host
 uname -srm: Linux 7.0.0-28-generic x86_64
@@ -14,8 +14,7 @@ prerequisite probe (bwrap --unshare-all --die-with-parent --ro-bind / / true): P
 
 ## Six-test tier
 ```
-plugins: asyncio-1.4.0, anyio-4.14.0, timeout-2.4.0
-asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+============================= test session starts ==============================
 collecting ... collected 6 items
 
 tests/test_access_sandbox_blackbox.py::test_state_sandboxed_full_runs_confined PASSED [ 16%]
@@ -25,7 +24,7 @@ tests/test_access_sandbox_blackbox.py::test_state_refused_denies_run PASSED [ 66
 tests/test_access_sandbox_blackbox.py::test_convention_import_smoke_runs_genuinely_confined PASSED [ 83%]
 tests/test_access_sandbox_blackbox.py::test_black_box_states_cover_every_substrate_descriptor PASSED [100%]
 
-============================== 6 passed in 0.37s ===============================
+============================== 6 passed in 1.27s ===============================
 ```
 
-run-finished-utc: 2026-07-25T22:16:39Z
+run-finished-utc: 2026-07-29T23:04:06Z
