@@ -12762,11 +12762,25 @@ class Orchestrator:
         if run_shell is None:
             return None, "run_shell tool unavailable (no artifacts root bound)"
 
-        def _read_observation(path: "Path") -> set:
-            """The finalized observation, or an empty set. Absent, oversized,
-            malformed, wrong-schema, and unknown-token data all mean NO
-            evidence — never a crash, and never a token the engine did not
-            declare.
+        def _read_observation(path: "Path") -> "tuple[bool, set]":
+            """``(finalised, credited_tokens)`` for one observation record.
+
+            FINALISED reports only that the wrapper COMPLETED and left a
+            bounded, parseable, known-schema record whose ``tokens`` member has
+            the expected container type. It says nothing about what the record
+            credits. Absent, oversized, malformed, and wrong-schema transport
+            is NOT finalised.
+
+            The two facts must stay separate. The wrapper writes its record
+            only after ``pytest.main()`` returns, so a process that exits
+            first leaves exactly the same empty token set as a genuinely
+            green run that imported nothing — and one of those has a pytest
+            outcome while the other has none at all. Collapsing them lets
+            exit status stand in for evidence.
+
+            Tokens the engine did not declare are filtered OUT of the credited
+            set without disturbing finalisation: an unrecognised token is a
+            record that credits nothing, not a wrapper that never ran.
 
             Size is judged on the SAME descriptor the content comes from:
             a separate ``stat()`` leaves a window in which a surviving child
@@ -12778,24 +12792,31 @@ class Orchestrator:
                 with path.open("rb") as handle:
                     raw = handle.read(_OBSERVATION_MAX_BYTES + 1)
                 if len(raw) > _OBSERVATION_MAX_BYTES:
-                    return set()
+                    return False, set()
                 payload = json.loads(raw)
             except (OSError, ValueError):
-                return set()
+                return False, set()
             if (not isinstance(payload, dict)
                     or payload.get("schema") != _OBSERVATION_SCHEMA):
-                return set()
+                return False, set()
             tokens = payload.get("tokens")
             if not isinstance(tokens, list):
-                return set()
-            return {t for t in tokens
-                    if isinstance(t, str) and t in declared_origins}
+                return False, set()
+            return True, {t for t in tokens
+                          if isinstance(t, str) and t in declared_origins}
 
         def _run_pytest(root: "Path", rel: str, noconftest: bool,
                         observe: bool = False):
             """Run the engine-selected test files under ``root``. Returns
             ``(exit_code, result_text)``, or ``(None, reason)`` when the gate
             is UNAVAILABLE (tool refusal / pytest not installed / unparseable).
+
+            Returns ``(exit_code, result_text, finalised, credited)``, where
+            ``finalised`` is ``None`` when no observation was requested (there
+            is nothing to finalise), ``True`` when the wrapper left a valid
+            record, and ``False`` when observation WAS requested and no valid
+            record came back — the caller must not read exit status as a
+            pytest outcome in that last case.
 
             The HOOK-FREE binding pass suppresses captured output + traceback
             and stops at the first failure (cadre R7 MED): ``run_shell`` keeps
@@ -12842,21 +12863,22 @@ class Orchestrator:
                 _logger.warning("pytest gate could not run: %s", exc)
                 if obs_path is not None:
                     obs_path.unlink(missing_ok=True)
-                return None, f"gate could not run in {root}: {exc}", set()
+                return None, f"gate could not run in {root}: {exc}", None, set()
+            finalised: "bool | None" = None
             finally_seen: set = set()
             if obs_path is not None:
                 try:
-                    finally_seen = _read_observation(obs_path)
+                    finalised, finally_seen = _read_observation(obs_path)
                 finally:
                     obs_path.unlink(missing_ok=True)
             head = result.split("\n", 1)[0]
             try:
                 code = int(head.removeprefix("exit_code:").strip())
             except ValueError:
-                return None, f"unparseable shell result in {root}", set()
+                return None, f"unparseable shell result in {root}", None, set()
             if code == -1 and "[TIMEOUT" not in result and "[INFO]" in result:
-                return None, "pytest is not installed on this host", set()
-            return code, result, finally_seen
+                return None, "pytest is not installed on this host", None, set()
+            return code, result, finalised, finally_seen
 
         # A real assertion/test FAILURE ("N failed") vs a setup/collection
         # ERROR ("N error"): a failure surfacing HOOK-FREE is authoritative RED
@@ -12865,6 +12887,19 @@ class Orchestrator:
         # fixtures), which routes to the advisory path.
         def _has_real_failure(text: str) -> bool:
             return bool(re.search(r"\b\d+ failed", text))
+
+        def _unfinalised_report(root: "Path", text: str) -> str:
+            """RED for a zero exit with no wrapper result. Deliberately states
+            the ABSENCE of an outcome and never the word green: this report
+            reaches the Leader, and a clamp that reads as a pass is worse than
+            no clamp."""
+            return (
+                f"engine-run pytest (cwd: {root}) is RED — the runner reported "
+                "exit 0 but the engine's import observer never finalised a "
+                "record. The wrapper writes its result only after pytest "
+                "finishes, so the process exited before any suite ran to "
+                "completion: this run produced NO pytest outcome, and exit "
+                f"status alone is not evidence of one.\n\n{_snip(text)}")
 
         def _snip(text: str) -> str:
             return f"{text.split(chr(10), 1)[0]}\n\n{text[-2000:]}"
@@ -12898,10 +12933,18 @@ class Orchestrator:
             # stripped, a test the producer tried to hide/deselect/xfail RUNS
             # and its failure surfaces — the engine cannot be tricked by code
             # it did not run.
-            code, res, hookfree_seen = _run_pytest(
+            code, res, finalised, hookfree_seen = _run_pytest(
                 repo_root, rel, noconftest=True, observe=True)
             if code is None:
                 return None, res  # UNAVAILABLE (tool refusal / no pytest)
+            if code == 0 and finalised is False:
+                # Exit zero WITHOUT a finalised record is not a pytest
+                # outcome: the wrapper writes only after ``pytest.main()``
+                # returns, so the runner exited first (a test calling
+                # ``os._exit``, a crash, a killed interpreter) and nothing
+                # ran to completion. Reading exit status as green here is a
+                # false GREEN straight through the hard gate.
+                return False, _unfinalised_report(repo_root, res)
             if code == 0:
                 # This invocation's green is the one being reported, so its
                 # observation is the evidence for this root.
@@ -12936,10 +12979,15 @@ class Orchestrator:
             # hook-free attempt above errored, so its observation describes
             # a run nobody is trusting and is discarded — this one is the
             # evidence, advisory label and all.
-            code_cf, res_cf, advisory_seen = _run_pytest(
+            code_cf, res_cf, finalised_cf, advisory_seen = _run_pytest(
                 repo_root, rel, noconftest=False, observe=True)
             if code_cf is None:
                 return None, res_cf
+            if code_cf == 0 and finalised_cf is False:
+                # Same false-GREEN shape on the fallback lane: a zero exit
+                # with no wrapper result is an absence of evidence, and this
+                # is the invocation whose green would be REPORTED.
+                return False, _unfinalised_report(repo_root, res_cf)
             observed_imports |= advisory_seen
             advisory = True
             all_green = all_green and code_cf == 0
@@ -12962,22 +13010,33 @@ class Orchestrator:
             if not smoke_state:
                 return False, "\n\n".join(reports)
 
+        # HARD STATES RESOLVE FIRST. Everything below this point describes a
+        # genuinely green suite, so no RED path may reach the import advisory:
+        # that text asserts pytest was green and the suite passed, and the
+        # Leader reads the report. A correct clamp whose own diagnostic says
+        # the suite passed is worse than no diagnostic.
+        if not any_tests:
+            # Suite roots existed but not one engine-discoverable test file —
+            # no green evidence to show, same as no suite at all (RED).
+            return False, "\n\n".join(reports)
+        if not all_green:
+            # A reported failure on the conftest-enabled fallback lane.
+            return False, "\n\n".join(reports)
+
         # A green suite that never reaches the shipped component proves the
         # suite runs, not that the product works. Whether it reached the
         # component is observed IN-PROCESS, where producer Python shares the
         # interpreter and can influence the report, so this rides as ADVISORY
         # diagnostic — never a gate RED on its own. The verdict comes from the
         # actual pytest outcomes above and the independent engine-run
-        # convention smoke, neither of which the suite authors.
+        # convention smoke, neither of which the suite authors. Missing import
+        # data is only meaningful once the suite is actually green, which is
+        # why it is composed here and not before the checks above.
         unbound = self._unimported_components(
             declared_origins, observed_imports)
         if unbound:
             reports.append(unbound)
 
-        if not any_tests:
-            # Suite roots existed but not one engine-discoverable test file —
-            # no green evidence to show, same as no suite at all (RED).
-            return False, "\n\n".join(reports)
         if advisory:
             reports.append(
                 "[ADVISORY] One or more suites required their own conftest.py "
@@ -12986,7 +13045,7 @@ class Orchestrator:
                 "the tests ran and are reported, but the engine cannot certify "
                 "that producer code did not influence the result. Treat it as "
                 "evidence, not a tamper-proof attestation.")
-        return all_green, "\n\n".join(reports)
+        return True, "\n\n".join(reports)  # every RED path returned above
 
 
 

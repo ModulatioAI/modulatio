@@ -899,6 +899,21 @@ def _gate_suite(root, *, binds: bool = True, shape: str | None = None):
         _SUITE_BODIES[key], encoding="utf-8")
 
 
+def _claims_green(report: str) -> bool:
+    """The report asserts a green pytest outcome. A RED verdict must never
+    carry this text: the clamp can be correct while the diagnostic beside it
+    tells the Leader the opposite, and the Leader reads the report."""
+    return "pytest is green" in report or "The suite passed" in report
+
+
+def _reports_unfinalised(report: str) -> bool:
+    """The report names the missing wrapper result. Exit zero from the runner
+    is not a pytest outcome: the wrapper writes its record only after
+    ``pytest.main()`` returns, so a process that exits first leaves no
+    evidence either way — which must read as RED, not as an empty token set."""
+    return "never finalised" in report
+
+
 def _reports_unloaded(report: str, name: str) -> bool:
     """The advisory diagnostic fired for ``name`` — the run did not report
     loading it. This is the observer declining to credit prose, a forged
@@ -1246,7 +1261,12 @@ def test_a_run_that_never_finishes_leaves_no_observation(project, monkeypatch):
 
     state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
 
-    assert _reports_unloaded(report, "webapp"), report
+    # Exit zero with no finalised record is NOT the "green suite, unobserved
+    # component" advisory case — there is no pytest outcome at all. Accepting
+    # it as green is a trivial false-GREEN straight through the hard gate.
+    assert state is False, report
+    assert _reports_unfinalised(report), report
+    assert not _claims_green(report), report
     assert stale.exists(), "a file the engine never wrote was consumed"
 
 
@@ -1288,26 +1308,44 @@ def _padded(tok: str, total: int) -> str:
     return base + " " * (total - len(base))
 
 
+#: ``shape -> (build, finalised, credits)``. FINALISED and CREDITS are
+#: independent facts and the gate must not conflate them: a wrapper that never
+#: completed leaves no pytest outcome at all (RED, whatever the exit status),
+#: while a record that completed and names nothing the engine declared is a
+#: real green run that merely failed to exercise the component (GREEN, with
+#: the advisory). Only transport shape decides finalisation; only recognised
+#: token values decide credit.
 _OBSERVATION_PAYLOADS = {
-    "genuine": (lambda tok: '{"schema": 1, "tokens": ["%s"]}' % tok, True),
-    "absent": (lambda tok: None, False),
-    "empty": (lambda tok: "", False),
-    "not-json": (lambda tok: "not json at all", False),
-    "wrong-container": (lambda tok: '["%s"]' % tok, False),
-    "no-schema": (lambda tok: '{"tokens": ["%s"]}' % tok, False),
+    "genuine": (lambda tok: '{"schema": 1, "tokens": ["%s"]}' % tok,
+                True, True),
+    "absent": (lambda tok: None, False, False),
+    "empty": (lambda tok: "", False, False),
+    "not-json": (lambda tok: "not json at all", False, False),
+    "wrong-container": (lambda tok: '["%s"]' % tok, False, False),
+    "no-schema": (lambda tok: '{"tokens": ["%s"]}' % tok, False, False),
     "future-schema": (lambda tok: '{"schema": 99, "tokens": ["%s"]}' % tok,
-                      False),
+                      False, False),
     "tokens-not-a-list": (lambda tok: '{"schema": 1, "tokens": {"%s": 1}}' % tok,
-                          False),
-    "unhashable-member": (lambda tok: '{"schema": 1, "tokens": [{}]}', False),
+                          False, False),
+    # The plain shape of a real green run that imported nothing: the wrapper
+    # finalised and honestly reports an empty list. GREEN plus advisory — this
+    # is the case the advisory demotion exists for, and the one that must stay
+    # distinguishable from a wrapper that never ran.
+    "empty-token-list": (lambda tok: '{"schema": 1, "tokens": []}',
+                         True, False),
+    # A list whose MEMBER is unusable: transport finalised, nothing credited.
+    "unhashable-member": (lambda tok: '{"schema": 1, "tokens": [{}]}',
+                          True, False),
+    # A finalised record naming only a token this goal never declared.
     "undeclared-token": (
-        lambda tok: '{"schema": 1, "tokens": ["cvc-000000000000"]}', False),
-    "at-cap": (lambda tok: _padded(tok, _OBSERVATION_MAX_BYTES), True),
+        lambda tok: '{"schema": 1, "tokens": ["cvc-000000000000"]}',
+        True, False),
+    "at-cap": (lambda tok: _padded(tok, _OBSERVATION_MAX_BYTES), True, True),
     "one-past-cap": (lambda tok: _padded(tok, _OBSERVATION_MAX_BYTES + 1),
-                     False),
+                     False, False),
     "oversized": (
         lambda tok: '{"schema": 1, "tokens": ["%s"]}' % tok + " " * 70_000,
-        False),
+        False, False),
 }
 
 
@@ -1315,12 +1353,15 @@ _OBSERVATION_PAYLOADS = {
 def test_only_recognisable_observation_data_is_credited(
     project, monkeypatch, shape,
 ):
-    """The reader through its whole vocabulary: a genuine token is credited
-    (the component is reported loaded) and a payload exactly at the size cap
-    still is, while every unreadable, unrecognised, over-cap, or undeclared
-    form falls back to no evidence without raising. The gate stays green
-    throughout — the observation is advisory — so what varies is whether the
-    run is reported as loading the component, not the verdict."""
+    """The reader through its whole vocabulary, over BOTH facts it reports.
+
+    Transport that never finalised — absent, empty, unparseable, wrong
+    container, unknown schema, over-cap — clamps the gate RED however green
+    the exit status looked, because no suite ran to completion and there is
+    no outcome to report. Transport that DID finalise keeps the gate green and
+    varies only in whether the component is credited: a declared token is,
+    while an undeclared token or an unusable list member is not, and that
+    rides as the advisory. Nothing in the vocabulary raises."""
     from modulatio import store as store_mod
 
     orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
@@ -1329,13 +1370,17 @@ def test_only_recognisable_observation_data_is_credited(
     _gate_suite(orch._shared_artifacts_root(), shape="none")
     (goal,) = store_mod.list_goals(PROJECT_CODE)
     (contract,) = goal.convention_contracts
-    build, credited = _OBSERVATION_PAYLOADS[shape]
+    build, finalised, credited = _OBSERVATION_PAYLOADS[shape]
 
     state, report = _run_gate(
         orch, tasks, monkeypatch,
         _ObservationShell(build(contract.contract_id)))
 
-    assert state is True, report
+    assert state is finalised, report
+    if not finalised:
+        assert _reports_unfinalised(report), report
+        assert not _claims_green(report), report
+        return
     assert (not _reports_unloaded(report, "webapp")) is credited, report
 
 
@@ -1593,7 +1638,11 @@ def test_the_size_and_content_come_from_one_descriptor(
     check/use window a separate ``stat()`` would leave is closed. Payload A is
     what the descriptor holds; the pathname is atomically swapped to the
     OPPOSITE payload B before the read, and the decision must follow A. The
-    swapped-in pathname is still cleaned up afterward."""
+    swapped-in pathname is still cleaned up afterward.
+
+    The swap is observable in the VERDICT, not merely in advisory text: A
+    valid finalises and goes green, A invalid never finalised and clamps RED,
+    so a reader that followed B would flip the gate."""
     import os
     import pathlib
 
@@ -1630,10 +1679,71 @@ def test_the_size_and_content_come_from_one_descriptor(
     state, report = _run_gate(orch, tasks, monkeypatch, runner)
 
     assert swapped["done"], "the observation descriptor was never opened"
-    assert state is True, report
-    # The decision follows A, not the swapped-in B.
-    assert (not _reports_unloaded(report, "webapp")) is credited_a, report
+    # The decision follows A, not the swapped-in B: valid A finalises green,
+    # invalid A leaves no wrapper result and clamps.
+    assert state is credited_a, report
+    if credited_a:
+        assert not _reports_unloaded(report, "webapp"), report
+    else:
+        assert _reports_unfinalised(report), report
+        assert not _claims_green(report), report
     assert not Path(runner.out_paths[0]).exists(), "replacement not cleaned up"
+
+
+def test_a_root_without_discoverable_tests_is_red_and_claims_no_green(
+    project, monkeypatch,
+):
+    """A marker with no engine-discoverable test file supplies no green
+    evidence, so the gate clamps RED. The import advisory must NOT be composed
+    onto that report: its text asserts pytest was green and the suite passed,
+    and the Leader reads the report, so a correct clamp carrying a green claim
+    is a contradictory diagnostic."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    root = orch._shared_artifacts_root()
+    # A suite root marker, but no tests/ at all — the component itself was
+    # written by the producers during kickoff, so the convention smoke is
+    # green and RED can only come from the missing test evidence.
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "webapp"\nversion = "0"\n', encoding="utf-8")
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
+
+    assert state is False, report
+    assert not _claims_green(report), report
+
+
+def test_a_failing_conftest_fallback_is_red_and_claims_no_green(
+    project, monkeypatch,
+):
+    """The conftest-enabled fallback lane can report a genuine failure. When
+    it does the gate clamps, and the import advisory must not ride along
+    announcing that pytest was green — the observation is only meaningful
+    once a genuinely green suite exists."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    root = orch._shared_artifacts_root()
+    _gate_suite(root, shape="none")
+    # Hook-free cannot run this suite (the fixture lives in conftest), so it
+    # ERRORS rather than failing and routes to the fallback lane — where the
+    # test then genuinely fails.
+    (root / "tests" / "conftest.py").write_text(
+        "import pytest\n\n\n@pytest.fixture\ndef supplied():\n    return 1\n",
+        encoding="utf-8")
+    (root / "tests" / "test_ok.py").write_text(
+        "def test_fails(supplied):\n    assert supplied == 2\n",
+        encoding="utf-8")
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
+
+    assert state is False, report
+    assert not _claims_green(report), report
 
 
 def _bootstrap_observation(body: str, tmp_path) -> dict:

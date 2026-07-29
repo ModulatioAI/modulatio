@@ -172,6 +172,53 @@ def test_red_pytest_clamps_satisfied_verdict(project, monkeypatch):
     assert summary.verdicts[-1]["verdict"] == "disappointed"
 
 
+def test_unfinalised_observation_clamps_satisfied_verdict(project, monkeypatch):
+    """A runner that exits zero WITHOUT the engine wrapper finalising its
+    result carries no pytest outcome, so the gate returns RED and that RED
+    must reach goal_spec_issues like any other measured failure. This is the
+    lane the advisory demotion must never widen: 'green suite, component not
+    observed' rides as diagnostic, but 'no suite outcome at all' is a hard
+    violation the Leader cannot wave through."""
+    monkeypatch.setenv("MODULATIO_GOAL_MAX_RETRIES", "0")
+    unfinalised_report = (
+        "engine-run pytest (cwd: /w) is RED — the runner reported exit 0 but "
+        "the engine's import observer never finalised a record. The wrapper "
+        "writes its result only after pytest finishes, so the process exited "
+        "before any suite ran to completion: this run produced NO pytest "
+        "outcome, and exit status alone is not evidence of one."
+    )
+    monkeypatch.setattr(
+        Orchestrator, "_goal_pytest_gate",
+        lambda self, tasks: (False, unfinalised_report),
+    )
+
+    def _leader_satisfied(prompt: str) -> str:
+        if "LEADER GOAL VERIFICATION" in prompt:
+            payload = {
+                "verdict": "satisfied",
+                "rationale": "looks fine to me",
+                "report_body": "## Report\n\nShip it.\n",
+            }
+            return f"```json\n{json.dumps(payload)}\n```"
+        return _leader_stub(prompt)
+
+    runners = {
+        "leader": _leader_satisfied,
+        "planner": _planner_stub,
+        "drafter": _drafter_stub,
+        "qc": _qc_stub,
+    }
+    orch = Orchestrator(project, runners)
+    summary = orch.kickoff("code goal whose runner exited before finishing")
+
+    assert any("clamped verdict satisfied→disappointed" in e
+               for e in summary.errors)
+    assert summary.verdicts[-1]["verdict"] == "disappointed"
+    # The clamp reason must not describe the run as green.
+    assert "pytest is green" not in unfinalised_report
+    assert "The suite passed" not in unfinalised_report
+
+
 def test_advisory_import_binding_does_not_clamp_a_satisfied_verdict(
     project, monkeypatch,
 ):
