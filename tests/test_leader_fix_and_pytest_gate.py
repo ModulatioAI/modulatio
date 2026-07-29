@@ -180,12 +180,13 @@ def test_unfinalised_observation_clamps_satisfied_verdict(project, monkeypatch):
     observed' rides as diagnostic, but 'no suite outcome at all' is a hard
     violation the Leader cannot wave through."""
     monkeypatch.setenv("MODULATIO_GOAL_MAX_RETRIES", "0")
+    # The gate's own wording, verbatim: a stale copy here would keep passing
+    # while no longer pinning the report the Leader actually receives.
     unfinalised_report = (
-        "engine-run pytest (cwd: /w) is RED — the runner reported exit 0 but "
-        "the engine's import observer never finalised a record. The wrapper "
-        "writes its result only after pytest finishes, so the process exited "
-        "before any suite ran to completion: this run produced NO pytest "
-        "outcome, and exit status alone is not evidence of one."
+        "engine-run pytest (cwd: /w) is RED — exit 0 was reported, but no "
+        "valid finalisation record was recovered from the engine's wrapper. "
+        "The engine therefore cannot establish that pytest completed, and "
+        "exit status alone is not evidence of a passing suite."
     )
     monkeypatch.setattr(
         Orchestrator, "_goal_pytest_gate",

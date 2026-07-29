@@ -601,6 +601,15 @@ def _planner_stub_for(items):
     return _stub
 
 
+#: A lone script resolves to a STANDALONE contract, which declares no
+#: component origin — so the gate has nothing to credit and takes the
+#: no-observer path. Completion evidence must still be required there.
+_STANDALONE_PLAN = [
+    {"description": "one-file tool", "artifact_kind": "code",
+     "output_path": "tool.py",
+     "evidence_required": [{"kind": "artifact", "description": "exists"}]},
+]
+
 _WEBAPP_PLAN = [
     {"description": "package init", "artifact_kind": "code",
      "output_path": "webapp/__init__.py",
@@ -907,11 +916,14 @@ def _claims_green(report: str) -> bool:
 
 
 def _reports_unfinalised(report: str) -> bool:
-    """The report names the missing wrapper result. Exit zero from the runner
-    is not a pytest outcome: the wrapper writes its record only after
-    ``pytest.main()`` returns, so a process that exits first leaves no
-    evidence either way — which must read as RED, not as an empty token set."""
-    return "never finalised" in report
+    """The report names the unrecoverable wrapper result and says completion
+    was not established. Exit zero from the runner is not a pytest outcome:
+    the record is written only after ``pytest.main()`` returns, so no valid
+    record means no evidence a suite ran to the end — RED, not an empty token
+    set. The claim stays cause-neutral: only an ABSENT record proves the
+    process exited early, while a corrupted one may post-date a real run."""
+    return ("no valid finalisation record was recovered" in report
+            and "cannot establish that pytest completed" in report)
 
 
 def _reports_unloaded(report: str, name: str) -> bool:
@@ -1380,6 +1392,11 @@ def test_only_recognisable_observation_data_is_credited(
     if not finalised:
         assert _reports_unfinalised(report), report
         assert not _claims_green(report), report
+        # RED is right for every unrecoverable record, but only an ABSENT one
+        # proves the process exited early: a malformed, oversized, or replaced
+        # record may post-date a run that genuinely completed. The shared
+        # diagnostic must therefore not assert that cause.
+        assert "exited before" not in report, report
         return
     assert (not _reports_unloaded(report, "webapp")) is credited, report
 
@@ -1743,6 +1760,159 @@ def test_a_failing_conftest_fallback_is_red_and_claims_no_green(
     state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
 
     assert state is False, report
+    assert not _claims_green(report), report
+
+
+class _CommandRecordingShell(_DeterministicRunShell):
+    """Runs for real and keeps every command the gate issued, so a test can
+    assert HOW pytest was launched and not merely what it returned."""
+
+    def __init__(self):
+        self.cmds: list[str] = []
+
+    def call(self, *, cmd, profile, cwd, timeout):
+        self.cmds.append(cmd)
+        return super().call(cmd=cmd, profile=profile, cwd=cwd, timeout=timeout)
+
+
+#: Two different routes to an EMPTY component-origin map: a lone script that
+#: resolves standalone, and a component the Python schema does not claim.
+#: Neither declares an import to credit, and completion evidence must be
+#: required for both.
+_NO_ORIGIN_PLANS = {
+    "standalone": _STANDALONE_PLAN,
+    "outside-python-claim": [
+        {"description": "landing page", "artifact_kind": "code",
+         "output_path": "site/index.html",
+         "evidence_required": [{"kind": "artifact", "description": "exists"}]},
+    ],
+}
+
+
+@pytest.mark.parametrize("plan_key", sorted(_NO_ORIGIN_PLANS))
+def test_a_goal_with_no_component_origin_still_requires_finalisation(
+    project, monkeypatch, plan_key,
+):
+    """Completion evidence is GATE-WIDE, not a feature of import observation.
+
+    A goal that declares no component origin has nothing to credit and nothing
+    to advise about. But a runner that exits before ``pytest.main()`` returns
+    still produced no outcome, and convention SHAPE must not decide whether
+    exit status counts as one — otherwise the same false GREEN survives on
+    every goal the observer happens to have nothing to say about.
+
+    The empty origin map is asserted, not assumed: if a plan ever started
+    declaring an origin this test would silently stop covering the no-observer
+    path it exists to guard."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(
+        project, _NO_ORIGIN_PLANS[plan_key], [], monkeypatch)
+    orch.kickoff("build the deliverable")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    assert orch._declared_component_origins(tasks) == {}, "plan declares an origin"
+    root = orch._shared_artifacts_root()
+    _gate_suite(root, shape="none")
+    (root / "tests" / "test_ok.py").write_text(
+        "import os\n\n\ndef test_exit():\n    os._exit(0)\n", encoding="utf-8")
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
+
+    assert state is False, report
+    assert _reports_unfinalised(report), report
+    assert not _claims_green(report), report
+
+
+def test_a_no_origin_goal_runs_pytest_through_the_engine_wrapper(
+    project, monkeypatch,
+):
+    """The completion record only exists if the wrapper is what ran. A bare
+    ``pytest`` command would return the same exit code and leave nothing to
+    recover, so the absence of an origin to credit must not downgrade the
+    launch to the unwrapped form."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _STANDALONE_PLAN, [], monkeypatch)
+    orch.kickoff("build the one-file tool")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    assert orch._declared_component_origins(tasks) == {}
+    _gate_suite(orch._shared_artifacts_root(), shape="none")
+    runner = _CommandRecordingShell()
+
+    state, report = _run_gate(orch, tasks, monkeypatch, runner)
+
+    assert state is True, report
+    pytest_cmds = [c for c in runner.cmds if "pytest" in c]
+    assert pytest_cmds, runner.cmds
+    for cmd in pytest_cmds:
+        assert cmd.startswith("python3 -I -c "), cmd
+        assert not cmd.startswith("pytest "), cmd
+
+
+def test_a_no_origin_goal_is_green_without_an_import_advisory(
+    project, monkeypatch,
+):
+    """A finalised empty-token record on a goal with nothing to credit is a
+    complete, honest green: completion established, no component claimed, and
+    NO unobserved-component advisory invented for a component that was never
+    declared."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _STANDALONE_PLAN, [], monkeypatch)
+    orch.kickoff("build the one-file tool")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    _gate_suite(orch._shared_artifacts_root(), shape="none")
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
+
+    assert state is True, report
+    assert "did not report loading" not in report, report
+    assert not _reports_unfinalised(report), report
+
+
+def test_a_no_origin_goal_with_a_failing_test_stays_red(project, monkeypatch):
+    """Requiring completion evidence must not make a real failure green: a
+    finalised record beside a failing suite is still RED."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _STANDALONE_PLAN, [], monkeypatch)
+    orch.kickoff("build the one-file tool")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    root = orch._shared_artifacts_root()
+    _gate_suite(root, shape="none")
+    (root / "tests" / "test_ok.py").write_text(
+        "def test_fails():\n    assert False\n", encoding="utf-8")
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
+
+    assert state is False, report
+    assert not _claims_green(report), report
+
+
+def test_a_no_origin_conftest_fallback_also_requires_finalisation(
+    project, monkeypatch,
+):
+    """The fallback lane needs the same completion evidence. Hook-free cannot
+    run this suite, so the conftest-enabled invocation is the one whose result
+    would be REPORTED — and it exits zero without finishing."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _STANDALONE_PLAN, [], monkeypatch)
+    orch.kickoff("build the one-file tool")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    root = orch._shared_artifacts_root()
+    _gate_suite(root, shape="none")
+    (root / "tests" / "conftest.py").write_text(
+        "import pytest\n\n\n@pytest.fixture\ndef supplied():\n    return 1\n",
+        encoding="utf-8")
+    (root / "tests" / "test_ok.py").write_text(
+        "import os\n\n\ndef test_exit(supplied):\n    os._exit(0)\n",
+        encoding="utf-8")
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
+
+    assert state is False, report
+    assert _reports_unfinalised(report), report
     assert not _claims_green(report), report
 
 
