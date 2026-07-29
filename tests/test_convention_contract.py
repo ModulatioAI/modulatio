@@ -1861,6 +1861,7 @@ def test_a_no_origin_goal_is_green_without_an_import_advisory(
     orch = _kickoff_orchestrator(project, _STANDALONE_PLAN, [], monkeypatch)
     orch.kickoff("build the one-file tool")
     tasks = store_mod.list_tasks(PROJECT_CODE)
+    assert orch._declared_component_origins(tasks) == {}
     _gate_suite(orch._shared_artifacts_root(), shape="none")
 
     state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
@@ -1878,6 +1879,7 @@ def test_a_no_origin_goal_with_a_failing_test_stays_red(project, monkeypatch):
     orch = _kickoff_orchestrator(project, _STANDALONE_PLAN, [], monkeypatch)
     orch.kickoff("build the one-file tool")
     tasks = store_mod.list_tasks(PROJECT_CODE)
+    assert orch._declared_component_origins(tasks) == {}
     root = orch._shared_artifacts_root()
     _gate_suite(root, shape="none")
     (root / "tests" / "test_ok.py").write_text(
@@ -1900,6 +1902,7 @@ def test_a_no_origin_conftest_fallback_also_requires_finalisation(
     orch = _kickoff_orchestrator(project, _STANDALONE_PLAN, [], monkeypatch)
     orch.kickoff("build the one-file tool")
     tasks = store_mod.list_tasks(PROJECT_CODE)
+    assert orch._declared_component_origins(tasks) == {}
     root = orch._shared_artifacts_root()
     _gate_suite(root, shape="none")
     (root / "tests" / "conftest.py").write_text(

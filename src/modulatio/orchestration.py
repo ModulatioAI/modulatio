@@ -13047,11 +13047,11 @@ class Orchestrator:
         # suite runs, not that the product works. Whether it reached the
         # component is observed IN-PROCESS, where producer Python shares the
         # interpreter and can influence the report, so this rides as ADVISORY
-        # diagnostic — never a gate RED on its own. The verdict comes from the
-        # actual pytest outcomes above and the independent engine-run
-        # convention smoke, neither of which the suite authors. Missing import
-        # data is only meaningful once the suite is actually green, which is
-        # why it is composed here and not before the checks above.
+        # diagnostic — never a gate RED on its own. The verdict comes from
+        # engine-run pytest outcomes and the independent convention smoke. Test
+        # outcomes remain producer-authored; the smoke is engine-owned. Missing
+        # import data is only meaningful once the suite is actually green, which
+        # is why it is composed here and not before the checks above.
         unbound = self._unimported_components(
             declared_origins, observed_imports)
         if unbound:
