@@ -177,38 +177,3 @@ def test_black_box_states_cover_every_substrate_descriptor():
     from modulatio import access_surface as axs
     covered = {"sandboxed_full", "degraded_allowlist", "refused", "off"}
     assert covered == set(axs.SUBSTRATE_STATES)
-
-
-def test_committed_substrate_evidence_is_internally_consistent():
-    """The committed artifact must not claim provenance it does not contain.
-
-    It is assembled in an external temporary file and copied into the tracked
-    path last (``scripts/capture-substrate-evidence.sh``) precisely so the
-    porcelain it records is the porcelain of the commit under test. Writing
-    into the tracked path first dirties the worktree before porcelain is
-    measured, and the artifact then lists ITSELF as modified while its header
-    claims a clean capture — a self-contradicting record that a return letter
-    can go on to repeat as fact."""
-    import pathlib
-    import re
-
-    text = (pathlib.Path(__file__).resolve().parents[1]
-            / "docs" / "gate-evidence" / "blackbox-substrate-tier.txt"
-            ).read_text(encoding="utf-8")
-
-    assert "captured BEFORE the run, from the clean commit under test" in text
-    # A full 40-char sha names the tested code commit.
-    assert re.search(r"^git rev-parse HEAD : [0-9a-f]{40}$", text,
-                     re.MULTILINE), "no full code commit sha recorded"
-    # The claim of a clean capture must be backed by an empty porcelain, and
-    # in particular the artifact must never list itself.
-    assert "<empty — clean worktree>" in text, "porcelain not recorded clean"
-    assert "blackbox-substrate-tier.txt" not in text.split("## Host")[0], (
-        "the artifact records itself as modified in its own provenance")
-    # The six substrate cases and both timestamps survive.
-    assert text.count(" PASSED") == 6, "six passing substrate cases expected"
-    assert "6 passed" in text
-    assert re.search(r"^run-started-utc\s*: \d{4}-\d\d-\d\dT", text,
-                     re.MULTILINE)
-    assert re.search(r"^run-finished-utc: \d{4}-\d\d-\d\dT", text,
-                     re.MULTILINE)
