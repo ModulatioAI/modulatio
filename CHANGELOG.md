@@ -6,8 +6,52 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-07-29
+
+**1.0 — and still beta software.** v1.0.0b1 opened the 1.0 line with the
+standalone Leader harness *present*. This release makes it **trustworthy**:
+bounded so it cannot wedge or spend without limit, observable so you can see
+exactly what it may do on every surface, and unable to claim a success it did
+not earn. These are the things 1.0 was supposed to mean and did not yet.
+
+There is no stable release, and the version number does not imply one. 1.0 is
+the line, not a promise of stability — read the
+[Beta calibration](https://modulatio.ai/v0-1-0-beta/) page before serious work.
+
 ### Added
 
+- **The standalone Leader harness is now fully functional.** Everything below
+  composes into one claim: the solo coding lane can be handed real work and
+  left to it. Its whole chat loop is time-bounded, its shells are abortable,
+  its tool spend is capped per task, its code output must conform to a declared
+  component shape, and its deliverable is *executed* before anyone calls it
+  done.
+- **Whole-deliverable execution verification.** A code deliverable is no longer
+  judged on its parts. The engine builds a wheel in a sandbox, validates the
+  metadata, installs it into a pristine network-off environment, then probes
+  the entry point, imports the declared component, and runs the suite from a
+  disposable clone — a typed rollup carrying `OK` / `PRODUCT_FAILED` /
+  `ENGINE_UNAVAILABLE` with the origin stated. An undeclared dependency fails
+  *by name*; a deliverable the engine cannot execute can no longer ship clean.
+- **Plan-time convention contracts with a durable task-plan commit witness.**
+  Component shape (import name, distribution name, source layout) is derived
+  and *sealed* after planning and before dispatch, and every producer, QC, and
+  Leader prompt renders the sealed contract. Ambiguity is refused before any
+  producer runs rather than discovered afterwards; non-Python components run
+  explicitly unbound instead of being silently claimed.
+- **Per-task tool-call budget with typed yield to QC salvage.** Every dispatch
+  consumes from one serializable authority under the store lock — denied,
+  errored, cache-hit, and metered-replay attempts all count — so a storming
+  seat trips a typed outcome that routes straight to QC-as-fixer instead of
+  burning calls. The budget survives crashes and concurrent writers.
+- **Access parity across every operator surface.** A live capability card in
+  `doctor` renders effective authority from production descriptors, not a
+  hand-written table; a conformance matrix executes the *real* gate over
+  surface × backend × tool-origin × autonomy-mode cells with set-equality
+  completeness, so a new tool or surface cannot be added without appearing in
+  it; and one authorization coordinator asks **once per call** over a single
+  atomic bundle, with declared parity exceptions rather than faked ones.
+- **A `SYSTEM` tab** in the TUI reporting the install's own state.
 - **Decompose-child budget floor (#40).** A decompose split is now a
   MINT: the parent's remaining producer budget is consumed by the split
   in one atomic parent write (a durable mint record carrying full child
@@ -31,6 +75,70 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   settles through QC-on-draft or a typed stuck lane **with zero producer
   calls** — that is the at-most-once floor working, not the floor
   failing.
+- **The Debian/GHCR release lane fires again.** Its tag grammar never matched a
+  `b`-suffixed prerelease, so no `.deb` was published for v1.0.0b1; `v1.0.0`
+  matches, and the lane produces the versioned artifact plus the stable-named
+  alias as designed.
+
+### Changed
+
+- **The fix lane cannot run forever.** One absolute wall bounds the Leader's
+  whole chat loop and every dispatch inside it, reaching shell setup and
+  draining alike. A pre-expired budget starts no child and names the binding
+  bound; abort interrupts live sequential *and* isolated shell paths; a
+  two-pipe drain kills the process group, reaps it, and stays bounded.
+- **Terminal classifications are unsuppressible.** `[ABORTED]` / `[TIMEOUT]`
+  and lane-wall status ride an engine-owned framing line outside per-stream
+  truncation, so a child saturating stderr can no longer push the engine's own
+  verdict out of the window. Tail retention is byte-granular and survives
+  arbitrary-byte decoding.
+- **The engine-run pytest gate distinguishes completion from binding.**
+  *Completion* is hard and gate-wide: every gate-run pytest goes through the
+  engine's isolated wrapper, and a run that reports exit 0 without a
+  recoverable completion record produced no outcome at all — RED, whatever the
+  exit status said. *Whether the suite loaded the shipped component* stays
+  advisory, because that observation is in-process and producer-influenceable.
+  Hard states settle before the advisory is composed, so a RED report never
+  claims the suite passed.
+- **A green suite that never reaches the shipped component is called out.** The
+  engine observes real imports through the shipping runner rather than parsing
+  a producer-authored manifest, and the component root — not the run — is the
+  deliverable boundary.
+- **Task records are update-only**, with creation behind one explicit seam, so
+  a merge can no longer resurrect a deleted record.
+- **The producer seat cooldown is halved and named on screen** instead of a
+  seat silently vanishing from dispatch.
+- **The remaining operator knobs are exposed**, and a *stored* sandbox bypass
+  is refused rather than honoured.
+
+### Fixed
+
+- **Version literal drift.** `_docs/manifest.json` had been left at `0.9.9.5`
+  through two subsequent releases while `pyproject.toml` and `__init__.py` were
+  bumped. All three now move together.
+- The WebOS console decodes UTF-16 output, keeps the conversation pseudo-task
+  off task surfaces, and coalesces telemetry-rail paints.
+- Removed the superseded producer-escalation path and the dead ACP permission
+  callback, plus a patch applied to an attribute that does not exist.
+
+### Security
+
+- **The capability dispatch table is validated when the module loads**, so a
+  missing or malformed entry fails at import rather than at the moment
+  authority is checked.
+- **Authorization recovery is durable and revocation wins.** A revoke clears
+  both authority axes, supersedes older recovery state, and rejects a null
+  capability store before touching anything; rollback debt outlives the
+  coordinator, and a failed rollback latches it deny-until-reconciled.
+- **Authority readiness is one linearization point**, proven by lock refusal
+  rather than elapsed time, with a durable epoch and a readiness preflight for
+  every consumer.
+- **A component cannot be named after a task or run id**, and earlier runs are
+  fenced out of the current deliverable.
+- A designated-host black-box substrate tier witnesses real confinement, and
+  its evidence artifact is captured from a clean commit into an external file
+  before being committed — so the provenance it records is the provenance of
+  the code it tested.
 
 ## [1.0.0b1] — 2026-07-20
 
