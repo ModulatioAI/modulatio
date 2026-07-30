@@ -519,7 +519,12 @@ def test_sandbox_profile_stores_only_confining_values(monkeypatch):
     config.apply_env_overrides()
     assert os.environ["MODULATIO_SANDBOX_PROFILE"] == "trusted"
 
-    monkeypatch.delenv("MODULATIO_SANDBOX_PROFILE", raising=False)
+    # Clear the value ``apply_env_overrides`` just wrote WITHOUT monkeypatch.
+    # monkeypatch records the value it removes as the one to put back, so
+    # delenv-ing a direct write makes teardown RESTORE "trusted" — leaking a
+    # widened profile into every later module, where the sandbox tests then
+    # read confinement nobody configured.
+    os.environ.pop("MODULATIO_SANDBOX_PROFILE", None)
     _save_overrides({"MODULATIO_SANDBOX_PROFILE": "off"})
     config.apply_env_overrides()
     assert "MODULATIO_SANDBOX_PROFILE" not in os.environ

@@ -25,7 +25,6 @@ from modulatio.types import (
     Task,
 )
 import hashlib
-import importlib
 from uuid import uuid4
 from modulatio.types import (
     Goal,
@@ -11861,21 +11860,41 @@ def test_regress_guard_allows_legitimate_compact_growth(tmp_path, monkeypatch):
 
 def test_win_codify_floor_tolerates_garbage_env(monkeypatch):
     """A non-integer env value must not raise at import time (cli.py imports
-    orchestration unconditionally) — it must clamp/fall back to the default."""
+    orchestration unconditionally) — it must clamp/fall back to the default.
+
+    IMPORT-TIME behaviour is proven in a SUBPROCESS, never by reloading the
+    module in-process. A reload rebinds every class in it, so a module that
+    already did ``from modulatio.orchestration import Orchestrator`` — this
+    one, at line 16 — keeps the ORIGINAL class while the module now exposes a
+    new one. A later test patching ``Orchestrator._seat_fallback_chain`` then
+    decorates a different object than the instance under test, its patch does
+    nothing, and the failure surfaces in an unrelated module far away. There
+    is also no un-reloading it: a trailing "restore" reload just mints a third
+    generation.
+
+    The subprocess is the stronger proof regardless — a reload runs in a
+    process where the module already imported successfully."""
+    import os
+    import subprocess
+    import sys
+
     import modulatio.orchestration as orch_mod
 
-    monkeypatch.setenv("MODULATIO_WIN_CODIFY_FLOOR", "foo")
-    # Re-importing must NOT raise ValueError.
-    reloaded = importlib.reload(orch_mod)
-    assert reloaded._WIN_CODIFY_FLOOR == 3
-    # A valid value is honored and clamped to >=1.
+    probe = subprocess.run(
+        [sys.executable, "-c",
+         "import modulatio.orchestration as m; print(m._WIN_CODIFY_FLOOR)"],
+        env={**os.environ, "MODULATIO_WIN_CODIFY_FLOOR": "foo"},
+        capture_output=True, text=True, timeout=120,
+    )
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.strip() == "3"
+
+    # The accessor reads the environment when CALLED, so the clamping cases
+    # need no reload at all.
     monkeypatch.setenv("MODULATIO_WIN_CODIFY_FLOOR", "5")
-    assert importlib.reload(orch_mod)._win_codify_floor() == 5
+    assert orch_mod._win_codify_floor() == 5
     monkeypatch.setenv("MODULATIO_WIN_CODIFY_FLOOR", "0")
-    assert importlib.reload(orch_mod)._win_codify_floor() == 1
-    # Restore a clean module state for the rest of the suite.
-    monkeypatch.delenv("MODULATIO_WIN_CODIFY_FLOOR", raising=False)
-    importlib.reload(orch_mod)
+    assert orch_mod._win_codify_floor() == 1
 
 
 # ── F5: a synthetic-crash result must not leak its .staging/<tid> dir ─────────
