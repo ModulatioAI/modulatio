@@ -18053,6 +18053,8 @@ Each task fields:
   task's single artifact, e.g. `"src/index.py"`. Must be relative;
   absolute paths or `..` reject plan. Omit / null = default
   `drafts/<task_id>.md`.
+  NAME IT FOR THE WORK: the first path segment becomes the package
+  users install, so `weather_cli/` — never a task or run id (rejected).
 - artifacts: use INSTEAD of output_path when task produces MULTIPLE
   files. Array of `{{path, description?}}` (path relative under
   artifacts/). Orchestrator expands one artifacts-task into N
