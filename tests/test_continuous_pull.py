@@ -311,3 +311,62 @@ def test_pull_loop_repumps_while_a_call_hangs(tmp_path, monkeypatch):
     )
     a_release.set()
     runner.join(timeout=10)
+
+
+def test_dependent_revives_when_its_dependency_recovers(tmp_path, monkeypatch):
+    """A dependency reaching a terminal-fail state cascades its dependents to
+    BLOCKED, but the recovery paths can complete that same dependency. The
+    dependent must return to the queue and run — otherwise the repair lands and
+    the goal still ships around the hole the repair just filled."""
+    orch = _orch(tmp_path, monkeypatch)
+    dep = _task("CPL-T-001")
+    dependent = _task("CPL-T-002", deps=["CPL-T-001"])
+    other = _task("CPL-T-003")
+    dep.status = TaskStatus.QC_REJECTED          # terminal-fail: cascades T-002
+
+    ran: list[str] = []
+
+    def _run_task(t, summary, initial_corrective_notes=""):
+        ran.append(t.id)
+        t.status = TaskStatus.COMPLETED
+        if t.id == "CPL-T-003":
+            dep.status = TaskStatus.COMPLETED    # a rescue lands on the dependency
+
+    orch._run_task_with_redo = _run_task  # type: ignore[assignment]
+    _run(orch, [dep, dependent, other])
+
+    assert dependent.status == TaskStatus.COMPLETED
+    assert "CPL-T-002" in ran, "the dependent never returned to the queue"
+    # The reversal is recorded, not silent: the block and its undo both appear.
+    states = [tr.to_state for tr in dependent.transitions]
+    assert TaskStatus.BLOCKED.value in states
+    assert states[-1] != TaskStatus.BLOCKED.value
+
+
+def test_block_that_cannot_recover_is_not_revived(tmp_path, monkeypatch):
+    """Only a dependency block is reversible. A block whose cause cannot recover
+    — an artifact-path conflict here — must stay blocked even when the task has
+    never run and has no failed dependency."""
+    from modulatio.orchestration import _PATH_CONFLICT_MARKER
+    from modulatio.types import StateTransition
+
+    orch = _orch(tmp_path, monkeypatch)
+    conflicted = _task("CPL-T-001")
+    other = _task("CPL-T-002")
+    conflicted.transitions.append(StateTransition(
+        from_state=TaskStatus.PENDING.value, to_state=TaskStatus.BLOCKED.value,
+        actor="planner", rationale=f"wave {_PATH_CONFLICT_MARKER} on 'a.md'",
+    ))
+    conflicted.status = TaskStatus.BLOCKED
+
+    ran: list[str] = []
+
+    def _run_task(t, summary, initial_corrective_notes=""):
+        ran.append(t.id)
+        t.status = TaskStatus.COMPLETED
+
+    orch._run_task_with_redo = _run_task  # type: ignore[assignment]
+    _run(orch, [conflicted, other])
+
+    assert conflicted.status == TaskStatus.BLOCKED
+    assert "CPL-T-001" not in ran

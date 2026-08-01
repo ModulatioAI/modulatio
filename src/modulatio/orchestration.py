@@ -252,6 +252,11 @@ _LEADER_FIX_DEADLINE_S = 900.0
 #: both sides reference, never on free-form rationale prose that can drift).
 _ENV_BLOCK_RATIONALE_PREFIX = "environmental defect:"
 _PATH_CONFLICT_MARKER = "artifact-path conflict"
+#: Stamped when a task is blocked because a dependency reached a terminal-fail
+#: state, and read back to tell that block apart from the ones that must never
+#: be reconsidered — a path conflict, a decomposed parent, a saturated roster.
+#: Only a dependency block is reversible, because only its cause can recover.
+_DEP_FAILED_MARKER = "dependency failed"
 
 #: The Leader-converse chat loop's task_id. Bound as a constant because two
 #: sides reference it: the converse call site, and the metered-authorizer
@@ -10049,6 +10054,41 @@ class Orchestrator:
             except ToolBudgetConflict:
                 self._merge_save(child, summary)
 
+        def _revive_dep_unblocked() -> None:
+            """Return to the queue any task blocked by a dependency that has
+            since recovered.
+
+            Blocking on a failed dependency records a snapshot, but the recovery
+            paths can complete the very task a block names. Without this the
+            repair lands and the dependent stays dead, so a goal ships around a
+            hole its own recovery already filled. Reversible only for a
+            dependency block: a path conflict, a decomposed parent and a
+            saturated roster are blocks whose cause cannot recover, so they are
+            identified by the marker their writer stamps and left alone.
+            """
+            for t in tasks:
+                if t.status is not TaskStatus.BLOCKED or not t.transitions:
+                    continue
+                last = t.transitions[-1]
+                if last.to_state != TaskStatus.BLOCKED.value:
+                    continue
+                if _DEP_FAILED_MARKER not in last.rationale:
+                    continue
+                if _dep_failed(t, task_map, cross_goal_status):
+                    continue
+                t.transitions.append(StateTransition(
+                    from_state=t.status.value, to_state=TaskStatus.PENDING.value,
+                    actor="planner",
+                    rationale="dependency recovered; returned to the queue",
+                ))
+                t.status = TaskStatus.PENDING
+                # The wave merge refuses to move a terminal record back, so a
+                # stale worker snapshot cannot resurrect a settled task. This
+                # reopen is authoritative rather than stale, so it writes
+                # directly — the same route the leader's redo takes. The task
+                # never ran, so there is no attempt state to clear with it.
+                store.save_task(self.project.code, t, run_id=self.project.run_id)
+
         def _cascade_dep_failures() -> None:
             for t in tasks:
                 if not _runnable(t):
@@ -10058,7 +10098,7 @@ class Orchestrator:
                     t.transitions.append(StateTransition(
                         from_state=t.status.value, to_state=TaskStatus.BLOCKED.value,
                         actor="planner",
-                        rationale=f"dependency failed: {fd}; producer skipped",
+                        rationale=f"{_DEP_FAILED_MARKER}: {fd}; producer skipped",
                     ))
                     t.status = TaskStatus.BLOCKED
                     summary.errors.append(f"{t.id}: blocked by failed dependency {fd}")
@@ -10127,6 +10167,7 @@ class Orchestrator:
                         ctx.run, self._execute_task_isolated, t, initial_corrective_notes,
                     )] = t.id
 
+            _revive_dep_unblocked()
             _cascade_dep_failures()
             _pump()
             while futures:
@@ -10151,6 +10192,7 @@ class Orchestrator:
                         # J1: release agent + path + id together on EVERY exit
                         # (success, BLOCKED, crash, cancel).
                         in_flight.pop(tid, None)
+                _revive_dep_unblocked()
                 _cascade_dep_failures()
                 # R4: reflect only when the ready set GREW (a dependency boundary
                 # moved), over not-in-flight tasks only (W3).
@@ -16245,7 +16287,7 @@ class Orchestrator:
                     from_state=t.status.value,
                     to_state=TaskStatus.BLOCKED.value,
                     actor="planner",
-                    rationale=f"dependency failed: {fd}; producer skipped",
+                    rationale=f"{_DEP_FAILED_MARKER}: {fd}; producer skipped",
                 ))
                 t.status = TaskStatus.BLOCKED
                 summary.errors.append(
@@ -17359,7 +17401,7 @@ class Orchestrator:
                             to_state=TaskStatus.BLOCKED.value,
                             actor="planner",
                             rationale=(
-                                f"dependency failed: {failed_deps}; "
+                                f"{_DEP_FAILED_MARKER}: {failed_deps}; "
                                 f"producer skipped"
                             ),
                         )
