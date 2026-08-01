@@ -23,6 +23,8 @@ be churn for no benefit on the non-tool paths.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import hashlib
 import json
 import logging
@@ -540,6 +542,10 @@ def _hard_deadline(fn, *, timeout_s: float, describe: str):
 
     def wrapper(*args, **kwargs):
         box: list = []
+        # Resolved per call: a caller that has declared its call does a
+        # producer's work needs a producer's span, and the runner this wraps
+        # was built once with a single bound.
+        deadline = _call_deadline.get() or timeout_s
 
         ctx = contextvars.copy_context()
 
@@ -552,7 +558,7 @@ def _hard_deadline(fn, *, timeout_s: float, describe: str):
         thread = threading.Thread(
             target=_target, name=f"seat-call:{describe}"[:60], daemon=True)
         thread.start()
-        thread.join(timeout_s + _HARD_DEADLINE_GRACE_S)
+        thread.join(deadline + _HARD_DEADLINE_GRACE_S)
         if box:
             kind, payload = box[0]
             if kind == "ok":
@@ -565,7 +571,7 @@ def _hard_deadline(fn, *, timeout_s: float, describe: str):
             logstore.write_error_log(
                 f"seat call hard-timeout: {describe}",
                 detail=_dump_all_thread_stacks(),
-                context={"describe": describe, "timeout_s": timeout_s,
+                context={"describe": describe, "timeout_s": deadline,
                          "grace_s": _HARD_DEADLINE_GRACE_S},
             )
         except Exception:  # noqa: BLE001 — the release must never fail on a log write
@@ -578,11 +584,11 @@ def _hard_deadline(fn, *, timeout_s: float, describe: str):
             "releasing the seat; the wedged call's thread is abandoned "
             "(native TID %s, %d live zombie(s) in this process). Stack dump in "
             "the LOGS tab; py-spy/gdb that TID for a C-level stall.",
-            describe, timeout_s, _HARD_DEADLINE_GRACE_S,
+            describe, deadline, _HARD_DEADLINE_GRACE_S,
             thread.native_id, len(_ABANDONED_CALL_THREADS),
         )
         raise SeatCallHardTimeout(
-            f"{describe}: no result within {timeout_s}s "
+            f"{describe}: no result within {deadline}s "
             f"(+{_HARD_DEADLINE_GRACE_S}s grace) — seat released, "
             f"call thread abandoned"
         )
@@ -706,6 +712,38 @@ def run_with_model_fallbacks(
 _DEFAULT_CALL_TIMEOUT = 600.0
 
 
+#: Multiple of the per-call timeout allowed to a call that AUTHORS a deliverable
+#: rather than reviewing one. Authoring writes the whole artifact from its brief
+#: where a review writes a verdict about one, so it needs a producer's span; the
+#: factor keeps the two in step when the base timeout is tuned.
+_AUTHORING_TIMEOUT_FACTOR = 3.0
+
+#: Per-call deadline in force, when a caller has declared one. Bound around a
+#: call rather than baked into a runner: both runner pools are constructed once
+#: at kickoff, so a runner cannot carry a deadline that varies by what the call
+#: is for.
+_call_deadline: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "modulatio_call_deadline", default=None
+)
+
+
+@contextlib.contextmanager
+def authoring_deadline():
+    """Give calls made inside this block the span of a call that writes a
+    deliverable rather than one that reviews it.
+
+    Both bounds that would otherwise cut such a call short read this when the
+    call is made — the hard kill-boundary and the provider request timeout — so
+    one binding covers both. Nested bindings do not compound; the innermost
+    wins and the previous value is restored on exit.
+    """
+    token = _call_deadline.set(_default_call_timeout() * _AUTHORING_TIMEOUT_FACTOR)
+    try:
+        yield
+    finally:
+        _call_deadline.reset(token)
+
+
 def _default_call_timeout() -> float:
     """Resolve the per-completion timeout from MODULATIO_CALL_TIMEOUT, falling
     back to :data:`_DEFAULT_CALL_TIMEOUT` when unset, unparseable, or <= 0."""
@@ -784,8 +822,9 @@ def litellm_runner(
     clear any prior alert for the provider so the banner self-heals.
 
     ``timeout`` bounds a single completion (the idle-stall watchdog). ``None``
-    resolves to :func:`_default_call_timeout` (300s, MODULATIO_CALL_TIMEOUT-
-    tunable) so a hung call aborts there rather than waiting out a 30-min cap;
+    resolves to :func:`_default_call_timeout` (MODULATIO_CALL_TIMEOUT-tunable,
+    :data:`_DEFAULT_CALL_TIMEOUT` otherwise) so a hung call aborts there rather
+    than waiting out a 30-min cap;
     an explicit value is honored unchanged. ``disable_thinking`` prepends
     ``/no_think`` — reasoning-class models that emit ``<think>`` blocks honor
     this and skip the inner-monologue output.
@@ -866,6 +905,12 @@ def litellm_runner(
         # THIS request — never the construction-resolved base key (which may be
         # pinned). Empty pool ⇒ a clear needs-setup error, never a borrowed key.
         call_kwargs = dict(kwargs)
+        # The request bound is baked in at construction; a call that authors a
+        # deliverable outlives a reviewer's and would otherwise be cut here
+        # before the kill-boundary ever considered it.
+        _declared = _call_deadline.get()
+        if _declared:
+            call_kwargs["timeout"] = _declared
         if pool_base is not None:
             call_kwargs["api_key"] = _pooled_call_key(pool_base, model)
 

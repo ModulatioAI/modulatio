@@ -11285,7 +11285,13 @@ class Orchestrator:
             # A repair edits within the sealed convention — it can never
             # invent a second one.
             prompt = prompt + "\n\n" + convention
-        raw = self._run_agent_call(t.qc_agent_id, "qc", prompt, task_id=t.id)
+        # Writing the artifact is a producer's work on a reviewer's seat: it
+        # emits a whole deliverable where a verdict is a few paragraphs, so the
+        # bound sized for reviewing would cut the repair off mid-write.
+        from modulatio import runners as _runners
+
+        with _runners.authoring_deadline():
+            raw = self._run_agent_call(t.qc_agent_id, "qc", prompt, task_id=t.id)
         return self._persist_qc_authored(t, draft_path, raw)
 
     def _qc_build_artifact(self, t: Task, draft_path: "Path", defects: str) -> str:
@@ -11309,7 +11315,13 @@ class Orchestrator:
             # Authoring from the contract still builds inside the sealed
             # convention — same rendered truth as the producer path.
             prompt = prompt + "\n\n" + convention
-        raw = self._run_agent_call(t.qc_agent_id, "qc", prompt, task_id=t.id)
+        # Writing the artifact is a producer's work on a reviewer's seat: it
+        # emits a whole deliverable where a verdict is a few paragraphs, so the
+        # bound sized for reviewing would cut the repair off mid-write.
+        from modulatio import runners as _runners
+
+        with _runners.authoring_deadline():
+            raw = self._run_agent_call(t.qc_agent_id, "qc", prompt, task_id=t.id)
         return self._persist_qc_authored(t, draft_path, raw)
 
     def _persist_qc_authored(self, t: Task, draft_path: "Path", raw: str) -> str:

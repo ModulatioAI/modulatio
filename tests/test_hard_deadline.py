@@ -215,3 +215,60 @@ def test_clay_runners_never_wear_the_deadline(monkeypatch, zero_grace):
     assert not hasattr(single, "_hard_deadline_s")
     chat = litellm_chat_runner("clayseat")
     assert not hasattr(chat, "_hard_deadline_s")
+
+
+def test_authoring_deadline_extends_the_kill_boundary(zero_grace, crash_dir):
+    """A call bound as authoring survives past the deadline its runner was built
+    with. Runners are constructed once, so the bound a call needs cannot be baked
+    into them — the boundary resolves it when the call is made."""
+    from modulatio.runners import authoring_deadline
+
+    guarded = _hard_deadline(
+        lambda: time.sleep(0.4), timeout_s=0.1, describe="slow author")
+
+    with pytest.raises(SeatCallHardTimeout):
+        guarded()                       # review-sized bound: cut off
+
+    with authoring_deadline():
+        assert guarded() is None        # authoring bound: allowed to finish
+
+
+def test_authoring_deadline_restores_the_previous_bound(zero_grace, crash_dir):
+    """The binding is scoped to its block: a call made after it has left uses the
+    bound its runner carries, so one repair cannot widen the whole run."""
+    from modulatio.runners import authoring_deadline
+
+    guarded = _hard_deadline(
+        lambda: time.sleep(0.4), timeout_s=0.1, describe="slow author")
+
+    with authoring_deadline():
+        guarded()
+
+    with pytest.raises(SeatCallHardTimeout):
+        guarded()
+
+
+def test_authoring_deadline_also_raises_the_request_bound(monkeypatch):
+    """The provider request timeout is baked in at runner construction, so it
+    would cut an authoring call off before the kill-boundary considered it. The
+    bound in force when the call is made is what reaches the provider."""
+    import litellm
+
+    from modulatio import runners as _r
+
+    seen: dict = {}
+
+    def _fake_completion(model, messages, **kwargs):
+        seen["timeout"] = kwargs.get("timeout")
+        raise RuntimeError("the kwargs are the assertion")
+
+    monkeypatch.setattr(litellm, "completion", _fake_completion)
+    runner = _r.litellm_runner("openai/gpt-4o-mini", timeout=90.0)
+
+    with pytest.raises(Exception):
+        runner("hello")
+    assert seen["timeout"] == 90.0
+
+    with _r.authoring_deadline(), pytest.raises(Exception):
+        runner("hello")
+    assert seen["timeout"] == _r._default_call_timeout() * _r._AUTHORING_TIMEOUT_FACTOR
