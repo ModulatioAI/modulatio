@@ -7776,6 +7776,49 @@ def test_kickoff_provider_unavailable_fails_loudly(project, monkeypatch):
     )
 
 
+def test_kickoff_failure_is_captured_before_it_propagates(project, monkeypatch):
+    """A run killed by an unhandled exception records the terminating error, and
+    still raises. The caller renders only the message, so without the capture the
+    cause of a dead run survives nowhere on disk."""
+    import pytest as _pytest
+
+    from modulatio import logstore
+
+    orch = _qcfix_orch(project)
+
+    def _boom(*a, **k):
+        raise RuntimeError("APIError: upstream closed (request id req-abc123)")
+
+    monkeypatch.setattr(orch, "_kickoff_inner", _boom)
+
+    with _pytest.raises(RuntimeError):
+        orch.kickoff("research the thing")
+
+    errors = [e for e in logstore.list_logs() if e.kind == "error"]
+    assert errors, "the terminating error left no log"
+    text = errors[0].path.read_text(encoding="utf-8")
+    # The exception type and the provider's request id both survive: the id is the
+    # only handle a support query has.
+    assert "RuntimeError" in text
+    assert "req-abc123" in text
+    assert project.code in text
+
+
+def test_kickoff_provider_unavailable_still_returns_a_summary(project, monkeypatch):
+    """The provider-unavailable path stays a loud RETURN, not a raise — the broad
+    capture added for unhandled failures must not swallow its more specific clause."""
+    from modulatio.claude_cli import ClaudeUnavailable
+    from modulatio.orchestration import RunSummary
+
+    orch = _qcfix_orch(project)
+
+    def _unavail(*a, **k):
+        raise ClaudeUnavailable("API Error: 529 Overloaded")
+
+    monkeypatch.setattr(orch, "_kickoff_inner", _unavail)
+    assert isinstance(orch.kickoff("research the thing"), RunSummary)
+
+
 def test_non_exhaustion_exception_still_blocks(project, monkeypatch):
     """#2b guard: a GENUINE runtime crash (not producer-exhaustion) still goes
     BLOCKED — the backstop only catches recoverable exhaustion, never masks a bug."""

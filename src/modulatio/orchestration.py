@@ -16613,6 +16613,27 @@ class Orchestrator:
             # CRITICAL ticket + an actionable "change your Leader's primary model"
             # message, never a traceback to the operator.
             return self._fail_kickoff_provider_unavailable(exc)
+        except Exception as exc:
+            # Any other failure ends the run wherever it happened and propagates to
+            # the caller, which renders only the message — so the terminating error
+            # would otherwise survive nowhere on disk. Capture it, then re-raise so
+            # the caller's own handling is unchanged. A provider error carries its
+            # request id in the message, the one handle a support query needs.
+            try:
+                from modulatio import logstore
+
+                logstore.write_error_log(
+                    f"run failed: {type(exc).__name__}: {exc}",
+                    exc=exc,
+                    context={
+                        "surface": "kickoff",
+                        "project": self.project.code,
+                        "run_id": self.project.run_id or "",
+                    },
+                )
+            except Exception:  # noqa: BLE001 — capture must not mask the failure
+                pass
+            raise
         finally:
             self._kickoff_active = False
 
