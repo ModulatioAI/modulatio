@@ -6609,6 +6609,7 @@ class Orchestrator:
         had standing write access to the shared library but no way to know
         where it lives, so every read_file came back 'does not exist')."""
         from modulatio import config as _config
+        from modulatio import delivery as _delivery
         from modulatio import vault as _vault
         lib = Path(_config.get_shared_resources_path()) / "skills"
         return (
@@ -6621,7 +6622,17 @@ class Orchestrator:
             "through your FILE tools, no permission needed. Your shell runs in "
             "your workspace and the shared library only; the vault and config "
             "are file-tools-only. Paths outside your home go through the "
-            "operator gate."
+            "operator gate.\n\n"
+            "## Where finished work goes\n\n"
+            f"- the delivery folder for this project: "
+            f"{_delivery.project_delivery_dir(self.project.code)}\n\n"
+            "This is where the operator collects finished work, and it is "
+            "OUTSIDE your home — writing there asks them once, which is the "
+            "intended way to hand something over. Your workspace is a desk, not "
+            "a destination: work you have finished on the operator's behalf "
+            "belongs in the delivery folder, and work left in your workspace "
+            "has not been handed over. If you leave something staged there "
+            "deliberately, say so and give its full path."
         )
 
     def _with_producer_runbook(self, prompt: str, task: "Task | None" = None) -> str:

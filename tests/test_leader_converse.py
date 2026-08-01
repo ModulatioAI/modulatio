@@ -625,3 +625,20 @@ def test_no_block_belt_survives_broken_persist_and_activity(
     monkeypatch.setattr(orch, "_emit_activity", flaky_emit)
     reply = orch.converse("read something")
     assert "turn failed before I could reply: boom" in reply
+
+
+def test_converse_prompt_names_the_delivery_folder(project: Project):
+    """A grant without an address is unreachable. The Leader can write outside
+    its workspace through the operator gate, but only to a path it can name —
+    so the place finished work is collected has to be in the prompt, like every
+    other address it is expected to reach."""
+    from modulatio import delivery
+
+    orch = Orchestrator(project, _runners())
+    prompt = orch._build_converse_prompt([], "hi")
+
+    assert str(delivery.project_delivery_dir(project.code)) in prompt
+    # And it is framed as a handover, so work is not left on the desk as done.
+    lowered = prompt.lower()
+    assert "delivery folder" in lowered
+    assert "workspace" in lowered
