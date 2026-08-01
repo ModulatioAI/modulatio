@@ -13467,3 +13467,76 @@ def test_hole_is_filled_without_re_engaging_accepted_work(project: Project):
 
     # The producer failure is still named rather than smoothed over.
     assert any("simulated model stall" in e for e in summary.errors)
+
+
+def test_unexecutable_plan_is_replanned_with_the_reason(project: Project):
+    """A plan refused for its shape is a fault the refusal describes, so the
+    planner is given the reason and asked again rather than the goal being
+    written off on one attempt."""
+    seen: list[str] = []
+
+    def _planner_cycles_once(prompt: str) -> str:
+        seen.append(prompt)
+        if len(seen) == 1:
+            # Two tasks each depending on the other — unexecutable.
+            plan = [
+                {"description": "module A", "assignee_specialist": "drafter",
+                 "artifact_kind": "essay", "depends_on": [1],
+                 "evidence_required": [{"kind": "artifact", "description": "a"}]},
+                {"description": "module B", "assignee_specialist": "drafter",
+                 "artifact_kind": "essay", "depends_on": [0],
+                 "evidence_required": [{"kind": "artifact", "description": "b"}]},
+            ]
+            return f"```json\n{json.dumps(plan)}\n```"
+        return _planner_stub(prompt)
+
+    runners = {
+        "leader": _leader_stub, "planner": _planner_cycles_once,
+        "drafter": _drafter_stub, "qc": _qc_stub,
+    }
+    Orchestrator(project, runners).kickoff("Draft 3 essays on a chosen theme")
+
+    assert len(seen) == 2, "the planner must be asked a second time"
+    # The second ask carries what was wrong, so the retry is not made blind.
+    assert "cycle" in seen[1].lower()
+    # And the run proceeds on the replanned graph rather than settling blocked.
+    goals = store.list_goals(PROJECT_CODE)
+    assert goals[0].status is not GoalStatus.BLOCKED
+    assert any(t.status is TaskStatus.COMPLETED
+               for t in store.list_tasks(PROJECT_CODE))
+
+
+def test_a_plan_that_stays_unexecutable_is_rejected(project: Project):
+    """The attempts are bounded. A planner that cannot produce an executable
+    graph settles the goal as a rejection rather than looping, and never
+    dispatches a task set that cannot run."""
+    asks: list[str] = []
+
+    def _planner_always_cycles(prompt: str) -> str:
+        asks.append(prompt)
+        plan = [
+            {"description": "module A", "assignee_specialist": "drafter",
+             "artifact_kind": "essay", "depends_on": [1],
+             "evidence_required": [{"kind": "artifact", "description": "a"}]},
+            {"description": "module B", "assignee_specialist": "drafter",
+             "artifact_kind": "essay", "depends_on": [0],
+             "evidence_required": [{"kind": "artifact", "description": "b"}]},
+        ]
+        return f"```json\n{json.dumps(plan)}\n```"
+
+    ran: list[str] = []
+
+    def _drafter_records(prompt: str) -> str:
+        ran.append(prompt)
+        return _drafter_stub(prompt)
+
+    runners = {
+        "leader": _leader_stub, "planner": _planner_always_cycles,
+        "drafter": _drafter_records, "qc": _qc_stub,
+    }
+    summary = Orchestrator(project, runners).kickoff("Draft 3 essays on a theme")
+
+    assert len(asks) == 2, "bounded — not retried without limit"
+    assert ran == [], "no producer runs against a plan that cannot execute"
+    assert store.list_goals(PROJECT_CODE)[0].status is GoalStatus.BLOCKED
+    assert any("plan rejected" in e for e in summary.errors)

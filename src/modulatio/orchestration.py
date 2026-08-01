@@ -258,6 +258,13 @@ _PATH_CONFLICT_MARKER = "artifact-path conflict"
 #: Only a dependency block is reversible, because only its cause can recover.
 _DEP_FAILED_MARKER = "dependency failed"
 
+#: Attempts allowed at producing an EXECUTABLE task plan for one goal. A plan
+#: refused for its shape — a cycle, an unknown reference — is a fault the
+#: refusal itself describes, so a second attempt with that reason in hand is
+#: worth one call; beyond that the goal is settled rather than retried at
+#: length, since nothing outside the engine is going to change.
+_PLAN_ATTEMPTS = 2
+
 #: A goal that has settled, however it settled. Named once because several call
 #: sites ask "is this goal still live?" and a terminal that one of them missed
 #: would leave a finished goal looking runnable.
@@ -4090,7 +4097,7 @@ class Orchestrator:
         return out
 
     # ── Task planning: goal → tasks ──────────────────────────────────────
-    def _plan_tasks(self, goal: Goal) -> list[Task]:
+    def _plan_tasks(self, goal: Goal, corrective_notes: str = "") -> list[Task]:
         # Step 0 M3 : the LLM call below
         # dispatches via self._run("planner", prompt). The activity
         # event must reflect that — pre-fix it emitted role="leader",
@@ -4133,6 +4140,12 @@ class Orchestrator:
             team_capacity=_format_team_capacity(roster_agents),
             inbox_notes=self._inbox_block_for("leader", target_agent_id="leader"),
         )
+        if corrective_notes.strip():
+            # A plan can be refused for being unexecutable rather than wrong in
+            # content — a cycle, an unknown reference, a target outside the
+            # root. The refusal names what is wrong, so the second attempt is
+            # given it rather than made blind.
+            prompt = f"{prompt}\n\n{_format_corrective_notes(corrective_notes)}"
         response = self._run("planner", prompt)
         data = _extract_json(response)
         if not isinstance(data, list):
@@ -17231,47 +17244,69 @@ class Orchestrator:
             # time for bad output_path / malformed artifacts entries.
             # No Task objects constructed in that case — ticket fires
             # against the goal with empty task list.
-            try:
-                tasks = self._plan_tasks(g)
-            except _PlanError as exc:
-                self._reject_task_plan(g, [], str(exc), summary)
-                continue
+            # A plan can be refused for being UNEXECUTABLE rather than wrong in
+            # content — a cycle, an unknown reference, a malformed target. That
+            # is a fault in the plan's own shape, with nothing outside the engine
+            # at issue, and the refusal names exactly what is wrong. So hand the
+            # reason back and let the planner answer it before the goal is
+            # written off: a plan nobody can execute is the planning-layer form
+            # of producing nothing, and the same discipline applies — try again
+            # with the reason in hand, and disclose what survives.
+            correction = ""
+            plan_reason = ""
+            plan_tasks: list[Task] = []
+            for _ in range(_PLAN_ATTEMPTS):
+                plan_reason, plan_tasks = "", []
+                try:
+                    tasks = self._plan_tasks(g, correction)
+                except _PlanError as exc:
+                    correction = plan_reason = str(exc)
+                    continue
 
-            # Slice #7a: topologically sort tasks so execution respects
-            # declared dependencies. On cycle or unknown-ref, reject
-            # the whole plan — open a CRITICAL ticket, mark every task
-            # BLOCKED, skip producer/QC/Leader-verify. That's a bad
-            # plan output case, same shape as #6d capability tickets.
-            # Order on intra-goal edges. An assembler task can legitimately
-            # depend on a PRIOR goal's unit tasks (cross-goal ids absent from
-            # this goal's `tasks`); feeding those to _topological_sort makes it
-            # raise and reject the whole plan (#11628 — the same hazard the
-            # resume path guards at ~10880). But a genuinely unknown ref (a
-            # planner typo, e.g. an out-of-range index) must STILL reject (the
-            # #7a safety gate). So filter out ONLY deps that resolve to a real
-            # task elsewhere in this run — a VALIDATED cross-goal edge; an id
-            # that resolves to nothing stays in and trips _topological_sort. The
-            # cross-goal deps remain on the real tasks for execution-time
-            # enforcement (_dep_failed / _ready_wave treat an absent dep as a
-            # satisfied prior-goal completion). A real intra-goal cycle rejects.
-            _tmap_topo = {t.id: t for t in tasks}
-            _cross_goal_ids = {
-                rt.id
-                for rt in store.list_tasks(
-                    self.project.code, run_id=self.project.run_id)
-            } - set(_tmap_topo)
-            try:
-                _ordered = _topological_sort([
-                    t.model_copy(update={
-                        "depends_on": [
-                            d for d in t.depends_on if d not in _cross_goal_ids
-                        ]
-                    })
-                    for t in tasks
-                ])
-                tasks = [_tmap_topo[v.id] for v in _ordered]
-            except _DependencyError as exc:
-                self._reject_task_plan(g, tasks, exc.reason, summary)
+                # Slice #7a: topologically sort tasks so execution respects
+                # declared dependencies. On cycle or unknown-ref, reject
+                # the whole plan — open a CRITICAL ticket, mark every task
+                # BLOCKED, skip producer/QC/Leader-verify. That's a bad
+                # plan output case, same shape as #6d capability tickets.
+                # Order on intra-goal edges. An assembler task can legitimately
+                # depend on a PRIOR goal's unit tasks (cross-goal ids absent from
+                # this goal's `tasks`); feeding those to _topological_sort makes it
+                # raise and reject the whole plan (the same hazard the
+                # resume path guards). But a genuinely unknown ref (a
+                # planner typo, e.g. an out-of-range index) must STILL reject (the
+                # #7a safety gate). So filter out ONLY deps that resolve to a real
+                # task elsewhere in this run — a VALIDATED cross-goal edge; an id
+                # that resolves to nothing stays in and trips _topological_sort. The
+                # cross-goal deps remain on the real tasks for execution-time
+                # enforcement (_dep_failed / _ready_wave treat an absent dep as a
+                # satisfied prior-goal completion). A real intra-goal cycle rejects.
+                _tmap_topo = {t.id: t for t in tasks}
+                _cross_goal_ids = {
+                    rt.id
+                    for rt in store.list_tasks(
+                        self.project.code, run_id=self.project.run_id)
+                } - set(_tmap_topo)
+                try:
+                    _ordered = _topological_sort([
+                        t.model_copy(update={
+                            "depends_on": [
+                                d for d in t.depends_on if d not in _cross_goal_ids
+                            ]
+                        })
+                        for t in tasks
+                    ])
+                    tasks = [_tmap_topo[v.id] for v in _ordered]
+                except _DependencyError as exc:
+                    correction = plan_reason = exc.reason
+                    plan_tasks = tasks
+                    continue
+                break
+
+            if plan_reason:
+                # The planner was given the reason and still could not produce an
+                # executable plan. Settle it as a rejection rather than dispatch a
+                # graph that cannot run.
+                self._reject_task_plan(g, plan_tasks, plan_reason, summary)
                 continue
 
             # Convention sealing: one settled naming/layout authority per
