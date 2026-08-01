@@ -13873,6 +13873,7 @@ class Orchestrator:
             )
             verdict = "disappointed"
 
+
         # Record the FINAL effective verdict (post-clamp) so the run's sign-off
         # is surfaceable — the TUI shows the actual verdict + a PQR digest instead
         # of a bare stats line. A redone goal re-enters here and appends again, so
@@ -14215,6 +14216,24 @@ class Orchestrator:
         # Leader's reservations; the human reads them in the Product Quality
         # Report and decides what to double-check. No tickets.
         #
+        # A hole is measured, not judged: a declared output with nothing on disk,
+        # or a task that never finished, is missing work whatever the verdict
+        # concluded about fitness, and a verdict of fitness must not be able to
+        # wave one through. Ask the producer of last resort for the missing
+        # pieces before settling. It skips tasks already COMPLETED, so this
+        # repairs the hole without re-doing work that was accepted — and a piece
+        # authored to a lower bar is still preferable to a piece that is absent,
+        # since quality rides out in the report while absence cannot. One sweep
+        # per goal bounds the recursion.
+        if self._goal_holes(tasks) and goal.id not in self._goal_qc_swept:
+            self._goal_qc_swept.add(goal.id)
+            if self._qc_last_resort_sweep(goal, tasks, summary):
+                self._emit_activity(
+                    role="leader", phase="leader_verify_ended", agent_id="leader",
+                )
+                self._leader_verify_goal(goal, tasks, summary)
+                return
+
         # Which terminal depends on whether anything it owed is still missing.
         # Control only reaches here once the recovery ladder is spent — a redo
         # window if the budget allowed one, then QC's last-resort sweep to

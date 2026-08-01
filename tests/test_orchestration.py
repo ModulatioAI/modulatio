@@ -4452,16 +4452,12 @@ def test_qc_retries_once_on_transient_parse_failure(project: Project):
     assert call_count["n"] == 4
 
 
-def test_orchestrator_blocks_failing_task_but_completes_others(project: Project):
-    """One drafter task consistently failing must not abort the whole pass.
+def test_failing_task_does_not_abort_the_pass(project: Project):
+    """One drafter task failing every attempt must not abort the whole pass.
 
-    With the redo loop in slice #3, transient failures are retried; only
-    tasks whose every attempt raises stay terminally BLOCKED. The Leader
-    verify pass renders on_the_fence (reservations about the blocked task).
-    Post-2026-05-30 on_the_fence SHIPS (the run is never blocked on the
-    Leader's reservations) — the goal COMPLETES and the blocked task is
-    still surfaced in errors and caught by the task-level delivery
-    withhold guard, so a product built on it won't ship silently.
+    Its siblings still run and complete on their own attempts. The piece it
+    never wrote is a hole, so the backstop authors it rather than let the goal
+    settle short, and the goal completes with all three in hand.
     """
 
     def _drafter_fails_for_task_2(prompt: str) -> str:
@@ -4480,27 +4476,17 @@ def test_orchestrator_blocks_failing_task_but_completes_others(project: Project)
 
     tasks = store.list_tasks(PROJECT_CODE)
     statuses = [t.status for t in tasks]
-    assert statuses.count(TaskStatus.COMPLETED) == 2
-    assert statuses.count(TaskStatus.BLOCKED) == 1
+    assert statuses.count(TaskStatus.COMPLETED) == 3
+    assert statuses.count(TaskStatus.BLOCKED) == 0
 
-    # One error names the blocked task and why it stalled; a second names the
-    # goal as settling without it, so neither the cause nor the shortfall is
-    # something the operator has to infer.
-    blocked_task = next(t for t in tasks if t.status == TaskStatus.BLOCKED)
-    task_errors = [e for e in summary.errors if "simulated model stall" in e]
-    assert len(task_errors) == 1
-    assert blocked_task.id in task_errors[0]
-    assert any(
-        blocked_task.id in e and "INCOMPLETE" in e for e in summary.errors
-    )
+    # The producer failure is still named, so a rescued piece is reported
+    # rather than passed off as a clean pass.
+    assert any("simulated model stall" in e for e in summary.errors)
 
-    # Goal ships (on_the_fence no longer blocks); the blocked task is
-    # surfaced in errors above and guarded at delivery, not via goal status.
+    # Nothing is missing, so the goal settles completed; how good the rescued
+    # piece is belongs in the quality report, not in the terminal state.
     goals = store.list_goals(PROJECT_CODE)
-    assert goals[0].status == GoalStatus.INCOMPLETE
-
-    # Only the 2 successful tasks yielded drafts.
-    assert len(summary.drafts) == 2
+    assert goals[0].status == GoalStatus.COMPLETED
 
 
 # ─── Slice #3 redo loop ─────────────────────────────────────────────────────
@@ -9394,7 +9380,13 @@ def test_run_task_waves_records_blocked_on_worker_crash(project: Project, monkey
     by_desc = {t.description: t for t in store.list_tasks(PROJECT_CODE)}
     crashed = next(t for d, t in by_desc.items() if "CRASHME" in d)
     sibling = next(t for d, t in by_desc.items() if "CRASHME" not in d)
-    assert crashed.status is TaskStatus.BLOCKED, "crashed worker → BLOCKED, not vanished"
+    # A crash leaves the same shape as any other unwritten piece — a hole — and
+    # is treated the same way: the backstop authors it so the goal is not a
+    # piece short, and the rescue flag keeps it legible as rescued rather than
+    # produced. The crash itself is recorded separately; filling it does not
+    # conceal it.
+    assert crashed.status is TaskStatus.COMPLETED, "the hole is filled, not shipped"
+    assert crashed.qc_authored_fix is True, "a rescue must be legible as a rescue"
     assert sibling.status is TaskStatus.COMPLETED, "sibling still merges despite the crash"
 
 
@@ -13439,3 +13431,39 @@ def test_fatal_run_terminalizes_its_live_goals(project, monkeypatch):
     assert settled.status is GoalStatus.INCOMPLETE
     # The cause travels with the state, so the record says why it stopped.
     assert "RuntimeError" in settled.transitions[-1].rationale
+
+
+def test_hole_is_filled_without_re_engaging_accepted_work(project: Project):
+    """Filling a hole must cost only the hole. The piece the producer never
+    wrote is authored so the goal is not a piece short, while artifacts already
+    accepted are left exactly as they were — not re-reviewed, not re-authored,
+    not re-run. Repairing the gap must never become redoing the batch."""
+    def _drafter_fails_for_task_2(prompt: str) -> str:
+        if "Draft essay 2" in prompt:
+            raise RuntimeError("simulated model stall")
+        return _drafter_stub(prompt)
+
+    runners = {
+        "leader": _leader_with_verdict("on_the_fence"),
+        "planner": _planner_stub,
+        "drafter": _drafter_fails_for_task_2,
+        "qc": _qc_stub,
+    }
+    summary = Orchestrator(project, runners).kickoff("Draft 3 essays on a chosen theme")
+
+    tasks = {t.description: t for t in store.list_tasks(PROJECT_CODE)}
+    holed = next(t for d, t in tasks.items() if "essay 2" in d)
+    intact = [t for d, t in tasks.items() if "essay 2" not in d]
+
+    # The hole is filled rather than shipped, and reads as a rescue.
+    assert holed.status is TaskStatus.COMPLETED
+    assert holed.qc_authored_fix is True
+
+    # The cost is bounded to the hole: nothing else was re-authored or re-run.
+    for t in intact:
+        assert t.status is TaskStatus.COMPLETED
+        assert t.qc_authored_fix is False, f"{t.id} was re-authored to fix another task"
+        assert t.lifetime_attempts == 1, f"{t.id} was re-run to fix another task"
+
+    # The producer failure is still named rather than smoothed over.
+    assert any("simulated model stall" in e for e in summary.errors)

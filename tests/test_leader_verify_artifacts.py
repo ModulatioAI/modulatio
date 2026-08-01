@@ -804,3 +804,40 @@ def test_leader_verify_churn_settles_completed_goal_without_crashing(
     assert goal.status != GoalStatus.IN_PROGRESS, (
         "the goal must be driven terminal, not stranded IN_PROGRESS"
     )
+
+
+def test_satisfied_verdict_cannot_ship_a_missing_deliverable(project, tmp_path):
+    """A declared output with nothing on disk is a measured fact, not a matter of
+    opinion. However fit the model judges the work, the goal must not settle as
+    done: the verdict clamps so the authorities that can still produce the piece
+    are asked first. Weak work ships and is reported; absent work does not."""
+    artifacts_root = tmp_path / PROJECT_CODE.lower() / "artifacts"
+    artifacts_root.mkdir(parents=True, exist_ok=True)
+
+    goal = Goal(
+        id="LVA-G-900", project_id=project.id, description="Produce the guide",
+        success_criteria="guide exists", status=GoalStatus.IN_PROGRESS,
+    )
+    store.save_goal(project.code, goal)
+    task = Task(
+        id="LVA-T-900", project_id=project.id, goal_id=goal.id,
+        description="Draft the guide",
+        output_path="never_written.md",          # nothing lands here
+        status=TaskStatus.COMPLETED,             # and the task claims success
+    )
+    _seed_task_record(project.code, task)
+
+    orch, _captured = _capturing_orch(project)   # this leader always says satisfied
+    summary = RunSummary(project=project)
+    orch._leader_verify_goal(goal, [task], summary)
+
+    assert goal.status is not GoalStatus.COMPLETED, (
+        "a goal missing a declared deliverable must not settle as completed"
+    )
+    # The producer of last resort was asked and could not author it either, so
+    # the goal reaches its terminal named for what is absent — not silently, and
+    # not as a success.
+    assert goal.status is GoalStatus.INCOMPLETE
+    joined = " ".join(summary.errors)
+    assert "never_written.md" in joined
+    assert "LVA-T-900" in joined
