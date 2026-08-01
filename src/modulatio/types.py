@@ -46,6 +46,11 @@ class GoalStatus(str, Enum):
     IN_PROGRESS = "in_progress"
     BLOCKED = "blocked"
     COMPLETED = "completed"
+    #: Terminal, like COMPLETED, but the goal finished around something it owed
+    #: — a declared artifact that does not exist, or a task that never finished.
+    #: Distinct because every surface reads the status word rather than the
+    #: rationale, and "completed" over a missing deliverable reads as success.
+    INCOMPLETE = "incomplete"
     ABANDONED = "abandoned"
 
 

@@ -787,7 +787,7 @@ def test_orchestrator_marks_task_rejected_when_qc_fails(project: Project, monkey
     # zero-completed goal settles with a reservation instead of stranding
     # IN_PROGRESS (the shared settle; the reservation is the surfacing).
     goals = store.list_goals(PROJECT_CODE)
-    assert goals[0].status == GoalStatus.COMPLETED
+    assert goals[0].status == GoalStatus.INCOMPLETE
     assert any("no completed work" in r.get("concern", "")
                for r in summary.recommendations)
 
@@ -3892,7 +3892,7 @@ def test_orchestrator_goal_settles_when_task_capability_blocked(
     summary = orch.kickoff("anything")
 
     goals = store.list_goals(PROJECT_CODE)
-    assert goals[0].status == GoalStatus.COMPLETED
+    assert goals[0].status == GoalStatus.INCOMPLETE
     assert any("no completed work" in r.get("concern", "")
                for r in summary.recommendations)
 
@@ -4483,16 +4483,21 @@ def test_orchestrator_blocks_failing_task_but_completes_others(project: Project)
     assert statuses.count(TaskStatus.COMPLETED) == 2
     assert statuses.count(TaskStatus.BLOCKED) == 1
 
-    # Exactly one error surfaces, naming the blocked task.
-    assert len(summary.errors) == 1
+    # One error names the blocked task and why it stalled; a second names the
+    # goal as settling without it, so neither the cause nor the shortfall is
+    # something the operator has to infer.
     blocked_task = next(t for t in tasks if t.status == TaskStatus.BLOCKED)
-    assert blocked_task.id in summary.errors[0]
-    assert "simulated model stall" in summary.errors[0]
+    task_errors = [e for e in summary.errors if "simulated model stall" in e]
+    assert len(task_errors) == 1
+    assert blocked_task.id in task_errors[0]
+    assert any(
+        blocked_task.id in e and "INCOMPLETE" in e for e in summary.errors
+    )
 
     # Goal ships (on_the_fence no longer blocks); the blocked task is
     # surfaced in errors above and guarded at delivery, not via goal status.
     goals = store.list_goals(PROJECT_CODE)
-    assert goals[0].status == GoalStatus.COMPLETED
+    assert goals[0].status == GoalStatus.INCOMPLETE
 
     # Only the 2 successful tasks yielded drafts.
     assert len(summary.drafts) == 2
@@ -12050,7 +12055,7 @@ def test_settle_zero_completed_pops_redo_fingerprint(tmp_path, monkeypatch):
     assert goal.id not in orch._goal_redo_fingerprints, (
         "zero-settle must pop the redo fingerprint"
     )
-    assert goal.status == GoalStatus.COMPLETED
+    assert goal.status == GoalStatus.INCOMPLETE
 
 
 # F8 (resume topo unknown-ref symmetry) is DEFERRED — see the structured report:
@@ -12749,7 +12754,7 @@ def test_verify_unparseable_settles_goal(tmp_path, monkeypatch):
 
     orch._leader_verify_goal(goal, [task], summary)
 
-    assert goal.status in (GoalStatus.COMPLETED, GoalStatus.BLOCKED), (
+    assert goal.status in (GoalStatus.COMPLETED, GoalStatus.INCOMPLETE, GoalStatus.BLOCKED), (
         "goal must not be stranded IN_PROGRESS on an unparseable verdict"
     )
     assert any(
@@ -13346,3 +13351,91 @@ def test_verify_runs_probes_and_unavailable_clamps_without_fixer(
     assert task.id in summary.withheld_deliverables      # still withheld
     assert all(d.task_id != task.id
                for d in summary.rendered_deliverables)   # never rendered
+
+
+def test_goal_holes_names_missing_artifact_and_unfinished_task(project, tmp_path):
+    """A goal owes what its tasks declared. A declared path with nothing on disk
+    and a task that never finished are both holes; a parent that decomposed is
+    not, because the children it minted answer for their own outputs."""
+    from modulatio.orchestration import Orchestrator
+    from modulatio.types import DecomposeMintRecord
+
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    root = orch._artifacts_root()
+    (root / "drafts").mkdir(parents=True, exist_ok=True)
+    (root / "drafts" / "present.md").write_text("real content")
+
+    landed = _qcfix_task(project_id=project.id)
+    landed.id = "proj-T-001"
+    landed.output_path = "drafts/present.md"
+    landed.status = TaskStatus.COMPLETED
+
+    absent = _qcfix_task(project_id=project.id)
+    absent.id = "proj-T-002"
+    absent.output_path = "drafts/never-written.md"
+    absent.status = TaskStatus.COMPLETED   # says done, wrote nothing
+
+    unfinished = _qcfix_task(project_id=project.id)
+    unfinished.id = "proj-T-003"
+    unfinished.output_path = None
+    unfinished.status = TaskStatus.BLOCKED
+
+    parent = _qcfix_task(project_id=project.id)
+    parent.id = "proj-T-004"
+    parent.output_path = None
+    parent.status = TaskStatus.BLOCKED
+    parent.decompose_mint = DecomposeMintRecord(
+        mint_id="m1", child_ids=["proj-T-001"], minted_at="2026-01-01T00:00:00Z",
+    )
+
+    holes = orch._goal_holes([landed, absent, unfinished, parent])
+
+    assert any("proj-T-002" in h and "never-written.md" in h for h in holes)
+    assert any("proj-T-003" in h for h in holes)
+    assert not any("proj-T-001" in h for h in holes)   # produced what it owed
+    assert not any("proj-T-004" in h for h in holes)   # decomposed, not a hole
+
+
+def test_goal_with_everything_delivered_still_completes(project):
+    """The honest terminal cuts both ways: a goal that owes nothing settles
+    COMPLETED, so the new state cannot creep onto healthy runs."""
+    from modulatio.orchestration import Orchestrator
+
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    done = _qcfix_task(project_id=project.id)
+    done.output_path = None
+    done.status = TaskStatus.COMPLETED
+
+    assert orch._goal_holes([done]) == []
+
+
+def test_fatal_run_terminalizes_its_live_goals(project, monkeypatch):
+    """A run that dies under its goals must not leave them reading as in-flight.
+    Nothing revisits a goal after the run ends, so a status meaning work is
+    happening would stand forever on work that stopped."""
+    import pytest as _pytest
+
+    from modulatio import store, vault
+    from modulatio.types import Goal, GoalStatus
+
+    run_id = "run-fatal"
+    vault.init_run(project.code, run_id, "obj")
+    proj = project.model_copy(update={"run_id": run_id})
+    store.save_goal(proj.code, Goal(
+        id="proj-G-001", project_id=proj.id, description="g",
+        success_criteria="sc", status=GoalStatus.IN_PROGRESS,
+    ), run_id=run_id)
+
+    orch = _qcfix_orch(proj)
+
+    def _boom(*a, **k):
+        raise RuntimeError("APIError: upstream closed")
+
+    monkeypatch.setattr(orch, "_kickoff_inner", _boom)
+    with _pytest.raises(RuntimeError):
+        orch.kickoff("do the thing")
+
+    settled = store.get_goal(proj.code, "proj-G-001", run_id=run_id)
+    assert settled.status is GoalStatus.INCOMPLETE
+    # The cause travels with the state, so the record says why it stopped.
+    assert "RuntimeError" in settled.transitions[-1].rationale

@@ -258,6 +258,13 @@ _PATH_CONFLICT_MARKER = "artifact-path conflict"
 #: Only a dependency block is reversible, because only its cause can recover.
 _DEP_FAILED_MARKER = "dependency failed"
 
+#: A goal that has settled, however it settled. Named once because several call
+#: sites ask "is this goal still live?" and a terminal that one of them missed
+#: would leave a finished goal looking runnable.
+_GOAL_TERMINAL = (
+    GoalStatus.COMPLETED, GoalStatus.INCOMPLETE, GoalStatus.ABANDONED,
+)
+
 #: The Leader-converse chat loop's task_id. Bound as a constant because two
 #: sides reference it: the converse call site, and the metered-authorizer
 #: builder that grants converse a wide-open per-task allowance (the operator
@@ -9898,7 +9905,7 @@ class Orchestrator:
                         actor="orchestrator", rationale=reason))
                     store.save_task(code, t, run_id=rid)
             for g in store.list_goals(code, run_id=rid):
-                if g.status not in (GoalStatus.COMPLETED, GoalStatus.ABANDONED):
+                if g.status not in _GOAL_TERMINAL:
                     prior = g.status
                     g.status = GoalStatus.ABANDONED
                     g.transitions.append(StateTransition(
@@ -13365,6 +13372,29 @@ class Orchestrator:
                 issues.append(f"modified/removed test module {Path(path).name}")
         return issues
 
+    def _goal_holes(self, tasks: list[Task]) -> list[str]:
+        """What the goal is settling WITHOUT, named for the operator.
+
+        Two ways a goal ends up owing something: a task declared an output path
+        and no artifact is there, or a task never reached a finished state. Both
+        count, because either one means the deliverable an operator expects is
+        not on disk.
+
+        A parent that decomposed is not a hole — it carries a mint record and
+        its work is represented by the children it minted, which are themselves
+        in this list and answer for their own outputs.
+        """
+        root = self._artifacts_root()
+        holes: list[str] = []
+        for t in tasks:
+            if t.decompose_mint is not None:
+                continue
+            if t.output_path and not (root / t.output_path).exists():
+                holes.append(f"{t.id} ({t.output_path})")
+            elif t.status is not TaskStatus.COMPLETED:
+                holes.append(f"{t.id} ({t.status.value})")
+        return holes
+
     def _leader_verify_goal(
         self,
         goal: Goal,
@@ -14170,18 +14200,38 @@ class Orchestrator:
                     f"{rationale} | report {report_path.name}"
                 )
 
-        # Every verdict completes the goal — the run is never blocked on the
+        # Every verdict terminalizes the goal — the run is never blocked on the
         # Leader's reservations; the human reads them in the Product Quality
         # Report and decides what to double-check. No tickets.
+        #
+        # Which terminal depends on whether anything it owed is still missing.
+        # Control only reaches here once the recovery ladder is spent — a redo
+        # window if the budget allowed one, then QC's last-resort sweep to
+        # produce the missing pieces, then a re-verify. A hole that survives all
+        # of that is real, and must be named rather than settled over: every
+        # surface reads the status word, so "completed" here would report a
+        # missing deliverable as a success.
+        holes = self._goal_holes(tasks)
+        if holes:
+            terminal = GoalStatus.INCOMPLETE
+            rationale_text = (
+                f"{rationale_text} | settled with {len(holes)} missing: "
+                f"{', '.join(holes)}"
+            )
+            summary.errors.append(
+                f"{goal.id}: settled INCOMPLETE — missing {', '.join(holes)}"
+            )
+        else:
+            terminal = GoalStatus.COMPLETED
         goal.transitions.append(
             StateTransition(
                 from_state=goal.status.value,
-                to_state=GoalStatus.COMPLETED.value,
+                to_state=terminal.value,
                 actor="leader",
                 rationale=rationale_text,
             )
         )
-        goal.status = GoalStatus.COMPLETED
+        goal.status = terminal
         # The redo loop-breaker fingerprint is only meaningful while the goal is
         # still IN_PROGRESS and redo-eligible. Now that it has terminalized, drop
         # its entry so the per-run dict doesn't accumulate stale fingerprints for
@@ -14427,13 +14477,16 @@ class Orchestrator:
         NOT be left permanently IN_PROGRESS — without this it strands forever:
         the driving ticket is already closed/resolved, the wind-down loop won't
         re-pick it, and the next kickoff's auto-resume only scans OPEN tickets,
-        so only an F8 teardown ever finalizes it. Settle it COMPLETED with a PQR reservation so it
-        surfaces for human review instead of silently hanging the run. No-op if
+        so only an F8 teardown ever finalizes it. Settle it INCOMPLETE with a PQR
+        reservation so it surfaces for human review instead of silently hanging
+        the run — terminal so the run can finish, and named for what it is,
+        because a pass that completed nothing has produced nothing. No-op if
         already terminal. Shared by all three redo lanes (leader auto-redo,
         decline reexecute, budget auto-resume) so the wording + the PQR
         reservation stay aligned; the ``concern``/``rationale`` carry the
         lane-specific language so PQR/audit can tell them apart."""
-        if goal.status in (GoalStatus.COMPLETED, GoalStatus.BLOCKED):
+        if goal.status in (GoalStatus.COMPLETED, GoalStatus.INCOMPLETE,
+                           GoalStatus.BLOCKED):
             return
         summary.recommendations.append({
             "goal_id": goal.id,
@@ -14443,12 +14496,12 @@ class Orchestrator:
         goal.transitions.append(
             StateTransition(
                 from_state=goal.status.value,
-                to_state=GoalStatus.COMPLETED.value,
+                to_state=GoalStatus.INCOMPLETE.value,
                 actor="leader",
                 rationale=rationale,
             )
         )
-        goal.status = GoalStatus.COMPLETED
+        goal.status = GoalStatus.INCOMPLETE
         # this is the shared terminalizer for ALL redo lanes (leader
         # auto-redo / decline reexecute / budget auto-resume). The normal terminal-
         # COMPLETED path pops the redo loop-breaker fingerprint; a zero-settled
@@ -16175,9 +16228,7 @@ class Orchestrator:
                     self.project.code, ticket.affected_goal_id,
                     run_id=self.project.run_id,
                 )
-                if goal is not None and goal.status not in (
-                    GoalStatus.COMPLETED, GoalStatus.ABANDONED,
-                ):
+                if goal is not None and goal.status not in _GOAL_TERMINAL:
                     prior = goal.status
                     goal.status = GoalStatus.COMPLETED
                     rationale = (
@@ -16418,7 +16469,7 @@ class Orchestrator:
                 continue
 
             goal = store.get_goal(self.project.code, ticket.affected_goal_id, run_id=self.project.run_id)
-            if goal is None or goal.status in (GoalStatus.COMPLETED, GoalStatus.ABANDONED):
+            if goal is None or goal.status in _GOAL_TERMINAL:
                 # the goal already terminalized (e.g. a sibling/duplicate
                 # ticket for the same goal recovered it first, or it completed in the
                 # producing run). Retire this stale ticket instead of leaving it OPEN
@@ -16729,9 +16780,39 @@ class Orchestrator:
                 )
             except Exception:  # noqa: BLE001 — capture must not mask the failure
                 pass
+            self._settle_goals_on_fatal(exc)
             raise
         finally:
             self._kickoff_active = False
+
+    def _settle_goals_on_fatal(self, exc: BaseException) -> None:
+        """Terminalize this run's live goals when the run dies under it.
+
+        A goal left mid-flight keeps a status meaning work is happening, on a run
+        that has stopped — nothing will revisit it and no surface will say why.
+        The ordinary abort path already settles with a truthful rationale; a
+        fatal one unwound past that, so route it to the same honest terminal and
+        name the failure that ended it. Best-effort: the original exception is
+        what the caller must see, never a failure raised while recording it.
+        """
+        try:
+            run_id = self.project.run_id
+            if not run_id:
+                return
+            reason = f"{type(exc).__name__}: {exc}"
+            for goal in store.list_goals(self.project.code, run_id=run_id):
+                if goal.status in _GOAL_TERMINAL:
+                    continue
+                goal.transitions.append(StateTransition(
+                    from_state=goal.status.value,
+                    to_state=GoalStatus.INCOMPLETE.value,
+                    actor="orchestrator",
+                    rationale=f"run ended before this goal settled — {reason}"[:500],
+                ))
+                goal.status = GoalStatus.INCOMPLETE
+                store.save_goal(self.project.code, goal, run_id=run_id)
+        except Exception:  # noqa: BLE001 — never mask the failure being reported
+            pass
 
     def _fail_kickoff_provider_unavailable(self, exc: Exception) -> RunSummary:
         """FAIL LOUDLY when the Leader's primary model is unavailable on a /kickoff.
@@ -17542,9 +17623,7 @@ class Orchestrator:
                 redo_goal = store.get_goal(self.project.code, goal_id, run_id=self.project.run_id)
                 if redo_goal is None:
                     continue
-                if redo_goal.status in (
-                    GoalStatus.COMPLETED, GoalStatus.ABANDONED,
-                ):
+                if redo_goal.status in _GOAL_TERMINAL:
                     continue
                 self._reexecute_goal(redo_goal, summary)
 
