@@ -538,3 +538,100 @@ def test_uninstall_refuses_and_removes_nothing_while_a_service_is_installed(
     assert "modulatio-api.service" in result.output
     assert "systemctl disable --now modulatio-api.service" in result.output
     assert "daemon-reload" in result.output
+
+
+def test_unowned_vault_keeps_its_folder_but_loses_its_state(monkeypatch, tmp_path):
+    """A vault folder the user made is never deleted, but the state Modulatio
+    wrote inside it is still state. Sparing the container must not spare the
+    keys, agents and grants that happen to sit in it."""
+    from modulatio import vault
+
+    vault_root = tmp_path / "my-notes"      # no 'modulatio' component: not ours
+    (vault_root / "proj").mkdir(parents=True)
+    (vault_root / ".env").write_text("PROVIDER_KEY=secret\n", encoding="utf-8")
+    monkeypatch.setattr(uninstall.config, "get_vault_root", lambda: vault_root)
+    monkeypatch.setattr(vault, "list_projects", lambda: ["proj"])
+    monkeypatch.setattr(vault, "project_dir", lambda code: vault_root / code)
+
+    plan = uninstall.build_plan(remove_projects=True)
+    paths = {t.path for t in plan}
+
+    assert vault_root not in paths, "the user's own folder is never deleted"
+    assert vault_root / ".env" in paths, "provider keys are state, not container"
+    assert vault_root / "proj" in paths, "project state goes with everything else"
+    assert all(t.user_data for t in plan if t.path in
+               {vault_root / ".env", vault_root / "proj"}), "must ride the backup"
+
+
+def test_schedules_are_removed_without_the_projects_tier(monkeypatch, tmp_path):
+    """A schedule acts on its own, so it cannot wait for an opt-in tier: it would
+    fire against files that are gone. Both the current vault root and the default
+    one are covered, because a vault that moved leaves its queue behind."""
+    current = tmp_path / "current"
+    default = tmp_path / "default"
+    for root in (current, default):
+        root.mkdir()
+        (root / "cron-config.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(uninstall.config, "get_vault_root", lambda: current)
+    monkeypatch.setattr(uninstall.config, "_fallback_vault_root", lambda: str(default))
+
+    paths = {t.path for t in uninstall.build_plan()}   # no tiers requested
+
+    assert current / "cron-config.json" in paths
+    assert default / "cron-config.json" in paths
+
+
+def test_removal_is_refused_when_the_backup_archives_nothing(monkeypatch, tmp_path):
+    """The archive is the only thing making removal recoverable, so one that
+    holds nothing has to stop the uninstall rather than let it proceed."""
+    live = tmp_path / "data"
+    live.mkdir()
+    (live / "keys.env").write_text("k=v", encoding="utf-8")
+    plan = [uninstall.Target("Data", live, "projects", optional=True, user_data=True)]
+
+    # A tar that accepts members and stores none — the shape of a backup that
+    # reported success while writing nothing.
+    monkeypatch.setattr(
+        uninstall.tarfile.TarFile, "add", lambda self, *a, **k: None)
+
+    with pytest.raises(uninstall.BackupVerificationError):
+        uninstall.backup_plan(plan, tmp_path / "backup.tar.gz")
+
+
+def test_prune_backups_keeps_only_the_newest(tmp_path):
+    """A cleanup tool that leaves one archive per run behind is itself a mess."""
+    for stamp in ("20260101-000000", "20260201-000000", "20260301-000000",
+                  "20260401-000000"):
+        (tmp_path / f"pfx-{stamp}.tar.gz").write_text("x", encoding="utf-8")
+    (tmp_path / "unrelated.tar.gz").write_text("x", encoding="utf-8")
+
+    removed = uninstall.prune_backups(tmp_path, "pfx-", keep=2)
+
+    kept = sorted(p.name for p in tmp_path.glob("pfx-*.tar.gz"))
+    assert kept == ["pfx-20260301-000000.tar.gz", "pfx-20260401-000000.tar.gz"]
+    assert len(removed) == 2
+    assert (tmp_path / "unrelated.tar.gz").exists(), "only its own archives"
+
+
+def test_running_processes_matches_entry_points_not_mentions(monkeypatch):
+    """A shell or editor whose arguments merely name a Modulatio path is
+    somebody's work; stopping it would be worse than the leftover being hunted.
+    Only the executable, or the script an interpreter was handed, counts."""
+    listing = (
+        "  101 /home/u/.local/bin/modulatio-api\n"
+        "  102 /usr/bin/python3 /home/u/.local/bin/modulatio-tui\n"
+        "  103 /bin/bash -c grep modulatio /home/u/modulatio/src/x.py\n"
+        "  104 /usr/bin/vim /home/u/modulatio/README.md\n"
+    )
+
+    class _R:
+        stdout = listing
+
+    monkeypatch.setattr(uninstall.os, "getpid", lambda: 999)
+    monkeypatch.setattr(uninstall.os, "getppid", lambda: 998)
+    import subprocess as _sp
+    monkeypatch.setattr(_sp, "run", lambda *a, **k: _R())
+
+    pids = [pid for pid, _ in uninstall.running_processes()]
+
+    assert pids == [101, 102], "entry points only — not the shell or the editor"

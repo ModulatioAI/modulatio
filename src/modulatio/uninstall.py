@@ -38,6 +38,11 @@ class UnsafeRemovalError(RuntimeError):
     """A path failed the catastrophic-removal guard — never deleted."""
 
 
+class BackupVerificationError(RuntimeError):
+    """The backup archive could not be confirmed to hold anything, so the
+    removal it was meant to make recoverable must not run."""
+
+
 @dataclass(frozen=True)
 class Target:
     """One filesystem location the uninstaller knows about.
@@ -126,6 +131,31 @@ def core_targets() -> list[Target]:
     return targets
 
 
+def schedule_targets() -> list[Target]:
+    """Scheduled-job state, at every vault root that has held it.
+
+    Schedules resolve against the CURRENT vault root, so a vault that moved
+    leaves its queue behind at the previous location still describing live work.
+    Both are removed on any uninstall rather than with the projects tier: a
+    schedule that outlives the install fires against files that are gone, and it
+    is the one kind of leftover that acts on its own.
+    """
+    names = ("cron-config.json", "cron-config.json.lock")
+    roots = {config.get_vault_root()}
+    try:
+        roots.add(Path(config._fallback_vault_root()).expanduser())
+    except OSError:
+        pass
+    out: list[Target] = []
+    for root in sorted(roots):
+        for name in names:
+            path = root / name
+            if path.exists():
+                out.append(Target(f"Schedules ({name})", path, "schedules",
+                                  user_data=True))
+    return out
+
+
 def settings_target() -> Target:
     """The settings directory — config, presets, key labels, telegram + the
     auth/setup state. Holds secret config, so it is user-data (back up first)."""
@@ -156,6 +186,35 @@ def deliverables_target() -> Target:
 
     return Target("Deliverables", delivery.delivery_root(), "deliverables",
                   optional=True, user_data=True)
+
+
+def vault_state_targets() -> list[Target]:
+    """App state Modulatio wrote INSIDE the vault, listed independently of the
+    vault directory itself.
+
+    The container and its contents are separate decisions. A vault folder the
+    user made is never deleted, but the state written into it is still state,
+    and a wipe that spares it leaves keys, grants, agents, schedules and memory
+    behind purely because of where they sit. Listing them here makes removal
+    depend on what a thing is rather than which folder it landed in.
+
+    Bound to the app's own notion of a project — a vault child only counts if it
+    carries the seed markers Modulatio creates — so an unrelated folder sharing
+    the vault is never touched. Everything returned is user-data, so it rides in
+    the backup before it goes.
+    """
+    from modulatio import vault
+
+    out: list[Target] = []
+    root = config.get_vault_root()
+    env = root / ".env"
+    if env.exists():
+        out.append(Target("Vault secrets (provider keys)", env, "projects",
+                          optional=True, user_data=True))
+    for code in vault.list_projects():
+        out.append(Target(f"Project state ({code})", vault.project_dir(code),
+                          "projects", optional=True, user_data=True))
+    return out
 
 
 def vault_is_custom() -> bool:
@@ -215,6 +274,7 @@ def build_plan(
     target that fails the guard is dropped (never silently widened).
     """
     candidates = list(core_targets())
+    candidates.extend(schedule_targets())
     if remove_settings:
         candidates.append(settings_target())
     if remove_projects:
@@ -230,6 +290,12 @@ def build_plan(
                 vault.path.resolve().relative_to(data_home.path.resolve())
             except ValueError:
                 candidates.append(vault)
+        else:
+            # The container is spared, its contents are not: removing the folder
+            # would take work the user put there, but the state Modulatio wrote
+            # into it is still state. Skipped when the vault IS ours, since the
+            # directory above already covers everything inside it.
+            candidates.extend(vault_state_targets())
     if remove_deliverables:
         candidates.append(deliverables_target())
 
@@ -264,7 +330,37 @@ def backup_plan(plan: list[Target], dest: Path) -> Path | None:
     with tarfile.open(dest, "w:gz") as tar:
         for t in user_targets:
             tar.add(t.path, arcname=t.path.name)
+    # Read the archive back before the caller deletes anything it names. The
+    # removal that follows is irreversible and this file is its only safety net,
+    # so an archive that wrote nothing has to stop the uninstall rather than let
+    # it proceed against a net with no rope in it.
+    with tarfile.open(dest, "r:gz") as tar:
+        if not tar.getnames():
+            raise BackupVerificationError(
+                f"backup archive is empty, refusing to remove: {dest}")
     return dest
+
+
+def prune_backups(directory: Path, prefix: str, keep: int) -> list[Path]:
+    """Delete all but the ``keep`` newest ``prefix``-named archives in
+    ``directory``, newest decided by filename so it does not depend on mtimes
+    surviving a copy. Returns what was removed.
+
+    A tool that cleans up should not itself accumulate: one archive per run with
+    nothing pruning them grows without bound in the user's home.
+    """
+    try:
+        archives = sorted(directory.glob(f"{prefix}*.tar.gz"), reverse=True)
+    except OSError:
+        return []
+    removed: list[Path] = []
+    for stale in archives[keep:]:
+        try:
+            stale.unlink()
+            removed.append(stale)
+        except OSError:
+            continue
+    return removed
 
 
 def remove_target(target: Target) -> tuple[bool, str]:
@@ -287,9 +383,99 @@ def remove_target(target: Target) -> tuple[bool, str]:
         return False, str(e)
 
 
+def running_processes() -> list[tuple[int, str]]:
+    """Every live process running a Modulatio entry point, as ``(pid, command)``.
+
+    Found by inspecting the process table rather than by reading a pid file. The
+    servers are launched detached, so they outlive whatever started them: there
+    is no parent to walk down from and no pid file this module owns. A witness
+    that reads one pid file reports silence for processes it was never able to
+    see, which is worse than not looking — it says "nothing running" while a
+    server holds its port and serves the install being removed.
+
+    Excludes this process and its ancestors so an uninstall run from a Modulatio
+    entry point never reports or stops itself.
+    """
+    import subprocess
+
+    mine = {os.getpid(), os.getppid()}
+    out: list[tuple[int, str]] = []
+    try:
+        listing = subprocess.run(
+            ["ps", "-eo", "pid=,args="], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return out
+    for line in listing.stdout.splitlines():
+        head, _, command = line.strip().partition(" ")
+        if not head.isdigit():
+            continue
+        pid = int(head)
+        if pid in mine or "modulatio" not in command:
+            continue
+        # Match the EXECUTABLE, not the whole command line: a shell, an editor or
+        # a grep whose arguments merely name a Modulatio path is somebody's work,
+        # and stopping it would be worse than the leftover this is hunting. An
+        # entry point is either the executable itself or the script an
+        # interpreter was handed as its first argument.
+        parts = command.split()
+        if not parts:
+            continue
+        names = [parts[0].rsplit("/", 1)[-1]]
+        if names[0].startswith("python") and len(parts) > 1:
+            names.append(parts[1].rsplit("/", 1)[-1])
+        if any(n.startswith("modulatio") for n in names):
+            out.append((pid, command))
+    return out
+
+
+def stop_processes(timeout_s: float = 8.0) -> list[str]:
+    """Stop every process :func:`running_processes` can see, and report each.
+
+    Signals politely, waits, then forces what is still alive: a server left
+    running keeps serving a deleted install from memory, and holds its port
+    against the next one. A process that refuses both is named rather than
+    passed over in silence.
+    """
+    import signal
+    import time as _time
+
+    results: list[str] = []
+    targets = running_processes()
+    for pid, command in targets:
+        name = command.split()[-1] if command else str(pid)
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError as exc:
+            results.append(f"could not signal pid {pid} ({name}): {exc}")
+            continue
+        deadline = _time.monotonic() + timeout_s
+        while _time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                break
+            _time.sleep(0.2)
+        else:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                results.append(f"forced pid {pid} ({name})")
+                continue
+            except OSError as exc:
+                results.append(f"pid {pid} ({name}) would not stop: {exc}")
+                continue
+        results.append(f"stopped pid {pid} ({name})")
+    return results
+
+
 def stop_daemon() -> str:
     """Stop the running daemon (kills the process + unlinks its pid file) and
-    drop a stale pid file if one remains. Returns a short status string."""
+    drop a stale pid file if one remains. Returns a short status string.
+
+    Covers the CRON daemon only — it is the one process with a pid file this
+    module owns. Everything else is found by inspection in
+    :func:`stop_processes`, so a quiet answer here never means the machine is
+    quiet.
+    """
     from modulatio import daemon
 
     try:

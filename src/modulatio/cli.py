@@ -1802,6 +1802,11 @@ def setup() -> None:
         raise typer.Exit(code=1)
 
 
+#: Uninstall backups kept in the home dir; older ones are pruned each run so
+#: a cleanup tool does not accumulate archives of its own.
+_BACKUP_KEEP = 5
+
+
 @app.command()
 def uninstall(
     remove_settings: bool = typer.Option(
@@ -1930,15 +1935,31 @@ def uninstall(
         raise typer.Exit(code=1)
 
     typer.echo(un.stop_daemon())
+    # The daemon line above speaks only for the cron daemon's pid file. The
+    # servers run detached with no pid file this command owns, so they are found
+    # by inspection — otherwise a quiet daemon line reads as a quiet machine
+    # while a server still holds its port and serves the install being removed.
+    for line in un.stop_processes():
+        typer.echo(f"  {line}")
 
     backup = None
     if any(t.user_data for t in plan):
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        backup = un.backup_plan(
-            plan, Path.home() / f"modulatio-uninstall-backup-{stamp}.tar.gz"
-        )
+        prefix = "modulatio-uninstall-backup-"
+        try:
+            backup = un.backup_plan(
+                plan, Path.home() / f"{prefix}{stamp}.tar.gz"
+            )
+        except (un.BackupVerificationError, OSError) as exc:
+            # The removal below is irreversible and this archive is what makes it
+            # recoverable. Without a verified one, stop while everything is still
+            # on disk.
+            typer.echo(f"Refusing to remove — the backup failed: {exc}")
+            raise typer.Exit(1) from exc
         if backup:
             typer.echo(f"Backed up your data -> {backup}")
+            for stale in un.prune_backups(Path.home(), prefix, keep=_BACKUP_KEEP):
+                typer.echo(f"  pruned old backup: {stale.name}")
 
     for t in plan:
         ok, detail = un.remove_target(t)
