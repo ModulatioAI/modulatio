@@ -1848,6 +1848,31 @@ def uninstall(
 
     from modulatio import uninstall as un
 
+    # Refuse before removing anything. A service unit survives this command and
+    # restarts onto whatever it was pointed at, so removing the files first
+    # leaves a service looping against an install that is supposed to be gone.
+    # A system unit needs root to remove, which this command does not have, so
+    # the work is handed over rather than half-done.
+    service_units = un.detect_service_units()
+    if service_units:
+        typer.echo("Refusing to uninstall — a service still launches Modulatio.")
+        typer.echo("")
+        for unit in service_units:
+            typer.echo(f"  {unit.name}  ({unit.scope})  {unit.path}")
+        typer.echo("")
+        typer.echo("Remove them first, then re-run this command:")
+        for unit in service_units:
+            user_flag = " --user" if unit.scope == "user" else ""
+            sudo = "" if unit.scope == "user" else "sudo "
+            typer.echo(f"  {sudo}systemctl{user_flag} disable --now {unit.name}")
+            typer.echo(f"  {sudo}rm {unit.path}")
+        scopes = {u.scope for u in service_units}
+        for scope in sorted(scopes):
+            user_flag = " --user" if scope == "user" else ""
+            sudo = "" if scope == "user" else "sudo "
+            typer.echo(f"  {sudo}systemctl{user_flag} daemon-reload")
+        raise typer.Exit(1)
+
     if pristine:
         remove_settings = remove_projects = remove_deliverables = remove_pandoc = True
 

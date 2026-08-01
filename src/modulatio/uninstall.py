@@ -305,6 +305,62 @@ def stop_daemon() -> str:
         return f"daemon stop best-effort ({e})"
 
 
+def _systemd_unit_roots() -> tuple[tuple[Path, str], ...]:
+    """Where service units live, paired with the scope that owns them.
+
+    Resolved through a function rather than inlined so a test can point it at a
+    fixture tree: these are absolute host paths, and a developer machine running
+    Modulatio as a service would otherwise change what every test sees.
+    """
+    return (
+        (Path("/etc/systemd/system"), "system"),
+        (Path("/run/systemd/system"), "system"),
+        (Path.home() / ".config" / "systemd" / "user", "user"),
+    )
+
+
+@dataclass(frozen=True)
+class ServiceUnit:
+    """An installed service unit that launches Modulatio, and where it lives."""
+
+    name: str    # unit filename, e.g. 'modulatio-api.service'
+    path: str    # the unit file on disk
+    scope: str   # 'system' (root-owned) | 'user'
+
+
+def detect_service_units() -> list[ServiceUnit]:
+    """Installed systemd units whose start command launches Modulatio.
+
+    A unit outlives the files removed here: one carrying a restart directive
+    respawns onto a deleted executable every few seconds, so an uninstall that
+    ignores it leaves a service failing in a loop against an install that is
+    supposed to be gone. Removing a system unit needs root, which a user-level
+    uninstall does not have — the caller reports what it found instead of
+    deleting the files out from under a service still trying to run them.
+
+    Matched on the start command rather than the unit name, so a renamed unit is
+    still found, and deliberately loose: over-reporting costs a message, while
+    under-reporting leaves a service behind.
+    """
+    found: list[ServiceUnit] = []
+    for root, scope in _systemd_unit_roots():
+        try:
+            units = sorted(root.glob("*.service"))
+        except OSError:
+            continue
+        for unit in units:
+            try:
+                text = unit.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("ExecStart") and "modulatio" in stripped:
+                    found.append(ServiceUnit(unit.name, str(unit), scope))
+                    break
+    return found
+
+
 @dataclass(frozen=True)
 class PandocInfo:
     """How pandoc is installed, so a removal can pick the right mechanism."""

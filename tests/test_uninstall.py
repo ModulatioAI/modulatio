@@ -485,3 +485,56 @@ def test_cli_uninstall_opt_in_backs_up_then_removes_vault(fake_layout, monkeypat
     assert result.exit_code == 0, result.output
     assert not fake_layout["vault"].exists()
     assert list(tmp_path.glob("modulatio-uninstall-backup-*.tar.gz"))  # backed up
+
+
+def test_detect_service_units_matches_on_the_start_command(monkeypatch, tmp_path):
+    """A unit is found by what it launches, not by what it is called, so a
+    renamed unit is still reported. Units that launch something else are left
+    alone."""
+    units = tmp_path / "units-user"
+    units.mkdir()
+    (units / "renamed-thing.service").write_text(
+        "[Service]\nExecStart=/home/u/.local/bin/modulatio-api\n", encoding="utf-8")
+    (units / "unrelated.service").write_text(
+        "[Service]\nExecStart=/usr/bin/some-other-daemon\n", encoding="utf-8")
+    monkeypatch.setattr(
+        uninstall, "_systemd_unit_roots", lambda: ((units, "user"),))
+
+    found = uninstall.detect_service_units()
+
+    assert [u.name for u in found] == ["renamed-thing.service"]
+    assert found[0].scope == "user"
+
+
+def test_detect_service_units_empty_when_none_installed(tmp_path):
+    """No units, nothing reported — the refusal must not fire on a clean box.
+    The isolation fixture already points the scan at an empty tree."""
+    assert uninstall.detect_service_units() == []
+
+
+def test_uninstall_refuses_and_removes_nothing_while_a_service_is_installed(
+    monkeypatch, tmp_path,
+):
+    """A service outlives this command and restarts onto what it was pointed at,
+    so removing files first strands it against a half-removed install. The
+    command stops, names the units and the commands that clear them, and leaves
+    every target in place."""
+    from typer.testing import CliRunner
+
+    from modulatio.cli import app
+
+    unit = uninstall.ServiceUnit(
+        "modulatio-api.service", "/etc/systemd/system/modulatio-api.service", "system")
+    monkeypatch.setattr(uninstall, "detect_service_units", lambda: [unit])
+
+    removed: list = []
+    monkeypatch.setattr(uninstall, "remove_target", lambda t: removed.append(t))
+
+    result = CliRunner().invoke(app, ["uninstall", "--pristine", "--yes"])
+
+    assert result.exit_code == 1
+    assert removed == [], "nothing may be removed while a service would survive"
+    # The operator is told what to run, not merely that something is wrong.
+    assert "modulatio-api.service" in result.output
+    assert "systemctl disable --now modulatio-api.service" in result.output
+    assert "daemon-reload" in result.output

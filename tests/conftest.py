@@ -145,6 +145,15 @@ def _isolate_modulatio_config(tmp_path, monkeypatch):
     # but isolate it here too so a future ``deliver_products=True`` path can never
     # write a finished product into the developer's real Documents folder.
     monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(cfg / "delivered"))
+    # Service-unit detection reads absolute host paths (/etc/systemd/system and
+    # the user unit dir). A developer machine that runs Modulatio as a service
+    # would otherwise make the uninstall refusal fire inside unrelated tests, so
+    # point the scan at an empty tree; a test that wants units creates them here.
+    from modulatio import uninstall as _uninstall
+    monkeypatch.setattr(
+        _uninstall, "_systemd_unit_roots",
+        lambda: ((cfg / "units-system", "system"), (cfg / "units-user", "user")),
+    )
     # Drop any cached defaults loaded from the real config before the redirect.
     config.reload()
     yield
