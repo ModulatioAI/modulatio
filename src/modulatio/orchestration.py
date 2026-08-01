@@ -11124,9 +11124,11 @@ class Orchestrator:
         sees only the task contract.
 
         Gated by ``MODULATIO_QC_FIXER`` — **ON by default**; opt out with
-        ``MODULATIO_QC_FIXER=0``. Requires a non-trivial committed draft to
-        patch — a storm that committed ~nothing has nothing to salvage
-        (re-decompose is the right move, deferred), so we fall through.
+        ``MODULATIO_QC_FIXER=0``. A committed draft is PATCHED; an empty or
+        absent one is BUILT from the contract, so a producer that committed
+        nothing is not a dead end. Only genuinely unauthorable shapes decline:
+        a binary artifact and a multi-file set, where a single-file rescue
+        would stamp the task complete over an untouched sibling defect.
         """
         if not _qc_fixer_enabled():
             return False
