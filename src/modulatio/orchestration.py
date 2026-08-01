@@ -248,11 +248,19 @@ _LEADER_FIX_LOADOUT = (
     "run_shell", "read_file", "read_tool_result", "edit_file", "write_artifact",
 )
 
-#: Leader fix-in-place lane budgets (cadre R1): per-call shell ceiling, a
-#: cumulative shell-call cap, and a whole-session deadline so a
-#: prompt-injected tool loop can't stretch one fix cycle into hours.
+#: Leader fix-in-place lane budgets: a per-call shell ceiling, separate
+#: cumulative caps for looking and for acting, and a whole-session deadline so
+#: a prompt-injected tool loop can't stretch one fix cycle into hours.
+#:
+#: The two caps are separate because they fund different halves of one job, and
+#: reading always comes first: a single pool lets orientation spend everything
+#: before any repair is attempted, which leaves the lane summarising a
+#: deliverable it never got to touch. The split is on the shell profile, which
+#: is enforced rather than declared — a passive call cannot execute code, so a
+#: command cannot claim to be orientation and then act.
 _LEADER_FIX_SHELL_TIMEOUT_S = 120.0
-_LEADER_FIX_SHELL_CALLS = 8
+_LEADER_FIX_LOOK_CALLS = 12
+_LEADER_FIX_ACT_CALLS = 8
 _LEADER_FIX_DEADLINE_S = 900.0
 
 #: Block-reason markers shared by the BLOCK writers and the QC-sweep
@@ -14880,18 +14888,30 @@ class Orchestrator:
             from dataclasses import replace as _dc_replace
 
             from modulatio.tools import _RUN_SHELL_MIN_TIMEOUT_SECONDS
-            _shell_calls = {"n": 0}
+            _shell_calls = {"look": 0, "act": 0}
 
             def _budgeted_shell(
                 cmd: str, profile: str = "passive", cwd: str = "",
                 timeout: float = 30.0,
             ) -> str:
-                _shell_calls["n"] += 1
-                if _shell_calls["n"] > _LEADER_FIX_SHELL_CALLS:
+                looking = profile == "passive"
+                phase = "look" if looking else "act"
+                _shell_calls[phase] += 1
+                cap = _LEADER_FIX_LOOK_CALLS if looking else _LEADER_FIX_ACT_CALLS
+                if _shell_calls[phase] > cap:
+                    # Name the phase that ran dry and leave the other one's
+                    # remainder visible: "no more shell runs" reads as finished
+                    # when it means starved, and a lane with repair budget left
+                    # should keep repairing rather than stop at its first
+                    # refusal.
+                    other = "act" if looking else "look"
+                    other_cap = (
+                        _LEADER_FIX_ACT_CALLS if looking else _LEADER_FIX_LOOK_CALLS)
+                    remaining = other_cap - _shell_calls[other]
                     return (
-                        "exit_code: -1\nstdout:\n\nstderr:\n[leader-fix lane "
-                        "budget exhausted — no more shell runs this cycle; "
-                        "finish with your summary]"
+                        f"exit_code: -1\nstdout:\n\nstderr:\n[leader-fix lane: "
+                        f"no {phase} budget left this cycle "
+                        f"({cap} used); {remaining} {other} call(s) remain]"
                     )
                 left = _lane_deadline - _monotonic()
                 # At or below the tool's own minimum clamp: refuse WITHOUT

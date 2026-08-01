@@ -437,8 +437,9 @@ def test_clay_leader_falls_back_to_floor_without_consuming(project, monkeypatch)
 
 
 def test_fix_lane_shell_budget_caps_calls_and_timeout(project, monkeypatch):
-    """M2 (cadre R1): the fix lane's run_shell is budget-wrapped — per-call
-    timeout clamped, call count capped, refusal body after exhaustion."""
+    """The fix lane's run_shell is budget-wrapped — per-call timeout clamped,
+    acting calls capped, refusal body after exhaustion. Every call here acts, so
+    it draws on the acting allowance alone."""
     shell_log: list = []
 
     def _recording_shell(**kw):
@@ -476,10 +477,12 @@ def test_fix_lane_shell_budget_caps_calls_and_timeout(project, monkeypatch):
     orch.kickoff("budget the fix lane")
 
     # 8 calls pass through with the 600s ask clamped to the 120s lane cap;
-    # calls 9-10 get the refusal body without reaching the real tool.
-    assert len(shell_log) == 8
+    # calls 9-10 get the refusal body without reaching the real tool. The
+    # refusal names the exhausted phase so a starved lane is not read as a
+    # finished one.
+    assert len(shell_log) == _orch_mod._LEADER_FIX_ACT_CALLS
     assert all(kw["timeout"] <= 120.0 for kw in shell_log)
-    assert all("budget exhausted" in r for r in results[8:])
+    assert all("no act budget left" in r for r in results[8:])
 
 
 def test_green_over_tampered_suite_clamps_to_disappointed(project, monkeypatch):
@@ -1533,3 +1536,51 @@ def test_a_real_failure_is_still_red(project_with_run, monkeypatch):
 
     assert verdict is not None
     assert verdict[0] is False, "a suite that ran and failed is still red"
+
+
+def test_orientation_cannot_spend_the_repair_budget(project, monkeypatch):
+    """Looking and acting draw on separate allowances.
+
+    Reading always comes first, so a single pool lets orientation consume
+    everything before one repair is attempted — leaving the lane summarising a
+    deliverable it never touched. Exhausting the look budget must leave the act
+    budget whole, and the refusal has to name which half ran dry.
+    """
+    seen: dict = {}
+
+    def _capture(self, **kwargs):
+        shell = self._tls.tool_registry_override["run_shell"]
+        # Spend the entire looking allowance.
+        for _ in range(_orch_mod._LEADER_FIX_LOOK_CALLS):
+            assert "no look budget" not in shell.call(cmd="ls", profile="passive")
+        seen["look_refusal"] = shell.call(cmd="ls", profile="passive")
+        # Acting must still be possible after reconnaissance is spent.
+        seen["act_after"] = shell.call(cmd="python3 -m pytest", profile="full")
+        return "done"
+
+    monkeypatch.setattr(
+        Orchestrator, "_resolve_chat_runner", lambda self, agent_id: object())
+    monkeypatch.setattr(
+        Orchestrator, "_leader_verify_tool_loadout_skill", lambda self: None)
+    monkeypatch.setattr(
+        Orchestrator, "_leader_verify_tool_registry",
+        lambda self, **kw: {name: _stub_tool(name) for name in (
+            "run_shell", "read_file", "read_tool_result",
+            "edit_file", "write_artifact")},
+    )
+    monkeypatch.setattr(Orchestrator, "_run_chat_loop", _capture)
+
+    counter = {"n": 0}
+    runners = {
+        "leader": _progressive_leader(["disappointed", "satisfied"], counter),
+        "planner": _planner_stub, "drafter": _drafter_stub, "qc": _qc_stub,
+    }
+    Orchestrator(project, runners).kickoff("fix it yourself")
+
+    assert "no look budget left" in seen["look_refusal"]
+    # The refusal reports what remains elsewhere, so a starved phase is not
+    # mistaken for a finished cycle.
+    assert "act call(s) remain" in seen["look_refusal"]
+    assert "budget left" not in seen["act_after"], (
+        "repair budget must survive an exhausted reconnaissance budget"
+    )
