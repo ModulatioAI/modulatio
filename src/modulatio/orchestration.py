@@ -10533,6 +10533,7 @@ class Orchestrator:
                 in_qc_phase = True
                 qc_verdict, qc_notes, defect_type = self._qc_review(t, draft_path, checksum)
                 t.evidence_provided.append(qc_verdict.id)
+                self._record_qc_verdict(t, qc_verdict, qc_notes, defect_type)
                 self._emit_activity(
                     role="qc",
                     phase="qc_verdict",
@@ -11004,6 +11005,45 @@ class Orchestrator:
                 },
             )
         except Exception:  # noqa: BLE001 — capture is best-effort, never fatal
+            pass
+
+    def _record_qc_verdict(
+        self,
+        t: Task,
+        verdict: "AssertionEvidence",
+        notes: str,
+        defect_type: "str | None",
+    ) -> None:
+        """Append one QC verdict to the run's ``decisions/qc.jsonl``.
+
+        A task records the UUIDs of the evidence behind it, but evidence objects
+        live only for the length of the review — so the verdict's finding, the one
+        thing not recoverable from the artifact or the usage log, is written here
+        against the id the task already cites. Best-effort: a review that produced
+        a verdict must not fail because the record of it could not be stored."""
+        try:
+            run = self.project.run_id
+            if not run:
+                return
+            entry = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "task_id": t.id,
+                "goal_id": t.goal_id,
+                "attempt": t.lifetime_attempts,
+                "qc_agent_id": t.qc_agent_id,
+                "evidence_id": str(verdict.id),
+                "passed": bool(verdict.passed),
+                "defect_type": defect_type,
+                "check": verdict.check,
+                "notes": notes,
+            }
+            path = _vault_run_dir(self.project.code, run) / "decisions" / "qc.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, default=str) + "\n")
+        except (OSError, TypeError, ValueError):
+            # Filesystem unavailable or a value that will not serialise — the
+            # verdict itself already stands; only its record is lost.
             pass
 
     def _resolve_draft_path(self, t: Task) -> "Path":

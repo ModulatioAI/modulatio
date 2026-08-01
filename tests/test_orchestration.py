@@ -7776,6 +7776,40 @@ def test_kickoff_provider_unavailable_fails_loudly(project, monkeypatch):
     )
 
 
+def test_qc_verdict_finding_is_recorded_for_the_run(project):
+    """A review writes its finding to the run's decision log, keyed to the evidence
+    id the task cites. The task keeps only that id, and the evidence object does not
+    outlive the review, so this is the sole durable record of what QC found."""
+    import json as _json
+
+    from modulatio import store, vault
+
+    run_id = "run-qcrec"
+    vault.init_run(project.code, run_id, "obj")
+    proj = project.model_copy(update={"run_id": run_id})
+    runners = {
+        "leader": _leader_stub, "planner": _planner_stub,
+        "drafter": _drafter_stub, "qc": _qc_stub,
+    }
+    Orchestrator(proj, runners).kickoff("Draft 3 essays on a theme")
+
+    log = vault.run_dir(proj.code, run_id) / "decisions" / "qc.jsonl"
+    assert log.exists(), "the review left no decision record"
+    rows = [_json.loads(line) for line in log.read_text().splitlines() if line.strip()]
+    assert rows, "the decision log is empty"
+
+    # Every reviewed task is represented, and each row carries the finding text
+    # plus the evidence id the task cites — so a reader can join a task's evidence
+    # list to what was actually asserted about it.
+    reviewed = {r["task_id"] for r in rows}
+    tasks = {t.id: t for t in store.list_tasks(proj.code, run_id=run_id)}
+    assert reviewed <= set(tasks)
+    for row in rows:
+        assert row["check"]
+        assert isinstance(row["passed"], bool)
+        assert row["evidence_id"] in [str(e) for e in tasks[row["task_id"]].evidence_provided]
+
+
 def test_kickoff_failure_is_captured_before_it_propagates(project, monkeypatch):
     """A run killed by an unhandled exception records the terminating error, and
     still raises. The caller renders only the message, so without the capture the
