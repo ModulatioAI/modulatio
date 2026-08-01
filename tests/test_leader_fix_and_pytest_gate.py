@@ -1466,3 +1466,70 @@ def test_sequential_producer_loop_abort_reaches_shell_live(
     assert seen["took"] < 10.0
     assert seen["reply"] is mod_runners.INTERRUPTED_REPLY
     assert any("[ABORTED by operator]" in r for r in seen["tool_results"])
+
+
+def test_absent_test_runner_is_unavailable_not_red(project_with_run, monkeypatch):
+    """A missing runner is a gap in the environment, not a fault in the work.
+
+    The interpreter reports it on its own channel and exits non-zero, which is
+    otherwise indistinguishable from a suite whose tests failed. Read as a
+    failure it would clamp the verdict, spend remediation on healthy code and
+    withhold a correct deliverable, so it has to surface as UNAVAILABLE.
+    """
+    _enforceable_sandbox(monkeypatch)
+    orch = _orch(project_with_run)
+    root = orch._shared_artifacts_root()
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "apppkg"\nversion = "0.0.1"\n', encoding="utf-8")
+    tests_dir = root / "tests"
+    tests_dir.mkdir(exist_ok=True)
+    (tests_dir / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8")
+
+    class _NoRunnerShell:
+        """A shell whose interpreter has no pytest: the command runs, imports
+        nothing, and exits non-zero."""
+
+        def call(self, **_kwargs):
+            return (
+                "exit_code: 1\n"
+                "stdout:\n\n"
+                "stderr:\n/usr/bin/python3: No module named pytest\n"
+            )
+
+    orch._pytest_gate_run_shell = _NoRunnerShell()
+    verdict = orch._goal_pytest_gate([_code_task()])
+
+    assert verdict is not None
+    assert verdict[0] is None, "an absent runner must not be scored as a red suite"
+    assert "not installed" in verdict[1]
+
+
+def test_a_real_failure_is_still_red(project_with_run, monkeypatch):
+    """The runner check must not swallow genuine failures: a suite that ran and
+    failed still holds the deliverable back."""
+    _enforceable_sandbox(monkeypatch)
+    orch = _orch(project_with_run)
+    root = orch._shared_artifacts_root()
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "apppkg"\nversion = "0.0.1"\n', encoding="utf-8")
+    tests_dir = root / "tests"
+    tests_dir.mkdir(exist_ok=True)
+    (tests_dir / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8")
+
+    class _FailingShell:
+        def call(self, **_kwargs):
+            return (
+                "exit_code: 1\n"
+                "stdout:\n1 failed, 2 passed in 0.10s\n"
+                "stderr:\n"
+            )
+
+    orch._pytest_gate_run_shell = _FailingShell()
+    verdict = orch._goal_pytest_gate([_code_task()])
+
+    assert verdict is not None
+    assert verdict[0] is False, "a suite that ran and failed is still red"

@@ -234,6 +234,14 @@ _PYTEST_GATE_TIMEOUT_S = 300.0
 #: artifact_kinds whose goals carry the engine-run test-suite evidence gate.
 _CODE_ARTIFACT_KINDS = ("application", "code")
 
+#: How an interpreter reports that the test runner is absent. The command is
+#: found and starts, so the shell reports an ordinary non-zero exit that is
+#: otherwise indistinguishable from a suite whose tests failed. Matching the
+#: interpreter's own wording is what separates "the environment cannot measure
+#: this" from "the work is bad", and only the second may hold a deliverable
+#: back. Tolerates the quoting variants across interpreter versions.
+_NO_PYTEST_RE = re.compile(r"No module named ['\"]?pytest['\"]?")
+
 #: The Leader's fix-in-place loadout — the default remediation for a
 #: 'disappointed' goal: read the deliverable, patch it surgically, re-check.
 _LEADER_FIX_LOADOUT = (
@@ -13018,6 +13026,14 @@ class Orchestrator:
             except ValueError:
                 return None, f"unparseable shell result in {root}", False, set()
             if code == -1 and "[TIMEOUT" not in result and "[INFO]" in result:
+                return None, "pytest is not installed on this host", False, set()
+            # The interpreter reports a missing runner on its own channel: the
+            # command is found and starts, then exits non-zero having imported
+            # nothing. Read as a pytest outcome that would be a suite failing,
+            # which scores the deliverable for a gap in the environment running
+            # it — the one thing this gate must never do, since it decides
+            # whether work ships.
+            if _NO_PYTEST_RE.search(result):
                 return None, "pytest is not installed on this host", False, set()
             return code, result, finalised, finally_seen
 
