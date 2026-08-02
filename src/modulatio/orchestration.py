@@ -2004,6 +2004,17 @@ def _extract_json_resilient(call, *, context: str) -> "dict | list | None":
 #: so prose with unescaped quotes/newlines can no longer break the verdict parse.
 _LEADER_REPORT_HEADING = "Product Quality Report"
 
+#: Heading the Leader emits (per leader-verify) to carry the VERBATIM tail of a
+#: test run it performed on a code deliverable. Rides as its own Markdown
+#: section for the same reason the report does — raw tool output holds quotes
+#: and newlines that would break a JSON string field.
+#:
+#: The section carries the runner's own words rather than a summary of them, so
+#: the verdict can be checked against what the run actually said. A verdict of
+#: fitness over an evidence block reporting failures is a contradiction the
+#: engine can see; a paraphrase would not be.
+_LEADER_TEST_EVIDENCE_HEADING = "Test Suite Evidence"
+
 
 def _split_leader_report_body(raw: str) -> str:
     """Return the human-facing report the Leader wrote after the verdict JSON.
@@ -2027,6 +2038,33 @@ def _split_leader_report_body(raw: str) -> str:
         ):
             return "\n".join(lines[i + 1:]).strip()
     return ""
+
+
+def _split_leader_test_evidence(raw: str) -> str:
+    """Return the verbatim test-run tail the Leader pasted, or ``""``.
+
+    Rides as a Markdown section headed ``## Test Suite Evidence``, found the
+    same way the report section is — a heading line, never a prose mention.
+    Unlike the report this section does NOT run to the end of the response: the
+    report follows it, so read up to the next heading and no further, or a
+    verdict's prose would be scanned for test outcomes it never contained.
+    """
+    if not raw:
+        return ""
+    lines = raw.splitlines()
+    start = -1
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not (stripped.startswith("#") or stripped.startswith("*")):
+            continue
+        if start == -1:
+            if stripped.strip("#*").strip().lower().startswith(
+                _LEADER_TEST_EVIDENCE_HEADING.lower()
+            ):
+                start = i
+            continue
+        return "\n".join(lines[start + 1:i]).strip()
+    return "\n".join(lines[start + 1:]).strip() if start != -1 else ""
 
 
 def _scan_balanced_json(cleaned: str, *, original: str) -> dict | list:

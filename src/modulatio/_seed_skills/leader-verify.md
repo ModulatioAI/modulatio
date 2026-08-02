@@ -26,6 +26,22 @@ opened — open it.
 (Reading to confirm presence/structure is your job; re-running QC's quality
 gates is NOT — see below.)
 
+RUN THE CODE — for a deliverable that is software, reading it is not enough.
+Software either works or it does not, and only running it tells you which.
+Build a throwaway environment, install the package the way a user would so it
+brings its own declared dependencies, and run its test suite. Then run its
+entry point once against a real input. `run_shell` is rooted at `artifacts/`
+and sandboxed; your budget for commands that EXECUTE is separate from the one
+for commands that only look, so inspecting the tree first does not cost you the
+ability to run it.
+
+Judge what the run says, not what the code appears to say. A suite that fails
+is a deliverable that fails, whatever the modules look like. A suite you could
+not run — no runner, no packaging, an environment that would not build — is
+UNVERIFIED, which is a reservation for the human and NOT a fault in the work:
+say plainly that you could not measure it and why. Never report a suite as
+passing unless you watched it pass.
+
 {operator_context}
 
 GOAL
@@ -136,7 +152,18 @@ Respond in TWO parts, in this order:
       ]
     }}
 
-2. AFTER the closing ``` of that JSON block, a Markdown section headed exactly:
+2. When the goal delivered CODE and you ran its suite, a Markdown section
+   headed exactly:
+
+    ## Test Suite Evidence
+
+   followed by the VERBATIM tail of the run inside a fenced block — the
+   runner's own summary line, and the failures if any. Paste what it printed;
+   do not summarise it. This is the evidence your verdict rests on, and a
+   verdict that disagrees with it will be read as the evidence describes.
+   Omit the whole section when you did not run a suite.
+
+3. AFTER the closing ``` of that JSON block, a Markdown section headed exactly:
 
     ## Product Quality Report
 

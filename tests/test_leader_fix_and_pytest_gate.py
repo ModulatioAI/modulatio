@@ -1584,3 +1584,34 @@ def test_orientation_cannot_spend_the_repair_budget(project, monkeypatch):
     assert "budget left" not in seen["act_after"], (
         "repair budget must survive an exhausted reconnaissance budget"
     )
+
+
+def test_leader_test_evidence_section_is_read_up_to_the_next_heading():
+    """The pasted run tail is its own section and stops where the next begins.
+
+    The human-facing report follows it, so reading to the end of the response
+    would scan prose for test outcomes it never described — a report discussing
+    failures would be indistinguishable from a run reporting them.
+    """
+    from modulatio.orchestration import _split_leader_test_evidence
+
+    raw = (
+        '```json\n{"verdict": "satisfied"}\n```\n'
+        "## Test Suite Evidence\n"
+        "```\n3 failed, 71 passed in 0.42s\n```\n"
+        "## Product Quality Report\n"
+        "The package is coherent and nothing failed to import.\n"
+    )
+    evidence = _split_leader_test_evidence(raw)
+
+    assert "3 failed, 71 passed" in evidence
+    assert "coherent" not in evidence, "the report must not leak into the evidence"
+
+
+def test_leader_test_evidence_absent_when_no_suite_was_run():
+    """A goal with no suite emits no section, and a prose mention is not one."""
+    from modulatio.orchestration import _split_leader_test_evidence
+
+    assert _split_leader_test_evidence("") == ""
+    assert _split_leader_test_evidence(
+        "I could not produce Test Suite Evidence for this goal.\n") == ""
