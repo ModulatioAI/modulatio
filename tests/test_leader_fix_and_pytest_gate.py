@@ -1615,3 +1615,63 @@ def test_leader_test_evidence_absent_when_no_suite_was_run():
     assert _split_leader_test_evidence("") == ""
     assert _split_leader_test_evidence(
         "I could not produce Test Suite Evidence for this goal.\n") == ""
+
+
+def test_verdict_cannot_outrun_its_own_test_evidence(project, monkeypatch):
+    """A verdict of fitness over a run reporting failures is a contradiction.
+
+    Verification performs the suite itself and returns the runner's own tail, so
+    the engine reads that tail rather than the conclusion drawn from it: the run
+    said what it said, and the verdict clamps to match.
+    """
+    monkeypatch.setenv("MODULATIO_GOAL_MAX_RETRIES", "0")
+    # Isolate the pasted evidence as the only measured issue.
+    monkeypatch.setattr(Orchestrator, "_goal_pytest_gate", lambda self, tasks: None)
+
+    def _leader_claiming_green(prompt: str) -> str:
+        if "LEADER GOAL VERIFICATION" not in prompt:
+            return _leader_stub(prompt)
+        return (
+            '```json\n{"verdict": "satisfied", "rationale": "all good",'
+            ' "recommendations": []}\n```\n'
+            "## Test Suite Evidence\n"
+            "```\n2 failed, 40 passed in 0.31s\n```\n"
+            "## Product Quality Report\n"
+            "The package is complete and well organised.\n"
+        )
+
+    runners = {
+        "leader": _leader_claiming_green, "planner": _planner_stub,
+        "drafter": _drafter_stub, "qc": _qc_stub,
+    }
+    summary = Orchestrator(project, runners).kickoff("ship the package")
+
+    assert any("clamped verdict satisfied→disappointed" in e
+               for e in summary.errors)
+
+
+def test_a_green_run_is_not_clamped_by_its_own_evidence(project, monkeypatch):
+    """The check reads failures, not the presence of a suite: a passing run must
+    leave the verdict alone, or every tested deliverable would be held back."""
+    monkeypatch.setenv("MODULATIO_GOAL_MAX_RETRIES", "0")
+    monkeypatch.setattr(Orchestrator, "_goal_pytest_gate", lambda self, tasks: None)
+
+    def _leader_with_green_run(prompt: str) -> str:
+        if "LEADER GOAL VERIFICATION" not in prompt:
+            return _leader_stub(prompt)
+        return (
+            '```json\n{"verdict": "satisfied", "rationale": "all good",'
+            ' "recommendations": []}\n```\n'
+            "## Test Suite Evidence\n"
+            "```\n76 passed in 0.81s\n```\n"
+            "## Product Quality Report\n"
+            "Every module imports and the suite is green.\n"
+        )
+
+    runners = {
+        "leader": _leader_with_green_run, "planner": _planner_stub,
+        "drafter": _drafter_stub, "qc": _qc_stub,
+    }
+    summary = Orchestrator(project, runners).kickoff("ship the package")
+
+    assert not any("clamped verdict" in e for e in summary.errors)

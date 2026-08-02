@@ -2015,6 +2015,12 @@ _LEADER_REPORT_HEADING = "Product Quality Report"
 #: engine can see; a paraphrase would not be.
 _LEADER_TEST_EVIDENCE_HEADING = "Test Suite Evidence"
 
+#: A test run reporting its own failures, in the runner's summary wording. Used
+#: to read the pasted evidence rather than the conclusion drawn from it, so a
+#: verdict cannot describe a run more kindly than the run described itself.
+#: Excludes a zero count: a summary line naming zero failures is a green run.
+_TEST_FAILURE_RE = re.compile(r"\b(?!0\b)\d+\s+(?:failed|error)")
+
 
 def _split_leader_report_body(raw: str) -> str:
     """Return the human-facing report the Leader wrote after the verdict JSON.
@@ -13905,6 +13911,22 @@ class Orchestrator:
         if not report_body:
             report_body = _split_leader_report_body(
                 raw_holder[-1] if raw_holder else ""
+            )
+
+        # A code deliverable is judged partly on a suite the verify step runs
+        # itself, and the run's own tail comes back with the verdict. Read the
+        # tail rather than the conclusion drawn from it: a verdict of fitness
+        # over evidence reporting failures is a contradiction visible without
+        # trusting either side, and the run said what it said. Joining the
+        # measured-issue set routes it through the same clamp that binds every
+        # other measured violation.
+        test_evidence = _split_leader_test_evidence(
+            raw_holder[-1] if raw_holder else ""
+        )
+        if test_evidence and _TEST_FAILURE_RE.search(test_evidence):
+            goal_spec_issues.append(
+                "test-suite: the run performed at verify reports failures in "
+                "its own output (see the test-suite evidence section)"
             )
 
         # Write the report artifact first — the ticket will reference it.
