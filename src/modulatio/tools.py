@@ -899,6 +899,23 @@ def _check_full(argv: list[str], root: Path | None = None, extra_roots=()) -> bo
     if not argv:
         return False
     head = argv[0]
+    # A virtualenv interpreter built inside the confined cwd, e.g.
+    # ``<venv>/bin/python -m pip install -e . pytest``. Without this, code
+    # can be verified only against the interpreter Modulatio itself runs
+    # from, which has no project dependencies installed.
+    #
+    # Validated LEXICALLY (relative, no traversal, no dotfile components)
+    # rather than by resolution: a venv's ``bin/python`` is a symlink to the
+    # system interpreter, so resolving it lands outside the root and would
+    # reject every venv that exists. Confinement comes from the path shape
+    # plus the already-confined cwd. Only bare names are rewritten to
+    # ``sys.executable``, so a path head keeps the venv's own pip/pytest.
+    if (
+        "/" in head
+        and head.rsplit("/", 1)[-1] in _PYTHON_BINS
+        and _is_safe_relative_file_arg(head)
+    ):
+        head = "python3"
     if head in _PYTHON_BINS:
         # python3 file.py [args...]  — actual program execution.
         # File arg must resolve under artifacts root with no dotfile
