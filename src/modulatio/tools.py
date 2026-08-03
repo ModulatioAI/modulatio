@@ -899,23 +899,31 @@ def _check_full(argv: list[str], root: Path | None = None, extra_roots=()) -> bo
     if not argv:
         return False
     head = argv[0]
-    # A virtualenv interpreter built inside the confined cwd, e.g.
-    # ``<venv>/bin/python -m pip install -e . pytest``. Without this, code
-    # can be verified only against the interpreter Modulatio itself runs
-    # from, which has no project dependencies installed.
+    # An executable inside the confined cwd: either a virtualenv interpreter
+    # the model built (``<venv>/bin/python -m pip install -e . pytest``) or a
+    # console entry point that installing the project generated
+    # (``<venv>/bin/<name> <args>``). Without this, code can be verified only
+    # against the interpreter Modulatio itself runs from, which has none of
+    # the project's dependencies installed, and a declared console script can
+    # never be exercised the way its users will invoke it.
     #
     # Validated LEXICALLY (relative, no traversal, no dotfile components)
     # rather than by resolution: a venv's ``bin/python`` is a symlink to the
     # system interpreter, so resolving it lands outside the root and would
     # reject every venv that exists. Confinement comes from the path shape
-    # plus the already-confined cwd. Only bare names are rewritten to
-    # ``sys.executable``, so a path head keeps the venv's own pip/pytest.
-    if (
-        "/" in head
-        and head.rsplit("/", 1)[-1] in _PYTHON_BINS
-        and _is_safe_relative_file_arg(head)
-    ):
-        head = "python3"
+    # plus the already-confined cwd, and the payload pre-check still demands
+    # an existing executable file — so this reaches only executables that
+    # live inside the root, which the profile already grants via
+    # ``python3 <file>.py``. A python-named head falls through to the
+    # interpreter shapes below so ``-m`` / ``-c`` stay uniform; any other
+    # name is a generated entry point invoked directly. Only bare names are
+    # rewritten to ``sys.executable``, so a path head keeps the venv's own
+    # pip/pytest.
+    if "/" in head and _is_safe_relative_file_arg(head):
+        if head.rsplit("/", 1)[-1] in _PYTHON_BINS:
+            head = "python3"
+        else:
+            return True
     if head in _PYTHON_BINS:
         # python3 file.py [args...]  — actual program execution.
         # File arg must resolve under artifacts root with no dotfile
