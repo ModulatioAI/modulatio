@@ -1307,7 +1307,7 @@ def _drain_shell_pipes(
     )
 
 
-def _resolve_payload_binary(head: str) -> str | None:
+def _resolve_payload_binary(head: str, cwd: "Path | None" = None) -> str | None:
     """Return the resolved executable path for ``head`` (the first real
     payload token), or ``None`` when it isn't installed on this host.
 
@@ -1322,6 +1322,11 @@ def _resolve_payload_binary(head: str) -> str | None:
 
     An absolute/relative path that points at an existing executable file is
     treated as present (``shutil.which`` only searches PATH for bare names).
+    A RELATIVE path is resolved against ``cwd`` — the child's working
+    directory — not the engine's own. They differ: the engine runs from
+    wherever it was launched while the child runs inside the confined
+    artifacts root, so an interpreter the model just built (``venv/bin/python``)
+    would otherwise be probed at the wrong place and reported "not installed".
     """
     import shutil
 
@@ -1329,7 +1334,8 @@ def _resolve_payload_binary(head: str) -> str | None:
         return None
     if os.sep in head or (os.altsep and os.altsep in head):
         # Explicit path form: present iff it's an existing executable file.
-        return head if os.path.isfile(head) and os.access(head, os.X_OK) else None
+        probe = Path(head) if os.path.isabs(head) else Path(cwd or ".") / head
+        return head if probe.is_file() and os.access(probe, os.X_OK) else None
     return shutil.which(head)
 
 
@@ -1436,7 +1442,7 @@ def make_run_shell(
         # PATH (the sandbox ro-binds `/`), and return the [INFO] body directly
         # when the payload isn't installed. The FileNotFoundError handler stays
         # as a backstop (e.g. prlimit-absent hosts, races).
-        if exec_argv and _resolve_payload_binary(exec_argv[0]) is None:
+        if exec_argv and _resolve_payload_binary(exec_argv[0], wd) is None:
             return _format_run_shell_result(
                 -1, "", _not_installed_body(exec_argv[0])
             )

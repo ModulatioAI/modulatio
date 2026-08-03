@@ -3073,9 +3073,9 @@ def test_run_shell_setup_consuming_remainder_starts_no_child(
     art = _make_artifacts(tmp_path)
     real_resolve = tools._resolve_payload_binary
 
-    def _slow_resolve(head):
+    def _slow_resolve(head, cwd=None):
         _time.sleep(0.4)
-        return real_resolve(head)
+        return real_resolve(head, cwd)
 
     monkeypatch.setattr(tools, "_resolve_payload_binary", _slow_resolve)
 
@@ -3243,9 +3243,9 @@ def test_run_shell_setup_expiry_classified_by_binding_bound(
     art = _make_artifacts(tmp_path)
     real_resolve = tools._resolve_payload_binary
 
-    def _slow_resolve(head):
+    def _slow_resolve(head, cwd=None):
         _time.sleep(0.3)
-        return real_resolve(head)
+        return real_resolve(head, cwd)
 
     monkeypatch.setattr(tools, "_resolve_payload_binary", _slow_resolve)
 
