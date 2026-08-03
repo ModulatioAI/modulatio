@@ -124,7 +124,7 @@ def test_auto_redo_with_zero_completed_settles_goal(project: Project):
         goal, [task], "still not good enough", Path("report.md"), summary,
     )
 
-    assert goal.status == GoalStatus.COMPLETED, (
+    assert goal.status == GoalStatus.INCOMPLETE, (
         "a zero-completed redo must still terminate the goal"
     )
     # The reservation is surfaced to the operator.
@@ -459,9 +459,9 @@ def test_settle_zero_completed_drives_goal_terminal_and_is_idempotent(project: P
     orch._settle_zero_completed(
         goal, summary, concern="no completed work on the redo", rationale="settled: zero",
     )
-    assert goal.status == GoalStatus.COMPLETED
+    assert goal.status == GoalStatus.INCOMPLETE
     assert any("no completed work" in r.get("concern", "") for r in summary.recommendations)
-    assert any(t.to_state == GoalStatus.COMPLETED.value for t in goal.transitions)
+    assert any(t.to_state == GoalStatus.INCOMPLETE.value for t in goal.transitions)
 
     # Idempotent: a second call on the now-terminal goal adds nothing.
     n_before = len(summary.recommendations)
@@ -492,9 +492,9 @@ def test_reexecute_goal_zero_completed_settles_goal(project: Project):
 
     orch._reexecute_goal(goal, RunSummary(project=project))
 
-    assert goal.status == GoalStatus.COMPLETED, "zero-completed decline redo must settle the goal"
+    assert goal.status == GoalStatus.INCOMPLETE, "zero-completed decline redo must settle the goal"
     reloaded = store.get_goal(PROJECT_CODE, goal.id, run_id=project.run_id)
-    assert reloaded.status == GoalStatus.COMPLETED
+    assert reloaded.status == GoalStatus.INCOMPLETE
 
 
 def test_auto_resume_zero_completed_settles_goal(project: Project):
@@ -532,5 +532,5 @@ def test_auto_resume_zero_completed_settles_goal(project: Project):
     orch._auto_resume_refreshable_goals(RunSummary(project=project))
 
     reloaded = store.get_goal(PROJECT_CODE, goal.id, run_id=project.run_id)
-    assert reloaded.status == GoalStatus.COMPLETED, "zero-completed auto-resume must settle the goal"
+    assert reloaded.status == GoalStatus.INCOMPLETE, "zero-completed auto-resume must settle the goal"
 

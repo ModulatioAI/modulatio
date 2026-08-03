@@ -207,8 +207,9 @@ def test_qc_down_too_ships_with_reservations_not_a_hang(project: Project):
     summary = orch.kickoff("research two topics, assemble the report")
 
     goals = store.list_goals(PROJECT_CODE, run_id=project.run_id)
-    assert goals and all(g.status is GoalStatus.COMPLETED for g in goals), (
-        "the goal reaches a terminal state even with every model down")
+    assert goals and all(g.status is GoalStatus.INCOMPLETE for g in goals), (
+        "the goal reaches a terminal state even with every model down, and "
+        "records that it finished owing work rather than claiming success")
     assert summary.recommendations or summary.errors, (
         "the failure is surfaced, not swallowed")
 
