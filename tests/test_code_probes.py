@@ -1378,16 +1378,24 @@ def test_build_hook_cannot_read_a_planted_host_secret(tmp_path, enforceable,
                                                       real_wheelhouse):
     secret = tmp_path / "id_rsa"
     secret.write_text("PRIVATE-KEY-MATERIAL")
+    # The hook aborts the build when it can reach the secret, so reachability
+    # is carried by the EXIT STATUS. A hook that merely printed what it found
+    # would be unobservable here: pip shows build output only when the build
+    # fails, so a successful build reveals nothing either way.
     units, root = _malicious_pkg(
         tmp_path,
-        "import pathlib, sys\n"
+        "import pathlib\n"
         f"p = pathlib.Path({str(secret)!r})\n"
-        "sys.stderr.write('SECRET=' + (p.read_text() if p.exists() else 'ABSENT'))\n")
+        "if p.exists():\n"
+        "    raise SystemExit('SECRET-READABLE:' + p.read_text())\n")
     scratch = tmp_path / "s"
     snap = cp.materialize_snapshot(units, root, scratch)
     res = cp.build_wheel_phase(snap, scratch)
     assert "PRIVATE-KEY-MATERIAL" not in res.output_tail
-    assert "SECRET=ABSENT" in res.output_tail or res.status is cp.ProbeStatus.PRODUCT_FAILED
+    assert "SECRET-READABLE" not in res.output_tail
+    assert res.status is cp.ProbeStatus.OK, (
+        "the build completes because the host secret is absent inside the "
+        "sandbox; a failure here means the hook reached it")
 
 
 @_needs_bwrap

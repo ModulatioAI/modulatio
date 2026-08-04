@@ -609,7 +609,23 @@ def build_wheel_phase(
         )
     wheels_dir = Path(scratch) / "wheels"
     wheels_dir.mkdir(parents=True, exist_ok=True)
-    target = str(build_target) if build_target is not None else str(snapshot.path)
+    # Build from a WRITABLE copy, not from the read-only snapshot bind.
+    # setuptools' build_meta writes an .egg-info directory INTO the source
+    # tree while resolving build requirements, so a read-only source fails
+    # before the backend runs — and the failure reads as the deliverable's
+    # fault when it is the mount that refused. The snapshot itself stays
+    # pristine, so its content hash still verifies once the phases finish.
+    src = Path(build_target) if build_target is not None else snapshot.path
+    build_dir = Path(scratch) / "build"
+    shutil.rmtree(build_dir, ignore_errors=True)
+    try:
+        shutil.copytree(src, build_dir)
+    except OSError as exc:
+        return ProbePhaseResult(
+            status=ProbeStatus.ENGINE_UNAVAILABLE, phase="wheel", origin="engine",
+            reason=f"could not stage a writable build tree: {exc}"[:300],
+        )
+    target = str(build_dir)
     return run_probe_phase(
         [sys.executable, "-m", "pip", "wheel", "--no-index",
          "--find-links", str(wh), "--no-deps", "--no-cache-dir",
