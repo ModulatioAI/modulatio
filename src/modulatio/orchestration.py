@@ -12878,6 +12878,67 @@ class Orchestrator:
                 roots.append(min(candidates, key=lambda p: len(p.parts)))
         return roots
 
+    def _goal_execution_probe(
+        self, tasks: "list[Task]",
+    ) -> "tuple[bool | None, str] | None":
+        """Test-suite evidence from the hermetic execution probes, in the
+        gate's own ``(green, report)`` contract.
+
+        The probes build a wheel, install it into a pristine environment, and
+        run the suite with a runner provisioned from the approved local
+        wheelhouse — all inside the sandbox. That is the only path on which a
+        test runner is reachable at all: the engine's own interpreter carries
+        no pytest, and the general shell's mount graph does not expose the
+        wheelhouse, so a runner cannot be installed from a shell command.
+
+        ``None`` means the probes do not apply (no packaging shape, or no
+        wheelhouse to provision from) and the caller falls back to running
+        the suite directly against the deliverable tree.
+        """
+        import tempfile
+
+        from modulatio import assembly as _assembly
+        from modulatio import code_probes as _cp
+
+        if _cp.wheelhouse_path() is None:
+            return None
+        artifacts_root = self._shared_artifacts_root()
+        units = sorted({
+            t.output_path for t in tasks
+            if t.status == TaskStatus.COMPLETED and t.output_path
+            and (artifacts_root / t.output_path).exists()
+        })
+        if not units:
+            return None
+        # Fixtures and packaging metadata are frequently produced by tasks
+        # whose own kind is not code; the snapshot must carry the whole
+        # deliverable or the suite fails on files the goal actually shipped.
+        if _assembly._packaging_facts(units, artifacts_root)["root"] is None:
+            return None
+        scratch = Path(tempfile.mkdtemp(prefix="modulatio-goal-probe-"))
+        try:
+            facts = _cp.run_execution_probes(
+                units, artifacts_root, scratch_root=scratch)
+        except Exception as exc:  # noqa: BLE001 — a probe crash is engine-side
+            return None, f"execution probes failed to run: {exc}"[:300]
+        status = facts.get("status")
+        if status == "not_applicable":
+            return None
+        lines = [
+            f"{p.get('phase', '?')}: {p.get('status', '?')}"
+            + (f" — {p['reason']}" if p.get("reason") else "")
+            for p in facts.get("phases", [])
+        ]
+        tail = ""
+        for p in facts.get("phases", []):
+            if p.get("phase") == "test" and p.get("output_tail"):
+                tail = f"\n\n{p['output_tail']}"
+        report = ("hermetic build + install + test (engine-run, sandboxed)\n"
+                  + "\n".join(lines) + tail)
+        if status == "engine_unavailable":
+            return None, report
+        return status == "ok", report
+
     def _goal_pytest_gate(
         self, tasks: "list[Task]",
     ) -> "tuple[bool | None, str] | None":
@@ -12927,6 +12988,13 @@ class Orchestrator:
         """
         if not any(t.artifact_kind in _CODE_ARTIFACT_KINDS for t in tasks):
             return None
+        # A packaged deliverable is judged on the hermetic path: it installs
+        # the built wheel and runs the suite against the INSTALLED package
+        # with a provisioned runner, so the evidence covers buildability and
+        # the shipped import surface rather than the source tree alone.
+        probed = self._goal_execution_probe(tasks)
+        if probed is not None:
+            return probed
         from modulatio import sandbox as _sandbox
         if (not _sandbox.is_sandbox_available()
                 or _sandbox.is_bypass_requested()
