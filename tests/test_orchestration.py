@@ -10366,7 +10366,7 @@ def test_leader_verify_clamps_verdict_on_measured_hard_violation(tmp_path, monke
     assert goal.retry_count >= 1
 
 
-def test_leader_verify_withholds_on_hard_violation_at_exhaustion(tmp_path, monkeypatch):
+def test_leader_verify_ships_flagged_on_hard_violation_at_exhaustion(tmp_path, monkeypatch):
     """#80 slice 4 (WITHHOLD): when a measured declared-spec (HARD) violation survives
     the retry budget, the engine WITHHOLDS the deliverable rather than shipping it with
     a reservation — HARD means the engine binds. The goal still COMPLETES (the run is
@@ -10412,9 +10412,17 @@ def test_leader_verify_withholds_on_hard_violation_at_exhaustion(tmp_path, monke
     summary.tasks = [task]
     orch._leader_verify_goal(goal, [task], summary)
 
-    assert summary.withheld_deliverables, "a surviving HARD violation must withhold"
-    assert goal.status == GoalStatus.COMPLETED  # goal completes; deliverable withheld
-    assert any("WITHHELD" in r["concern"] for r in summary.recommendations)
+    assert not summary.withheld_deliverables, (
+        "a surviving HARD violation ships as a known-defective piece — a "
+        "withheld product is a missing one, which is worse than a flawed one")
+    assert goal.status == GoalStatus.COMPLETED
+    # The bind is on the RECORD: the measured violation reaches the quality
+    # report, where a human reads it and decides.
+    assert any("SHIPPED WITH MEASURED DEFECTS" in r["concern"]
+               for r in summary.recommendations)
+    assert any("part_floor" in r["concern"] or "structure" in r["concern"]
+               for r in summary.recommendations), (
+        "the concern names what was measured, not just that something failed")
 
 
 def test_leader_verify_defer_remediation_records_reservation_no_redo(project):
@@ -13328,21 +13336,22 @@ def test_verify_runs_probes_and_unavailable_clamps_without_fixer(
     assert any("clamped" in e for e in summary.errors)
     assert fixes == []
     assert goal.retry_count == 0
-    # The deliverable is actually WITHHELD (engine-unavailable rides
-    # the goal_spec_issues withhold branch — the artifact does not ship clean).
-    assert task.id in summary.withheld_deliverables
-    # Closure: the withhold SURVIVES final delivery — run the real delivery
-    # pass over an otherwise-shippable artifact and assert nothing renders
-    # for the withheld id.
+    # The clamp binds the VERDICT and the record, not delivery: the piece
+    # ships with its measured failure named, because a withheld product is a
+    # missing one and a flawed piece a human can read beats nothing at all.
+    assert not summary.withheld_deliverables
+    assert any("SHIPPED WITH MEASURED DEFECTS" in r["concern"]
+               for r in summary.recommendations)
+    # Closure: the artifact really does reach the human on the final delivery
+    # pass, carrying the reservation rather than disappearing behind it.
     monkeypatch.setenv("MODULATIO_DELIVERY_DIR", str(tmp_path / "deliver"))
     art = orch._artifacts_root()
     art.mkdir(parents=True, exist_ok=True)
     (art / "README.md").write_text("# Product\n\nreal content, shippable.\n")
     summary.tasks = [task]
     orch._deliver_finished_products(summary)
-    assert task.id in summary.withheld_deliverables      # still withheld
-    assert all(d.task_id != task.id
-               for d in summary.rendered_deliverables)   # never rendered
+    assert not summary.withheld_deliverables
+    assert any(d.task_id == task.id for d in summary.rendered_deliverables)
 
 
 def test_goal_holes_names_missing_artifact_and_unfinished_task(project, tmp_path):

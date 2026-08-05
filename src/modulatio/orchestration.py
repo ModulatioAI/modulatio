@@ -14251,31 +14251,29 @@ class Orchestrator:
                         f"| report {report_path.name}"
                     )
             elif goal_spec_issues:
-                # #80 slice 4 (WITHHOLD): a declared-spec (HARD) violation the engine
-                # MEASURED survived the retry budget. Do NOT ship a product the engine
-                # KNOWS violates an operator-HARD param — withhold it. The goal still
-                # COMPLETES (the run is never blocked; independent goals ship), but this
-                # deliverable does not go out clean. HARD means the engine binds.
-                # Store TASK IDs (the identifier the delivery pass keys on) so the
-                # policy withhold survives _deliver_finished_products by id, not a
-                # fragile path match.
-                summary.withheld_deliverables.extend(
-                    t.id for t in tasks if getattr(t, "deliverable", False)
-                )
+                # A declared-requirement (HARD) violation the engine MEASURED
+                # survived the retry budget. SHIP the deliverable and carry the
+                # measured failure into the quality report: a substandard piece
+                # the human can read, judge, and finish beats no piece at all,
+                # and withholding turns a known-imperfect product into a missing
+                # one. The engine's bind is on the RECORD — the violation is
+                # named in the report, never silently dropped — not on delivery.
                 summary.recommendations.append({
                     "goal_id": goal.id,
                     "concern": (
-                        f"WITHHELD: {len(goal_spec_issues)} measured declared-requirement "
-                        f"(HARD) violation(s) survived {goal.retry_count} fix attempt(s) — "
+                        f"SHIPPED WITH MEASURED DEFECTS: {len(goal_spec_issues)} "
+                        "declared-requirement (HARD) violation(s) survived "
+                        f"{goal.retry_count} fix attempt(s) — "
                         + "; ".join(goal_spec_issues[:5])
                     ),
                     "suggestion": (
-                        "This deliverable was WITHHELD, not shipped clean — it does not "
-                        "meet the declared brief. Human action required."
+                        "This deliverable ships as-is and does NOT meet the declared "
+                        "brief. Treat the violation(s) above as known defects and "
+                        "resolve them before relying on it."
                     ),
                 })
                 rationale_text = (
-                    f"leader: WITHHELD — {len(goal_spec_issues)} measured HARD "
+                    f"leader: shipped with {len(goal_spec_issues)} measured HARD "
                     f"violation(s) after {goal.retry_count} attempt(s): "
                     f"{rationale} | report {report_path.name}"
                 )
