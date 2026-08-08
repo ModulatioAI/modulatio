@@ -210,6 +210,15 @@ def _looks_like_narration(s: str) -> str | None:
     return None
 
 
+#: Characters that only ever draw a rule, never name anything. A line made
+#: solely of these is a banner across the top of a body, or the underline of
+#: a setext heading — both of which the first-non-empty-line rule will happily
+#: read as the title. Taken as a filename it produces something the operator
+#: cannot identify, and two such deliverables in one folder collide on the
+#: same name.
+_RULE_CHARS = "-_=*~#. \t"
+
+
 def human_name_from_markdown(text: str, *, fallback: str) -> str:
     """Derive a human-friendly filename stem from a Markdown document's own
     title: the first ATX heading (``# Title``), else the first non-empty
@@ -238,7 +247,7 @@ def human_name_from_markdown(text: str, *, fallback: str) -> str:
     # Let me write...") — a thinking-out-loud first line, not a title. In either
     # case fall back to the supplied name (the Leader's document title) before
     # sanitizing, so the file is named for WHAT it is, not the producer's process.
-    if not raw.strip("-_ ") or _looks_like_narration(raw):
+    if not raw.strip(_RULE_CHARS) or _looks_like_narration(raw):
         raw = fallback
     return _sanitize_filename(raw)
 

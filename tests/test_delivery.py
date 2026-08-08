@@ -831,3 +831,26 @@ def test_looks_binary_plain_text_false(tmp_path: Path) -> None:
 
 def test_looks_binary_missing_file_false(tmp_path: Path) -> None:
     assert _looks_binary(tmp_path / "nope.md") is False
+
+
+def test_name_rejects_every_rule_style_not_just_dashes():
+    """Any line that only draws a rule must fall back, whatever it is drawn
+    with. A banner of equals signs across the top of a body reached the
+    delivery folder as a fifty-character filename the operator could not
+    identify, and a second such deliverable would collide with it."""
+    for rule in ("=" * 50, "***", "~~~~~~", "###", "_____", ". . ."):
+        assert delivery.human_name_from_markdown(
+            f"{rule}\nTask Report\n\nbody", fallback="Taskwatch Report"
+        ) == "Taskwatch Report", f"{rule!r} was accepted as a title"
+
+
+def test_name_keeps_a_title_that_merely_contains_rule_characters():
+    """Only a line made ENTIRELY of rule characters is a rule; the characters
+    are ordinary inside a real title and must not cost the document its name."""
+    assert delivery.human_name_from_markdown(
+        "Cost-Benefit Analysis\n\nbody", fallback="fb"
+    ) == "Cost-Benefit Analysis"
+    # A setext heading keeps its TITLE — the underline is the following line.
+    assert delivery.human_name_from_markdown(
+        "Task Report\n===========\n\nbody", fallback="fb"
+    ) == "Task Report"
