@@ -1122,3 +1122,48 @@ async def test_success_dest_with_bracket_markup_does_not_crash(monkeypatch):
         text = _status_text(dialog)
         assert "Exported to" in text
         assert "[/dir]" in text
+
+
+def test_a_built_environment_is_not_listed_as_the_product(tmp_path):
+    """One environment built beside a small product contributes thousands of
+    entries, which buries the work under the tooling that checked it. Detected
+    by the marker an environment carries, not by its name — the folder is named
+    by whoever built it."""
+    from modulatio.tui.screens.artifacts import _is_artifact_file
+
+    root = tmp_path / "artifacts"
+    (root / "apppkg").mkdir(parents=True)
+    (root / "apppkg" / "store.py").write_text("x = 1\n")
+    (root / "README.md").write_text("# apppkg\n")
+
+    # Two environments under names nothing could have guessed.
+    for name in ("verify_env", "throwaway_env"):
+        env = root / name / "lib" / "python3.12" / "site-packages" / "dep"
+        env.mkdir(parents=True)
+        (root / name / "pyvenv.cfg").write_text("home = /usr\n")
+        (env / "__init__.py").write_text("y = 2\n")
+        (root / name / "bin").mkdir()
+        (root / name / "bin" / "activate.py").write_text("z = 3\n")
+
+    listed = sorted(
+        str(p.relative_to(root))
+        for p in root.rglob("*") if _is_artifact_file(p)
+    )
+    assert listed == ["README.md", "apppkg/store.py"], listed
+
+
+def test_an_installed_dependency_tree_is_not_the_deliverable(tmp_path):
+    """Vendored dependencies are somebody else's code sitting in the
+    deliverable's folder, whatever put them there."""
+    from modulatio.tui.screens.artifacts import _is_artifact_file
+
+    root = tmp_path / "artifacts"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "index.js").write_text("export const a = 1;\n")
+    vendored = root / "node_modules" / "left-pad"
+    vendored.mkdir(parents=True)
+    (vendored / "index.js").write_text("module.exports = 1;\n")
+
+    listed = [p for p in root.rglob("*") if _is_artifact_file(p)]
+    assert [p.name for p in listed] == ["index.js"]
+    assert listed[0].parent.name == "src"

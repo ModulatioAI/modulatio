@@ -78,7 +78,28 @@ _SKIP_PATH_PARTS = frozenset({
     "__pycache__",
     ".pytest_cache",
     ".ruff_cache",
+    # An installed dependency tree is somebody else's code sitting in the
+    # deliverable's folder. One environment built beside a ten-file product
+    # contributes thousands of entries, so listing them buries the work
+    # under the tooling that checked it.
+    "site-packages",
+    "node_modules",
 })
+
+
+def _under_built_environment(path: Path) -> bool:
+    """True when ``path`` lies inside an environment rather than the product.
+
+    Detected by the marker an environment carries at its root, not by its
+    name: the folder is named by whoever built it, and a rule that listed
+    names would miss the next one. Only the parents are examined, so the
+    marker file itself still lists — its presence is the evidence that the
+    rest of that subtree is tooling.
+    """
+    for parent in path.parents:
+        if (parent / "pyvenv.cfg").is_file():
+            return True
+    return False
 
 
 def _is_artifact_file(path: Path) -> bool:
@@ -104,7 +125,9 @@ def _is_artifact_file(path: Path) -> bool:
             return False
         if part.startswith(".") and part not in (".",):
             return False
-    return True
+    # Checked last: it stats the parents, and the component test above has
+    # already dropped the bulk of an environment's contents by then.
+    return not _under_built_environment(path)
 
 
 class ArtifactsScreen(Vertical):
