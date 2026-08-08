@@ -922,7 +922,15 @@ class AuthorizationTransactionState:
         """Replay any journaled transaction — the restart/second-instance
         path. True when nothing is owed durably (or it restored cleanly);
         False means deny, with ``recovery_error`` set when the record
-        itself is untrustworthy."""
+        itself is untrustworthy.
+
+        Not a production path: authority consumers call
+        ``ensure_authority_ready``, which runs this body, the epoch read, and
+        reconciliation under ONE transaction, while this wrapper opens its
+        own. It is kept because it exercises recovery ALONE — the bundled
+        call cannot distinguish a refused recovery from a reconciliation
+        that discarded a superseded debt, so removing it would coarsen what
+        the recovery cases can assert."""
         if self.journal is None:
             return True
         try:
@@ -993,7 +1001,14 @@ class AuthorizationTransactionState:
         The whole decision — reading the epoch, dropping superseded debts,
         restoring the rest, clearing the record — runs inside the PROJECT
         transaction, so a revoke cannot complete between the epoch read
-        and the restore and see its revoked authority handed back."""
+        and the restore and see its revoked authority handed back.
+
+        Not a production path, for the same reason as ``recover_durable``:
+        ``ensure_authority_ready`` runs this body under the single
+        transaction that makes the readiness check one linearization point.
+        It is kept because it exercises reconciliation ALONE, which is what
+        lets debt retention and lock serialization be asserted apart from
+        recovery."""
         transaction = (contextlib.nullcontext() if self.journal is None
                        else self.journal.transaction())
         try:
