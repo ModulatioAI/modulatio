@@ -158,3 +158,9 @@ def test_routes_validate_project_code(client):
         "/api/..evil/converse", json={"text": "x"}
     ).status_code == 404
     assert client.get("/api/..evil/conversation").status_code == 404
+
+
+def test_interrupt_converse_when_idle_reports_false(client):
+    resp = client.post("/api/web/converse/interrupt")
+    assert resp.status_code == 200
+    assert resp.json() == {"interrupted": False}

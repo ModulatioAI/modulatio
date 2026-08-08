@@ -153,6 +153,12 @@ def stop(project: str, request: Request) -> dict:
     return {"stopped": _actor(request, code).stop()}
 
 
+@router.post("/{project}/converse/interrupt")
+def interrupt_converse(project: str, request: Request) -> dict:
+    code = valid_project(project)
+    return {"interrupted": _actor(request, code).interrupt_converse()}
+
+
 @router.post("/{project}/approvals/{rid}")
 def approval_decision(
     project: str, rid: str, body: ApprovalBody, request: Request

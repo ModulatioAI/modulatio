@@ -293,3 +293,59 @@ def test_converse_supplies_capability_ask_via_the_ticket_bridge(actor, monkeypat
     from modulatio.permissions import Decision, capability_for
     monkeypatch.setattr(actor.broker, "_timeout_s", 0.01)
     assert ask(capability_for("run_shell", {"cmd": "ls"})) is Decision.DENY
+
+
+def test_interrupt_converse_signals_the_in_flight_turn(actor, monkeypatch):
+    """A wedged conversation is cancellable from the console. Without it the
+    only recovery is killing the process, which discards the conversation and
+    every other lane the API serves."""
+    from modulatio.web import actors as actors_mod
+
+    started = threading.Event()
+    aborted = threading.Event()
+
+    def waiting_converse(self, message, **kw):
+        started.set()
+        if self.abort_event.wait(timeout=30):
+            aborted.set()
+        return "done"
+
+    monkeypatch.setattr(
+        actors_mod.Orchestrator, "converse", waiting_converse, raising=True
+    )
+    turn = threading.Thread(target=actor.converse, args=("hello",), daemon=True)
+    turn.start()
+    assert started.wait(timeout=10)
+
+    assert actor.interrupt_converse() is True
+    assert aborted.wait(timeout=10), "the in-flight turn never saw the signal"
+    turn.join(timeout=10)
+
+
+def test_interrupt_converse_is_a_no_op_while_the_leader_is_idle(actor):
+    """A stray interrupt must not arm the event for the NEXT turn — an idle
+    lane has nothing to stop."""
+    assert actor.interrupt_converse() is False
+
+
+def test_interrupt_converse_does_not_stop_a_running_job(actor, monkeypatch):
+    """Stopping a job and interrupting a conversation are separate intents:
+    interrupting the Leader must leave a live kickoff running."""
+    from modulatio.web import actors as actors_mod
+
+    started = threading.Event()
+
+    def waiting_kickoff(self, objective, **kw):
+        started.set()
+        self.abort_event.wait(timeout=5)
+
+    monkeypatch.setattr(
+        actors_mod.Orchestrator, "kickoff", waiting_kickoff, raising=True
+    )
+    actor.kickoff("a job")
+    assert started.wait(timeout=10)
+
+    assert actor.interrupt_converse() is False   # no converse turn is running
+    assert actor.kickoff_active() is True        # the job is untouched
+    actor.stop()
+    actor.join_kickoff(timeout=10)

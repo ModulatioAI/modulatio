@@ -185,6 +185,27 @@ class OrchestratorActor:
             if after != before:
                 self._bus.publish({"type": "mode", "data": {"mode": after}})
 
+    def interrupt_converse(self) -> bool:
+        """Interrupt the Leader's in-flight converse turn. False when the
+        Leader isn't working, so a stray click can't disturb an idle lane.
+
+        The console's counterpart to the TUI's ESC, and distinct from
+        ``stop()``, which aborts a kickoff: stopping a job and interrupting a
+        conversation are separate intents and must stay separately reachable.
+        Without it the only way past a wedged turn is killing the process,
+        which discards the conversation and every other lane this API serves.
+
+        Cooperative: the tool-loop reads the event at its next step boundary
+        and returns its interrupted note, so a model or tool call already in
+        flight still finishes. This bounds the TURN, not the current call —
+        the per-call deadline remains what bounds that.
+        """
+        orch = self._converse_orch
+        if orch is None or not self._converse_busy:
+            return False
+        orch.abort_event.set()  # thread-safe; the tool-loop reads it
+        return True
+
     def reset_thread(self):
         """Archive the Leader conversation (the operator's /new). Returns
         the archive path or None when there was no thread yet."""
