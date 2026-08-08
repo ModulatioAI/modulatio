@@ -222,6 +222,7 @@ def run_probe_phase(
     allow_network: bool = False,
     env_extra: "dict[str, str] | None" = None,
     extra_ro: "tuple[Path, ...]" = (),
+    cwd: "Path | None" = None,
 ) -> ProbePhaseResult:
     """Execute ONE probe phase inside the mandatory sandbox.
 
@@ -316,12 +317,14 @@ def run_probe_phase(
     try:
         # stdin=DEVNULL: fd 0 is EOF, never an operator-input/read-and-hang
         # channel. start_new_session: the child leads its own process
-        # group so a timeout kills the WHOLE tree, not just bwrap. cwd is the
-        # scratch, so a relative read can't reach the engine's launch dir.
+        # group so a timeout kills the WHOLE tree, not just bwrap. The working
+        # directory defaults to the scratch, so a relative read cannot reach
+        # the engine's launch dir; a caller may name a directory INSIDE it for
+        # a toolchain that must run from its own source root.
         proc = subprocess.Popen(
             argv, env=env, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            cwd=str(Path(scratch)), start_new_session=True,
+            cwd=str(cwd or Path(scratch)), start_new_session=True,
             pass_fds=(status_w,),
         )
     except OSError as exc:
@@ -1152,6 +1155,132 @@ def env_manifest(
         ln.strip() for ln in text.splitlines()
         if ln.strip() and ("==" in ln or " @ " in ln) and not ln.startswith("#"))
     return manifest, res
+
+
+#: Build and test commands per ecosystem, chosen by the manifest a deliverable
+#: ships. ONE ROW per ecosystem rather than a probe module per language: every
+#: ecosystem answers the same two questions — does it build, do its tests pass —
+#: and only the words differ, so a language nobody wrote a module for would
+#: otherwise ship unverified. Build is a SEQUENCE because some toolchains
+#: configure before they compile.
+#:
+#: Offline flags where the toolchain has them: evidence is gathered without
+#: reaching the network, so a build that needs to fetch reports that it could
+#: not be measured rather than quietly resolving something.
+#:
+#: The commands are ENGINE-DERIVED from the detected manifest and never
+#: declared by the deliverable — a check whose command comes from the thing
+#: being checked is not a check.
+_ECOSYSTEM_COMMANDS: tuple = (
+    ("Cargo.toml",
+     ((("cargo", "build", "--offline"),),
+      (("cargo", "test", "--offline"),))),
+    ("go.mod",
+     ((("go", "build", "./..."),),
+      (("go", "test", "./..."),))),
+    ("pom.xml",
+     ((("mvn", "-q", "-o", "compile"),),
+      (("mvn", "-q", "-o", "test"),))),
+    ("CMakeLists.txt",
+     ((("cmake", "-S", ".", "-B", "build"), ("cmake", "--build", "build")),
+      (("ctest", "--test-dir", "build", "--output-on-failure"),))),
+    ("package.json",
+     ((("npm", "--offline", "install", "--no-audit", "--no-fund"),),
+      (("npm", "test"),))),
+)
+
+
+def detect_ecosystem(root: Path) -> "tuple[str, tuple, tuple] | None":
+    """The ecosystem a tree declares, by the manifest sitting in it.
+
+    Returns ``(manifest, build_stages, test_stages)`` or ``None`` when nothing
+    recognizable is there. Python is absent by design: its deliverables take
+    the hermetic path, which proves more than building and testing in place.
+    """
+    for manifest, (build, test) in _ECOSYSTEM_COMMANDS:
+        if (Path(root) / manifest).is_file():
+            return manifest, build, test
+    return None
+
+
+def run_ecosystem_probes(
+    units_used: "list[str]", artifacts_root: Path, *, scratch_root: Path,
+) -> dict:
+    """Build and test a deliverable through its own ecosystem's commands.
+
+    Same evidence shape the hermetic Python path returns — did it build, did
+    the tests pass, and the output — so every language reports through one
+    contract instead of each carrying its own notion of proof.
+
+    Both stages run against a WRITABLE copy of the snapshot: toolchains write
+    into their source tree (object dirs, lock files, caches), and a read-only
+    source fails before the compiler runs, which reads as the deliverable's
+    fault when it is the mount refusing. The snapshot itself stays pristine so
+    its content hash still verifies.
+    """
+    scratch = Path(scratch_root) / "probe"
+    facts: dict = {"install_mode": "in_tree"}
+    phases: list[ProbePhaseResult] = []
+    start = time.monotonic()
+    token = _DEADLINE_VAR.set(start + DIGEST_DEADLINE_S)
+    try:
+        try:
+            snapshot = materialize_snapshot(units_used, artifacts_root, scratch)
+        except SnapshotError as exc:
+            return {"status": "engine_unavailable",
+                    "reason": f"snapshot refused: {exc}", "phases": []}
+
+        found = detect_ecosystem(snapshot.path)
+        if found is None:
+            return {"status": "not_applicable",
+                    "reason": "no recognized ecosystem manifest in the closure",
+                    "phases": []}
+        manifest, build_stages, test_stages = found
+        facts["ecosystem"] = manifest
+
+        work = scratch / "work"
+        shutil.rmtree(work, ignore_errors=True)
+        try:
+            shutil.copytree(snapshot.path, work)
+        except OSError as exc:
+            return {"status": "engine_unavailable",
+                    "reason": f"could not stage a writable tree: {exc}"[:300],
+                    "phases": []}
+
+        for phase_name, stages in (("build", build_stages), ("test", test_stages)):
+            for argv in stages:
+                res = run_probe_phase(
+                    list(argv), phase=phase_name, snapshot=snapshot,
+                    scratch=scratch, cwd=work,
+                )
+                phases.append(res)
+                if res.status is not ProbeStatus.OK:
+                    break
+            if phases and phases[-1].status is not ProbeStatus.OK:
+                break
+    finally:
+        _DEADLINE_VAR.reset(token)
+        destroy_scratch(Path(scratch_root))
+
+    facts["phases"] = [
+        {"phase": r.phase, "status": r.status.value, "origin": r.origin,
+         "reason": r.reason, "returncode": r.returncode,
+         "output_tail": r.output_tail, "duration_s": round(r.duration_s, 2)}
+        for r in phases
+    ]
+    if any(r.status is ProbeStatus.ENGINE_UNAVAILABLE for r in phases):
+        facts["status"] = "engine_unavailable"
+        facts["reason"] = next(r.reason for r in phases
+                               if r.status is ProbeStatus.ENGINE_UNAVAILABLE)
+    elif any(r.status is ProbeStatus.PRODUCT_FAILED for r in phases):
+        facts["status"] = "product_failed"
+        facts["reason"] = "; ".join(
+            f"{r.phase}: {r.reason}" for r in phases
+            if r.status is ProbeStatus.PRODUCT_FAILED)[:500]
+    else:
+        facts["status"] = "ok"
+        facts["reason"] = ""
+    return facts
 
 
 def run_execution_probes(

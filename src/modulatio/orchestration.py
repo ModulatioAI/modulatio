@@ -12988,8 +12988,6 @@ class Orchestrator:
         from modulatio import assembly as _assembly
         from modulatio import code_probes as _cp
 
-        if _cp.wheelhouse_path() is None:
-            return None
         artifacts_root = self._shared_artifacts_root()
         units = sorted({
             t.output_path for t in tasks
@@ -13001,12 +12999,24 @@ class Orchestrator:
         # Fixtures and packaging metadata are frequently produced by tasks
         # whose own kind is not code; the snapshot must carry the whole
         # deliverable or the suite fails on files the goal actually shipped.
-        if _assembly._packaging_facts(units, artifacts_root)["root"] is None:
+        # A Python deliverable takes the hermetic path, which proves more than
+        # building in place: it installs a built wheel into a pristine
+        # environment and runs the suite against the INSTALLED package. That
+        # path needs an approved local wheel source to provision from. Every
+        # other ecosystem builds and tests through its own commands, which need
+        # no such bundle, so the wheelhouse gates only the path that uses it.
+        python_root = _assembly._packaging_facts(units, artifacts_root)["root"]
+        if python_root is not None and _cp.wheelhouse_path() is None:
             return None
         scratch = Path(tempfile.mkdtemp(prefix="modulatio-goal-probe-"))
         try:
-            facts = _cp.run_execution_probes(
-                units, artifacts_root, scratch_root=scratch)
+            facts = (
+                _cp.run_execution_probes(
+                    units, artifacts_root, scratch_root=scratch)
+                if python_root is not None else
+                _cp.run_ecosystem_probes(
+                    units, artifacts_root, scratch_root=scratch)
+            )
         except Exception as exc:  # noqa: BLE001 — a probe crash is engine-side
             return None, f"execution probes failed to run: {exc}"[:300]
         status = facts.get("status")
@@ -13021,8 +13031,13 @@ class Orchestrator:
         for p in facts.get("phases", []):
             if p.get("phase") == "test" and p.get("output_tail"):
                 tail = f"\n\n{p['output_tail']}"
-        report = ("hermetic build + install + test (engine-run, sandboxed)\n"
-                  + "\n".join(lines) + tail)
+        headline = (
+            "hermetic build + install + test (engine-run, sandboxed)"
+            if python_root is not None else
+            f"build + test via {facts.get('ecosystem', 'the project')} "
+            "(engine-run, sandboxed)"
+        )
+        report = headline + "\n" + "\n".join(lines) + tail
         if status == "engine_unavailable":
             return None, report
         return status == "ok", report

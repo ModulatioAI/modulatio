@@ -12,6 +12,7 @@ after every phase, scratch destroyed in ``finally``.
 from __future__ import annotations
 
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -1574,3 +1575,66 @@ def test_rollup_records_separate_product_manifest_and_runs_pip_check(
     assert "pytest" in rnames
     assert "manifest" in phase_names
     assert "runner_manifest" in phase_names
+
+
+def test_ecosystem_detection_reads_the_manifest_a_tree_ships(tmp_path):
+    """One row per ecosystem, chosen by the manifest present. Python is absent
+    on purpose: its deliverables take the hermetic path instead."""
+    assert cp.detect_ecosystem(tmp_path) is None
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n")
+    assert cp.detect_ecosystem(tmp_path) is None
+
+    (tmp_path / "CMakeLists.txt").write_text("cmake_minimum_required(VERSION 3.10)\n")
+    manifest, build, test = cp.detect_ecosystem(tmp_path)
+    assert manifest == "CMakeLists.txt"
+    # Build is a SEQUENCE — some toolchains configure before they compile.
+    assert build[0][0] == "cmake" and len(build) == 2
+    assert test[0][0] == "ctest"
+
+
+def test_every_ecosystem_row_declares_both_verbs():
+    """Each row answers the same two questions, so no ecosystem can be added
+    that builds without being tested."""
+    for manifest, (build, test) in cp._ECOSYSTEM_COMMANDS:
+        assert manifest and build and test, manifest
+        for stages in (build, test):
+            for argv in stages:
+                assert isinstance(argv, tuple) and argv, manifest
+                assert all(isinstance(a, str) for a in argv), manifest
+
+
+@_needs_bwrap
+def test_a_cmake_deliverable_builds_and_tests(tmp_path, enforceable):
+    """The contract on a real tree: configure, build, run the suite — the same
+    evidence shape the hermetic path returns, for a language that has no
+    hermetic path."""
+    if shutil.which("cmake") is None or shutil.which("ctest") is None:
+        pytest.skip("cmake/ctest not installed")
+    root = tmp_path / "art"
+    root.mkdir()
+    (root / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.10)\n"
+        "project(tally CXX)\nenable_testing()\n"
+        "add_executable(tally_test tally_test.cpp)\n"
+        "add_test(NAME tally_test COMMAND tally_test)\n"
+    )
+    (root / "tally_test.cpp").write_text("int main() { return 0; }\n")
+
+    facts = cp.run_ecosystem_probes(
+        ["CMakeLists.txt", "tally_test.cpp"], root,
+        scratch_root=tmp_path / "scratch",
+    )
+    assert facts["ecosystem"] == "CMakeLists.txt"
+    assert facts["status"] == "ok", facts
+    assert [p["phase"] for p in facts["phases"]] == ["build", "build", "test"]
+
+    # A suite that fails is the DELIVERABLE's failure, and the build that
+    # preceded it still reports what it did.
+    (root / "tally_test.cpp").write_text("int main() { return 1; }\n")
+    failed = cp.run_ecosystem_probes(
+        ["CMakeLists.txt", "tally_test.cpp"], root,
+        scratch_root=tmp_path / "scratch2",
+    )
+    assert failed["status"] == "product_failed"
+    assert failed["phases"][-1]["phase"] == "test"
+    assert failed["phases"][-1]["origin"] == "deliverable"
