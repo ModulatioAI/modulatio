@@ -1080,6 +1080,37 @@ def _format_kickoff_attachments(attachments: list) -> str:
     return "\n".join(parts)
 
 
+def _format_engine_evidence(gate: "tuple[bool | None, str] | None") -> str:
+    """The engine's own build-and-test reading, for the end of a goal report.
+
+    Everything above it in that report is written by the verifier; this is
+    not. A report carrying only the verifier's ACCOUNT of a measurement can
+    disagree with the measurement — the same deliverable has been called fit
+    to ship in prose while the build behind it failed — and a reader has no
+    way to tell which is true. Recording the reading beside the account
+    removes the need for them to agree.
+
+    Empty for a goal with no code deliverable, since there is no reading to
+    report. Fences in the body are defused: it carries captured tool output,
+    which can close the block it is quoted inside and let the rest of the
+    text render as document.
+    """
+    if gate is None:
+        return ""
+    green, body = gate
+    headline = {
+        None: "NOT MEASURED — no evidence was gathered for this code goal",
+        True: "PASSED",
+        False: "FAILED",
+    }[green]
+    return (
+        "\n\n---\n\n"
+        "## Engine-measured build and test\n\n"
+        f"**{headline}.** Recorded by the engine, not by the verifier above.\n\n"
+        f"```\n{body.replace('```', chr(39) * 3).strip()}\n```\n"
+    )
+
+
 def _format_corrective_notes(notes: str) -> str:
     """On a first attempt, returns an empty marker. On a redo, wraps the
     prior verdict's corrective notes in a fenced block so the producer
@@ -14247,6 +14278,7 @@ class Orchestrator:
             f"_Leader rationale:_ {rationale}\n\n"
             "---\n\n"
             f"{report_body.rstrip()}\n"
+            + _format_engine_evidence(pytest_gate)
         )
         report_path.write_text(report_content, encoding="utf-8")
         summary.goal_reports.append(report_path)

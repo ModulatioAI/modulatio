@@ -13818,3 +13818,35 @@ def test_an_ordinary_bench_is_not_reported(project, monkeypatch):
     shutil.rmtree(bench)
     orch._disclose_leader_bench(summary)
     assert not summary.recommendations
+
+
+def test_engine_evidence_is_recorded_beside_the_verifier_account():
+    """A report carrying only the verifier's account of a measurement can
+    disagree with the measurement, and a reader cannot tell which is true.
+    Recording the reading beside the account removes the need to agree."""
+    from modulatio.orchestration import _format_engine_evidence as fmt
+
+    passed = fmt((True, "build: ok\ntest: ok\n52 passed"))
+    assert "PASSED" in passed and "52 passed" in passed
+    assert "not by the verifier" in passed
+
+    failed = fmt((False, "wheel: product_failed"))
+    assert "FAILED" in failed and "wheel: product_failed" in failed
+
+    # Unavailable is stated, never silently absent — a code goal that was not
+    # measured must not read the same as one that passed.
+    unknown = fmt((None, "sandbox not enforceable"))
+    assert "NOT MEASURED" in unknown and "sandbox not enforceable" in unknown
+
+    # A goal with no code deliverable has no reading to report.
+    assert fmt(None) == ""
+
+
+def test_captured_output_cannot_break_out_of_the_evidence_block():
+    """The body is captured tool output, which can close the block it is
+    quoted inside and let the rest render as document."""
+    from modulatio.orchestration import _format_engine_evidence as fmt
+
+    out = fmt((True, "before ``` after"))
+    assert out.count("```") == 2, "the fence must open and close exactly once"
+    assert "'''" in out
