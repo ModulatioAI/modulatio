@@ -881,3 +881,56 @@ def test_doctor_wheelhouse_present_and_missing(capsys, tmp_path, monkeypatch):
     out = capsys.readouterr().out
     assert "✗ no wheelhouse" in out
     assert "pip download pytest hatchling setuptools wheel" in out
+
+
+def test_kickoff_needs_model_flags_only_where_they_seed_a_roster(
+    tmp_path, monkeypatch,
+):
+    """The model flags seed a NET-NEW roster and are ignored on an existing
+    project, whose roster is the single source. Requiring them everywhere made
+    two arguments ceremony on every later kickoff and implied the value chose
+    the model, which it did not."""
+    from typer.testing import CliRunner
+
+    from modulatio import config, roster, vault
+
+    cfg = tmp_path / "config-isolation"
+    monkeypatch.setattr(config, "CONFIG_DIR", cfg)
+    monkeypatch.setattr(config, "DEFAULTS_FILE", cfg / "defaults.json")
+    monkeypatch.setattr(config, "TEAM_TEMPLATE_FILE", cfg / "team_template.json")
+    monkeypatch.setattr(config, "AUTH_ALERTS_FILE", cfg / "auth_alerts.json")
+    config.reload()
+    monkeypatch.setattr(vault, "VAULT_ROOT", tmp_path)
+    runner = CliRunner()
+
+    # A new project without them cannot seed a roster — refused, and nothing
+    # is left behind by the refusal.
+    result = runner.invoke(
+        cli.app, ["kickoff", "--code", "APP", "--objective", "Build a thing"],
+    )
+    assert result.exit_code == 2
+    assert "seed its roster" in result.output
+    assert not (tmp_path / "app").exists(), (
+        "a refused kickoff must not leave a project vault behind")
+
+    # Seed it, then run again with no flags at all: the roster answers.
+    assert runner.invoke(cli.app, [
+        "kickoff", "--code", "APP", "--objective", "Build a thing", "--stub",
+    ]).exit_code == 0
+    assert {a.id for a in roster.list_agents("APP")} == {"leader", "producer", "qc"}
+
+    # The real case: an existing project, no stub, no model flags. The guard
+    # must not fire — the roster already answers for every seat. The run itself
+    # is neutralized so this exercises the guard and nothing downstream.
+    from modulatio import orchestration
+
+    monkeypatch.setattr(
+        orchestration.Orchestrator, "kickoff",
+        lambda self, *a, **k: orchestration.RunSummary(project=self.project),
+        raising=True,
+    )
+    rerun = runner.invoke(cli.app, [
+        "kickoff", "--code", "APP", "--objective", "Build another",
+    ])
+    assert "seed its roster" not in rerun.output, (
+        "an existing project must not be asked for flags it will ignore")

@@ -422,14 +422,6 @@ def kickoff(
     if stub:
         leader_model = planner_model = producer_model = "stub"
         qc_model = "stub"
-    elif not (leader_model and producer_model):
-        typer.echo(
-            "Without --stub, --leader-model and --producer-model are "
-            "required. --planner-model (defaults to --leader-model) and "
-            "--qc-model are optional.",
-            err=True,
-        )
-        raise typer.Exit(code=2)
 
     # Validate + build attachments BEFORE any disk side-effect (project
     # init, roster seed, run-folder creation). build_attachment is
@@ -479,6 +471,21 @@ def kickoff(
 
     wiki = project_dir(code)
     net_new = not wiki.exists()
+    # The model flags SEED a net-new roster and are ignored on an existing
+    # project, where the roster is the single source — so they are required
+    # exactly where they are used. Demanding them on every kickoff makes two
+    # arguments ceremony on an existing project AND implies the supplied value
+    # selects the model, which it does not. Checked before the vault is
+    # initialized so a refused kickoff leaves nothing behind.
+    if net_new and not stub and not (leader_model and producer_model):
+        typer.echo(
+            "A new project needs --leader-model and --producer-model to seed "
+            "its roster (or --stub). --planner-model (defaults to "
+            "--leader-model) and --qc-model are optional. An existing project "
+            "takes every seat's model from its own roster.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     vault.init_project(code, pname, objective, exist_ok=True)
     if net_new:
         roster.seed_default_roster(
