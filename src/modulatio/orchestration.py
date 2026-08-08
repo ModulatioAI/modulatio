@@ -12804,7 +12804,10 @@ class Orchestrator:
                 from_state=goal.status.value,
                 to_state=GoalStatus.BLOCKED.value,
                 actor="planner",
-                rationale=f"task plan rejected: {reason}",
+                rationale=(
+                    f"task plan rejected: {reason}"
+                    + self._owed_clause(goal, tasks, summary)
+                )[:500],
             )
         )
         goal.status = GoalStatus.BLOCKED
@@ -13598,6 +13601,29 @@ class Orchestrator:
             elif t.status is not TaskStatus.COMPLETED:
                 holes.append(f"{t.id} ({t.status.value})")
         return holes
+
+    def _owed_clause(
+        self, goal: Goal, tasks: "list[Task]",
+        summary: "RunSummary | None" = None,
+    ) -> str:
+        """Name what a goal is settling WITHOUT, for a path that terminalizes
+        it without verification.
+
+        Disclosure belongs to REACHING a terminal, not to the verification
+        that usually precedes it. A goal whose plan was rejected, or whose run
+        died under it, arrives at a status word that is true and carries no
+        statement of what was owed — leaving an operator a state to read and
+        nothing to act on. Returns the clause to append to the transition
+        rationale, empty when nothing is missing.
+        """
+        holes = self._goal_holes(tasks)
+        if not holes:
+            return ""
+        named = ", ".join(holes)
+        if summary is not None:
+            summary.errors.append(
+                f"{goal.id}: settled owing {len(holes)} — {named}")
+        return f" | owed {len(holes)}: {named}"
 
     def _leader_verify_goal(
         self,
@@ -17085,11 +17111,18 @@ class Orchestrator:
             for goal in store.list_goals(self.project.code, run_id=run_id):
                 if goal.status in _GOAL_TERMINAL:
                     continue
+                try:
+                    owed = self._owed_clause(goal, store.list_tasks(
+                        self.project.code, goal_id=goal.id, run_id=run_id))
+                except Exception:  # noqa: BLE001 — disclosure never blocks the settle
+                    owed = ""
                 goal.transitions.append(StateTransition(
                     from_state=goal.status.value,
                     to_state=GoalStatus.INCOMPLETE.value,
                     actor="orchestrator",
-                    rationale=f"run ended before this goal settled — {reason}"[:500],
+                    rationale=(
+                        f"run ended before this goal settled — {reason}{owed}"
+                    )[:500],
                 ))
                 goal.status = GoalStatus.INCOMPLETE
                 store.save_goal(self.project.code, goal, run_id=run_id)

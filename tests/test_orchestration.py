@@ -13627,3 +13627,45 @@ def test_undeclared_writes_reach_the_run_record_not_only_the_prompt(project, tmp
     assert "_build_backend.py" in named[0]["concern"]
     assert "pkg/mod.py" not in named[0]["concern"], (
         "a declared output is shipped and is not a finding")
+
+
+def test_a_rejected_plan_names_what_the_goal_owed(project, tmp_path):
+    """A goal blocked before verification still records what it did not
+    produce. `blocked` is true but says nothing an operator can act on, and
+    the disclosure belongs to reaching a terminal, not to the verification
+    that usually precedes one."""
+    from modulatio.orchestration import Orchestrator
+
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    goal = Goal(id=f"{project.code}-G-001", project_id=uuid4(), description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    a = _qcfix_task(id="proj-T-001", goal_id=goal.id, output_path="pkg/a.py")
+    b = _qcfix_task(id="proj-T-002", goal_id=goal.id, output_path="pkg/b.py")
+    summary = RunSummary(project=orch.project)
+
+    orch._reject_task_plan(goal, [a, b], "dependency cycle", summary)
+
+    assert goal.status == GoalStatus.BLOCKED
+    rationale = goal.transitions[-1].rationale
+    assert "dependency cycle" in rationale       # why it stopped
+    assert "owed 2" in rationale                 # and what it owed
+    assert "pkg/a.py" in rationale and "pkg/b.py" in rationale
+    assert any("settled owing 2" in e for e in summary.errors), (
+        "the operator reads the summary, not the transition log")
+
+
+def test_a_goal_owing_nothing_gains_no_disclosure_clause(project):
+    """Silence when there is nothing to disclose — a rejection with no
+    declared outputs must not grow an empty 'owed' clause."""
+    from modulatio.orchestration import Orchestrator
+
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    goal = Goal(id=f"{project.code}-G-001", project_id=uuid4(), description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    summary = RunSummary(project=orch.project)
+
+    orch._reject_task_plan(goal, [], "unparseable plan", summary)
+
+    assert goal.status == GoalStatus.BLOCKED
+    assert "owed" not in goal.transitions[-1].rationale
+    assert not [e for e in summary.errors if "settled owing" in e]
