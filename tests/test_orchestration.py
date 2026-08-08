@@ -13604,3 +13604,26 @@ def test_artifact_writes_are_captured_without_a_worker_buffer(project, tmp_path)
     assert orch._undeclared_deliverable_writes([task]) == [
         ("proj-T-001", "stray.py")
     ]
+
+
+def test_undeclared_writes_reach_the_run_record_not_only_the_prompt(project, tmp_path):
+    """The finding lands on the summary, so the human sees it whatever the
+    verifier writes. Evidence placed only in the verify prompt is disclosed at
+    the verifier's discretion, which is authorship, not measurement."""
+    from modulatio.orchestration import Orchestrator
+
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    task = _deliverable_task(project.code, output="pkg/mod.py")
+    orch._task_artifact_writes[task.id] = ["pkg/mod.py", "_build_backend.py"]
+    goal = Goal(id=f"{project.code}-G-001", project_id=uuid4(), description="d",
+                success_criteria="s", status=GoalStatus.IN_PROGRESS)
+    summary = RunSummary(project=orch.project)
+    summary.tasks = [task]
+    orch._leader_verify_goal(goal, [task], summary)
+
+    named = [r for r in summary.recommendations
+             if "declared by no task" in r.get("concern", "")]
+    assert named, "the undeclared write must be carried on the run record"
+    assert "_build_backend.py" in named[0]["concern"]
+    assert "pkg/mod.py" not in named[0]["concern"], (
+        "a declared output is shipped and is not a finding")

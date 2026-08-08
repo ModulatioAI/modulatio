@@ -13837,15 +13837,32 @@ class Orchestrator:
         # somewhere the delivery set will never reach.
         undeclared = self._undeclared_deliverable_writes(tasks)
         if undeclared:
+            named = "\n".join(f"  - {rel}  (written by {tid})"
+                              for tid, rel in undeclared)
             artifact_blocks.append(
-                "### Files written but not declared by any task\n\n"
-                + "\n".join(f"  - {rel}  (written by {tid})"
-                            for tid, rel in undeclared)
+                "### Files written but not declared by any task\n\n" + named
                 + "\n\nThese exist in the working tree and are NOT part of the "
                 "deliverable. If anything shipped depends on one of them, it "
                 "builds here and fails for whoever receives only the declared "
                 "files — declare it or remove the dependency."
             )
+            # Also carried on the RUN RECORD, not only into the verify prompt.
+            # A finding only the verifier sees reaches the human solely when the
+            # verifier chooses to repeat it, which makes the disclosure a matter
+            # of authorship rather than of measurement.
+            summary.recommendations.append({
+                "goal_id": goal.id,
+                "concern": (
+                    f"{len(undeclared)} file(s) written but declared by no task "
+                    "— present while the run works, absent from the delivered "
+                    f"set:\n{named}"
+                ),
+                "suggestion": (
+                    "If the deliverable depends on any of these, it builds here "
+                    "and fails for whoever receives only the declared files. "
+                    "Declare the file or remove the dependency."
+                ),
+            })
         prior_approvals_block = _format_prior_approvals(
             store.list_tickets(self.project.code, run_id=self.project.run_id)
         )
