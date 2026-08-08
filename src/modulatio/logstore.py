@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Modulatio AI. Created by Clifton Knox and Cowboy Claude (CC).
 """The log store — the single authority for captured diagnostic logs.
 
-Three captured kinds share one global directory (``_crash.crash_dir()`` —
+Four kinds share one global directory (``_crash.crash_dir()`` —
 ``~/.config/modulatio/crashes/``, overridable via ``MODULATIO_CRASH_DIR``),
 distinguished by a filename PREFIX so the kind is legible both on disk and in the
 UI:
@@ -10,6 +10,7 @@ UI:
   ``crash-*.log``   a fatal, uncaught exception        (written by ``_crash``)
   ``error-*.log``   a handled, non-fatal failure       (``write_error_log``)
   ``doctor-*.log``  a ``modulatio doctor`` read         (``write_doctor_report``)
+  ``run-*.log``     what a finished run did             (``write_run_log``)
 
 The TUI **LOGS** tab and the ``modulatio logs`` CLI are thin frontends over
 ``list_logs`` / ``delete_log`` / ``mark_sent`` / ``compose_issue``. A captured log
@@ -34,8 +35,7 @@ from modulatio._crash import (
     open_unique_0600,
 )
 
-#: English labels by filename-prefix kind. ``run`` is surfaced read-only from
-#: existing on-disk logs (it has no captured prefix of its own).
+#: English labels by filename-prefix kind.
 KIND_LABELS: dict[str, str] = {
     "crash": "Crash log",
     "error": "Error log",
@@ -230,6 +230,20 @@ def write_doctor_report(report_text: str, *, attachments: "tuple[Path, ...]" = (
     return _write("doctor", summary[:120], "\n\n".join(parts))
 
 
+def write_run_log(job: str, body: str) -> Path:
+    """Record what a finished run did, as a ``run-*.log``.
+
+    A run's own account of itself — what it produced and what it spent —
+    otherwise survives only as scattered files under the vault, where reading
+    it back means knowing which ones to open. The job's name leads the summary
+    so one run is distinguishable from another at a glance in the listing.
+
+    Unlike a captured diagnostic this is part of a project's record, which is
+    why the kind is not deletable from the store.
+    """
+    return _write("run", f"Run Log — {job.strip() or 'untitled job'}"[:120], body)
+
+
 # ── enumerate / lifecycle ────────────────────────────────────────────────────
 
 def _kind_of(path: Path) -> str:
@@ -388,6 +402,7 @@ __all__ = [
     "log_dir",
     "write_error_log",
     "write_doctor_report",
+    "write_run_log",
     "list_logs",
     "find_log",
     "match_logs",

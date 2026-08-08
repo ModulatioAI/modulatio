@@ -13850,3 +13850,49 @@ def test_captured_output_cannot_break_out_of_the_evidence_block():
     out = fmt((True, "before ``` after"))
     assert out.count("```") == 2, "the fence must open and close exactly once"
     assert "'''" in out
+
+
+def test_a_finished_run_records_what_it_produced_and_spent(project, tmp_path,
+                                                           monkeypatch):
+    """The facts exist either way, scattered under the vault and as counts held
+    only for the length of the process. One entry per run, named for the job,
+    puts a run's own account where an operator already looks."""
+    from modulatio import budget, logstore
+    from modulatio.orchestration import Orchestrator
+
+    monkeypatch.setenv("MODULATIO_CRASH_DIR", str(tmp_path / "logs"))
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    orch._run_tracker = budget.BudgetTracker(
+        input_tokens_used=1200, output_tokens_used=340, cost_usd_used=0.0175)
+
+    summary = RunSummary(project=orch.project)
+    summary.tasks = [_qcfix_task(id="proj-T-001", status=TaskStatus.COMPLETED)]
+    summary.errors = ["proj-G-001: settled owing 1"]
+    orch._write_run_log(summary)
+
+    entries = [e for e in logstore.list_logs() if e.kind == "run"]
+    assert len(entries) == 1
+    assert entries[0].summary.startswith("Run Log — ")
+    assert project.name in entries[0].summary
+    body = entries[0].path.read_text()
+    assert "tokens in:    1,200" in body
+    assert "tokens out:   340" in body
+    assert "$0.0175" in body
+    assert "1 completed of 1" in body
+    assert "settled owing 1" in body
+    # A run's record is not a disposable diagnostic.
+    assert not entries[0].deletable
+
+
+def test_an_account_of_a_run_never_fails_the_run(project, monkeypatch):
+    """Recording what happened must not be able to change what happened."""
+    from modulatio import logstore
+    from modulatio.orchestration import Orchestrator
+
+    orch = Orchestrator(project, {"leader": _leader_stub})
+
+    def _boom(*a, **k):
+        raise OSError("log store unwritable")
+
+    monkeypatch.setattr(logstore, "write_run_log", _boom)
+    orch._write_run_log(RunSummary(project=orch.project))  # must not raise

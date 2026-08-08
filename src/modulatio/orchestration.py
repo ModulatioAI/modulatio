@@ -23,7 +23,7 @@ import tempfile
 import re
 import shlex as _shlex
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from enum import Enum
 from datetime import date, datetime, time, timedelta, timezone
@@ -13671,6 +13671,49 @@ class Orchestrator:
                 issues.append(f"modified/removed test module {Path(path).name}")
         return issues
 
+    def _write_run_log(self, summary: "RunSummary") -> None:
+        """Record what this run produced and spent, in the operator's log tab.
+
+        The facts exist either way — as goals, tasks and artifacts scattered
+        under the vault, and as token counts held only for the length of the
+        process — but reading them back means knowing which files to open and
+        catching the totals before they are gone. One entry per run, named for
+        the job, puts a run's own account where an operator already looks.
+
+        Best-effort: an account of a finished run must never be able to fail
+        the run it describes.
+        """
+        try:
+            from modulatio import logstore as _logstore
+            tracker = getattr(self, "_run_tracker", None)
+            settled = sum(
+                1 for t in summary.tasks if t.status == TaskStatus.COMPLETED)
+            lines = [
+                f"project:      {self.project.code}",
+                f"run:          {self.project.run_id or '(none)'}",
+                f"objective:    {self.project.objective}",
+                "",
+                f"goals:        {len(summary.goals)}",
+                f"tasks:        {settled} completed of {len(summary.tasks)}",
+                f"deliverables: {len(summary.rendered_deliverables)} shipped"
+                + (f", {len(summary.withheld_deliverables)} withheld"
+                   if summary.withheld_deliverables else ""),
+                f"reservations: {len(summary.recommendations)}",
+                f"errors:       {len(summary.errors)}",
+            ]
+            if tracker is not None:
+                lines += [
+                    "",
+                    f"tokens in:    {tracker.input_tokens_used:,}",
+                    f"tokens out:   {tracker.output_tokens_used:,}",
+                    f"cost:         ${tracker.cost_usd_used:,.4f}",
+                ]
+            if summary.errors:
+                lines += ["", "Errors", "------", *summary.errors]
+            _logstore.write_run_log(self.project.name, "\n".join(lines))
+        except Exception as exc:  # noqa: BLE001 — an account never fails the run
+            _logger.warning("run log skipped: %s", exc)
+
     def _disclose_leader_bench(self, summary: "RunSummary") -> None:
         """Tell the operator when the Leader's own workspace has grown.
 
@@ -17215,7 +17258,24 @@ class Orchestrator:
         self._kickoff_active = True
         from modulatio import claude_cli as _claude_cli
         try:
-            with self._with_working_memory_configs():
+            # Every model call records into the bound tracker and is DISCARDED
+            # when none is bound, so a path that never binds one keeps no
+            # account of what it spent. Bind for the length of the run unless a
+            # caller already did — an outer tracker carries the caps this run
+            # answers to, and a second one underneath it would count separately.
+            from modulatio import budget as _budget
+            outer = _budget.current_tracker()
+            if outer is None:
+                usage_path = (
+                    _vault_run_dir(self.project.code, self.project.run_id)
+                    / "usage.jsonl"
+                ) if self.project.run_id else None
+                self._run_tracker = _budget.BudgetTracker(log_path=usage_path)
+                stack = _budget.with_tracker(self._run_tracker)
+            else:
+                self._run_tracker = outer
+                stack = nullcontext()
+            with stack, self._with_working_memory_configs():
                 return self._kickoff_inner(
                     objective,
                     attachments=attachments,
@@ -18160,6 +18220,7 @@ class Orchestrator:
         # that must NOT be able to block or delay the user's deliverable + end
         # report. The user gets their result first; codification runs after.
         self._disclose_leader_bench(summary)
+        self._write_run_log(summary)
         if self._deliver_products:
             self._deliver_finished_products(summary)
         # F8-ONLY teardown (only the kill-switch blows out the
