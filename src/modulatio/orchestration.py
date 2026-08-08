@@ -10712,7 +10712,10 @@ class Orchestrator:
                             actor="qc",
                             evidence_ids=[artifact.id, metric.id, qc_verdict.id],
                             verifier_result="qc_passed",
-                            rationale=f"QC passed: {qc_verdict.check}",
+                            rationale=(
+                                f"{self._seat_label(t.qc_agent_id, 'QC')} "
+                                f"passed: {qc_verdict.check}"
+                            ),
                         )
                     )
                     t.status = TaskStatus.COMPLETED
@@ -11037,10 +11040,11 @@ class Orchestrator:
 
         # On a budget-spent re-entry (last_qc is None) the loop ran zero attempts this
         # pass, so "after N retries" would read "after 0 retries" — misleading.
+        _qc = self._seat_label(t.qc_agent_id, "QC")
         reject_rationale = (
-            f"QC rejected after {t.retry_count} retries: {qc_verdict.check}"
+            f"{_qc} rejected after {t.retry_count} retries: {qc_verdict.check}"
             if last_qc is not None
-            else f"QC rejected: {qc_verdict.check}"
+            else f"{_qc} rejected: {qc_verdict.check}"
         )
         if qc_notes:
             reject_rationale += f" | notes: {qc_notes}"
@@ -13578,6 +13582,39 @@ class Orchestrator:
             if cur_v is None or cur_v[1] != digest:
                 issues.append(f"modified/removed test module {Path(path).name}")
         return issues
+
+    def _seat_label(self, agent_id: "str | None", role_word: str) -> str:
+        """What to call a seat in operator-facing text: its NAME when it has
+        one, else the role word.
+
+        The seats that produce are already credited by name in the durable
+        record, because their ids ARE names; the seats that judge carry a name
+        in the roster that nothing reads, so a named reviewer stays anonymous
+        through every verdict it authors. A name that merely repeats the seat's
+        own id or its role carries nothing, so it counts as unnamed and the
+        fallback still fires — otherwise the reader gets a bare lowercase tier
+        word exactly where a name belongs.
+
+        Names the ACTOR only. Text describing a KIND of thing keeps the role
+        word: an artifact written during review is a QC-authored artifact
+        whoever holds the seat.
+        """
+        if not agent_id:
+            return role_word
+        try:
+            from modulatio import roster
+            for agent in roster.list_agents(self.project.code):
+                if agent.id != agent_id:
+                    continue
+                name = (agent.name or "").strip()
+                if name and name.lower() not in (
+                    agent.id.lower(), role_word.lower()
+                ):
+                    return name
+                break
+        except Exception:  # noqa: BLE001 — a label never blocks a verdict
+            pass
+        return role_word
 
     def _goal_holes(self, tasks: list[Task]) -> list[str]:
         """What the goal is settling WITHOUT, named for the operator.

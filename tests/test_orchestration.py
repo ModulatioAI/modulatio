@@ -13669,3 +13669,50 @@ def test_a_goal_owing_nothing_gains_no_disclosure_clause(project):
     assert goal.status == GoalStatus.BLOCKED
     assert "owed" not in goal.transitions[-1].rationale
     assert not [e for e in summary.errors if "settled owing" in e]
+
+
+def test_seat_label_names_the_actor_and_falls_back_to_the_role(project, monkeypatch):
+    """A seat with a name is called by it; one without keeps the role word.
+
+    The seats that produce are already credited by name because their ids ARE
+    names, so a reviewer whose name nothing reads stays anonymous through every
+    verdict it authors."""
+    from modulatio import roster
+    from modulatio.orchestration import Orchestrator
+
+    orch = Orchestrator(project, {"leader": _leader_stub})
+
+    def _agents(_code):
+        return [
+            roster.Agent(id="qc", name="Henry", role="qc", model="m"),
+            roster.Agent(id="reviewer", name="reviewer", role="qc", model="m"),
+            roster.Agent(id="checker", name="QC", role="qc", model="m"),
+            roster.Agent(id="quiet", name="", role="qc", model="m"),
+        ]
+
+    monkeypatch.setattr(roster, "list_agents", _agents)
+
+    assert orch._seat_label("qc", "QC") == "Henry"
+    # A name that merely repeats the seat's own id carries nothing.
+    assert orch._seat_label("reviewer", "QC") == "QC"
+    # Nor does one that merely repeats the role, whatever its case.
+    assert orch._seat_label("checker", "QC") == "QC"
+    assert orch._seat_label("quiet", "QC") == "QC"
+    # Unknown seat, and no seat at all.
+    assert orch._seat_label("nobody", "QC") == "QC"
+    assert orch._seat_label(None, "QC") == "QC"
+
+
+def test_seat_label_survives_an_unreadable_roster(project, monkeypatch):
+    """Naming is decoration on a verdict — a roster that cannot be read costs
+    the name, never the verdict."""
+    from modulatio import roster
+    from modulatio.orchestration import Orchestrator
+
+    orch = Orchestrator(project, {"leader": _leader_stub})
+
+    def _boom(_code):
+        raise OSError("roster unreadable")
+
+    monkeypatch.setattr(roster, "list_agents", _boom)
+    assert orch._seat_label("qc", "QC") == "QC"
