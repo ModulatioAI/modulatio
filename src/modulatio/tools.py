@@ -919,8 +919,19 @@ def _check_full(argv: list[str], root: Path | None = None, extra_roots=()) -> bo
     # name is a generated entry point invoked directly. Only bare names are
     # rewritten to ``sys.executable``, so a path head keeps the venv's own
     # pip/pytest.
-    if "/" in head and _is_safe_relative_file_arg(head):
-        if head.rsplit("/", 1)[-1] in _PYTHON_BINS:
+    # ``./prog`` is the ordinary way to name a program in the current
+    # directory, and a build puts its output there. The leading ``./`` reads
+    # as a dotfile component to the lexical check, so drop it first — it says
+    # "here", which is exactly the confined cwd this already resolves against.
+    # A leading ``./`` also NAMES the directory, so it stays an explicit local
+    # reference even once the prefix is gone; a bare name without it is a PATH
+    # lookup and keeps going through the per-head rules below.
+    _explicit_cwd = head.startswith("./")
+    _head_path = head[2:] if _explicit_cwd else head
+    if (_explicit_cwd or "/" in _head_path) and _is_safe_relative_file_arg(
+        _head_path
+    ):
+        if _head_path.rsplit("/", 1)[-1] in _PYTHON_BINS:
             head = "python3"
         else:
             return True
@@ -1002,6 +1013,70 @@ def _check_full(argv: list[str], root: Path | None = None, extra_roots=()) -> bo
     if head == "gofmt":
         # gofmt -w file.go  — write reformatted output back to disk
         if len(argv) >= 3 and argv[1] == "-w":
+            return True
+    # ── Rust / JVM / .NET / C / PHP (full) ──────────────────────────
+    # A deliverable in these languages could be WRITTEN but never compiled or
+    # run, so it shipped reviewed-by-reading while a Python one was built and
+    # tested. Each head carries a known-safe subcommand set in the same shape
+    # as ``go`` above; confinement is the sandbox and the cwd, as for every
+    # other execution head here.
+    if head == "cargo":
+        if len(argv) >= 2 and argv[1] in (
+            "build", "test", "run", "check", "fetch", "clippy", "fmt",
+            "bench", "doc", "tree", "metadata",
+        ):
+            return True
+    if head == "rustc":
+        # rustc file.rs [args] — same file-arg containment as python/node.
+        if (
+            len(argv) >= 2
+            and argv[1].endswith(".rs")
+            and _is_safe_file_arg(argv[1], root, extra_roots)
+        ):
+            return True
+    if head in ("mvn", "gradle"):
+        # A JVM build driver reads its goals/tasks from argv; the project it
+        # builds is the confined cwd.
+        if len(argv) >= 2:
+            return True
+    if head == "javac":
+        # javac file.java [...] — every positional source must be contained,
+        # so a compile cannot name a file outside the tree and surface it
+        # through a diagnostic.
+        srcs = [a for a in argv[1:] if not a.startswith("-")]
+        if srcs and all(
+            a.endswith(".java") and _is_safe_file_arg(a, root, extra_roots)
+            for a in srcs
+        ):
+            return True
+    if head == "java":
+        # java -cp <dir> <MainClass> / java file.java — the class name is not
+        # a path, and the classpath resolves under the confined cwd.
+        if len(argv) >= 2:
+            return True
+    if head == "dotnet":
+        if len(argv) >= 2 and argv[1] in (
+            "build", "test", "run", "restore", "publish", "clean", "format",
+        ):
+            return True
+    if head in ("make", "cmake", "ctest", "ninja"):
+        # Build drivers whose recipe lives in the tree they run against.
+        return True
+    if head in ("gcc", "g++", "cc", "c++", "clang", "clang++"):
+        # A compile names its sources positionally; each must be contained
+        # for the same reason javac's are.
+        srcs = [
+            a for a in argv[1:]
+            if not a.startswith("-") and "." in a.rsplit("/", 1)[-1]
+        ]
+        if srcs and all(_is_safe_file_arg(a, root, extra_roots) for a in srcs):
+            return True
+    if head == "php":
+        if (
+            len(argv) >= 2
+            and argv[1].endswith(".php")
+            and _is_safe_file_arg(argv[1], root, extra_roots)
+        ):
             return True
     if head == "pytest":
         return True

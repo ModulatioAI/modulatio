@@ -25,6 +25,7 @@ import http.client
 import io
 import os as _os
 import time as _time
+import shlex
 from pathlib import Path
 import urllib.request
 from urllib.error import HTTPError
@@ -3330,3 +3331,54 @@ def test_run_shell_timeout_marker_survives_stderr_saturation(
         profile="full", timeout=1.0)
     assert out.startswith("exit_code: -1")
     assert "status: [TIMEOUT after 1.0s]" in out
+
+
+def test_full_profile_reaches_every_language_toolchain():
+    """A deliverable in a compiled language could be written but never built,
+    so it shipped reviewed-by-reading while a Python one was built and tested.
+    Each head carries a known-safe subcommand set; confinement is the sandbox
+    and the confined cwd, as for every other execution head."""
+    root = Path("/tmp/root")
+    for cmd in (
+        "cargo build", "cargo test", "cargo clippy", "rustc main.rs",
+        "mvn -q test", "gradle build", "javac Main.java", "java -cp build App",
+        "dotnet test", "make", "cmake -S . -B build", "ctest --test-dir build",
+        "ninja -C build", "gcc -o app main.c", "g++ -O2 -o app main.cpp",
+        "clang main.c", "php index.php",
+    ):
+        assert tools._check_full(shlex.split(cmd), root, ()), cmd
+
+
+def test_a_toolchain_cannot_name_a_source_outside_the_tree():
+    """A compile quotes offending source lines in its diagnostics, so a
+    positional source that escapes the root would surface file contents."""
+    root = Path("/tmp/root")
+    for cmd in (
+        "rustc /etc/passwd.rs", "rustc ../outside.rs",
+        "javac /etc/shadow.java", "javac ../../secret.java",
+        "gcc -o x ../../../etc/passwd.c", "php /etc/passwd.php",
+        # Subcommands that publish rather than build stay outside the set.
+        "cargo publish", "dotnet nuget push",
+    ):
+        assert not tools._check_full(shlex.split(cmd), root, ()), cmd
+
+
+def test_a_program_named_in_the_current_directory_runs():
+    """``./prog`` is the ordinary way to name a program a build just produced.
+    The leading ``./`` names the directory, so it stays an explicit local
+    reference; a bare name is a PATH lookup and is not one."""
+    root = Path("/tmp/root")
+    assert tools._check_full(shlex.split("./app --flag"), root, ())
+    assert tools._check_full(shlex.split("./build/app"), root, ())
+    # Traversal and dotfile components are refused with or without the prefix.
+    assert not tools._check_full(shlex.split("./../app"), root, ())
+    assert not tools._check_full(shlex.split("./.hidden/app"), root, ())
+    # A bare name is still resolved by the per-head rules, not by this one.
+    assert not tools._check_full(shlex.split("curl http://x"), root, ())
+
+
+def test_passive_gains_no_execution_from_the_toolchains():
+    """The no-execution profile is unchanged: a compiler runs code."""
+    root = Path("/tmp/root")
+    for cmd in ("cargo build", "make", "./app", "gcc -o a a.c", "javac A.java"):
+        assert not tools._check_passive(shlex.split(cmd), root, ()), cmd
