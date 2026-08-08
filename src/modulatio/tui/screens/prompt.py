@@ -55,6 +55,16 @@ def _tasks_bar(done: int, total: int) -> str:
     return "▰" * filled + "▱" * (10 - filled) + f" {pct}%"
 
 
+def _fmt_quiet(seconds: int) -> str:
+    """Age of the last progress for the elapsed gauge: ``↻3s`` → ``↻2m``.
+
+    Seconds up to a minute, whole minutes past it — the reading only has to
+    separate "moving" from "stopped", and second-precision past a minute
+    invites reading noise as signal."""
+    s = max(0, int(seconds))
+    return f"↻{s}s" if s < 60 else f"↻{s // 60}m"
+
+
 def _fmt_tokens(n: int) -> str:
     """Human token count for the ctx gauge: ``950`` → ``128.4K`` → ``2.1M``."""
     if n >= 1_000_000:
@@ -588,11 +598,25 @@ class PromptScreen(Vertical):
         compressions: int,
         tokens_in: int = 0,
         tokens_out: int = 0,
+        quiet: "int | None" = None,
     ) -> None:
-        """Paint the live run gauges (fed by the app's 1s tick, read-side)."""
+        """Paint the live run gauges (fed by the app's 1s tick, read-side).
+
+        ``quiet`` is the seconds since the last activity event, rendered beside
+        the run's own elapsed. Elapsed alone cannot answer whether a run is
+        moving — it climbs at the same rate on a wedged one — and a label
+        naming the current step cannot either, since the step is equally true
+        while the work behind it is dead. Only the age of the last progress
+        separates the two, and it must be an age rather than a sample: a tool
+        loop waits on a socket between compute phases, so any instantaneous
+        reading lands in a wait often enough to call a live run dead.
+        """
         mins, secs = divmod(max(0, int(elapsed)), 60)
+        stamp = f"⏱ {mins}:{secs:02d}"
+        if quiet is not None:
+            stamp += f" · {_fmt_quiet(quiet)}"
         lines = {
-            "#rail-elapsed": f"⏱ {mins}:{secs:02d}",
+            "#rail-elapsed": stamp,
             "#rail-tasks": f"tasks {_tasks_bar(tasks_done, tasks_total)}",
             "#rail-qc": f"qc    ✓ {qc_pass} · ✗ {qc_fail}",
             "#rail-tok": (

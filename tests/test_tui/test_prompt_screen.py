@@ -2086,3 +2086,19 @@ def test_attach_chat_catches_value_and_os_errors():
     src = inspect.getsource(prompt.PromptScreen.attach_chat)
     assert "ValueError" in src
     assert "OSError" in src
+
+
+def test_fmt_quiet_reads_as_an_age_not_a_sample():
+    """The elapsed gauge carries the age of the last progress, since a run's
+    own elapsed climbs at the same rate whether it is working or wedged."""
+    from modulatio.tui.screens.prompt import _fmt_quiet
+
+    assert _fmt_quiet(0) == "↻0s"
+    assert _fmt_quiet(3) == "↻3s"
+    assert _fmt_quiet(59) == "↻59s"
+    # Whole minutes past a minute — the reading separates moving from stopped,
+    # and second-precision up there is noise read as signal.
+    assert _fmt_quiet(60) == "↻1m"
+    assert _fmt_quiet(214) == "↻3m"
+    # A clock that steps backwards must not render a negative age.
+    assert _fmt_quiet(-5) == "↻0s"

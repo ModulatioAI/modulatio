@@ -1400,6 +1400,12 @@ class ModulatioApp(App):
         updates must run on the main thread, so we dispatch via
         ``call_from_thread`` which Textual handles correctly from any
         thread (including the main one)."""
+        # Progress heartbeat. A run's own elapsed climbs identically whether the
+        # fleet is turning work or wedged, so the rail reports the AGE of this
+        # stamp instead. Taken here, where the orchestrator calls in, so a busy
+        # main thread cannot make a live run look quiet.
+        import time as _time
+        self._last_activity_at = _time.monotonic()
         try:
             self.call_from_thread(self._record_activity_impl, event)
         except RuntimeError:
@@ -1993,22 +1999,21 @@ class ModulatioApp(App):
         except Exception:
             pass
         _offset, tokens, compressions = self._audit_tally
+        import time as _time
         started = getattr(self, "_kickoff_started_at", None)
-        if started is not None:
-            import time as _time
-            elapsed = int(_time.monotonic() - started)
-        else:
-            elapsed = 0
+        elapsed = 0 if started is None else int(_time.monotonic() - started)
         from modulatio import budget
         tokens_in, tokens_out = budget.read_usage_totals(
             vault.run_dir(project.code, run_id) / "usage.jsonl")
         from modulatio.tui.screens.prompt import PromptScreen
         try:
+            last_at = getattr(self, "_last_activity_at", None)
+            quiet = None if last_at is None else int(_time.monotonic() - last_at)
             self.query_one(PromptScreen).update_team_telemetry(
                 elapsed=elapsed, tasks_done=settled, tasks_total=total,
                 qc_pass=qc_pass, qc_fail=qc_fail,
                 tokens=tokens, compressions=compressions,
-                tokens_in=tokens_in, tokens_out=tokens_out)
+                tokens_in=tokens_in, tokens_out=tokens_out, quiet=quiet)
         except Exception:
             pass
 
