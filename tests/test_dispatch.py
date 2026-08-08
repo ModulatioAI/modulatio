@@ -1400,3 +1400,45 @@ def test_global_cap_deferral_uses_sentinel_not_producer_capacity():
     # Global cap is the limiter — sentinel, not a specific producer/cap.
     assert blocking_agent == ""
     assert blocking_cap == 0
+
+
+def test_continuity_hint_yields_to_an_idle_producer():
+    """The hint is a preference, not an assignment: it holds while the hinted
+    producer is among the least loaded, and yields once it is not.
+
+    Honored unconditionally it concentrates a whole dependency graph on one
+    producer, because each task inherits the hint from its dependency — so a
+    chain hands every descendant to whoever ran its root."""
+    busy = _agent("engineer-a", ["coding"])
+    idle = _agent("engineer-b", ["coding"])
+    task = _task(["coding"])
+    task.preferred_continuity_agent = "engineer-a"
+
+    # Tied at zero — continuity costs nothing and wins.
+    assert dispatch.select_agent(
+        task, [busy, idle], load={"engineer-a": 0, "engineer-b": 0}
+    ).id == "engineer-a"
+
+    # The hinted producer already carries the wave; the idle one takes it.
+    assert dispatch.select_agent(
+        task, [busy, idle], load={"engineer-a": 3, "engineer-b": 0}
+    ).id == "engineer-b"
+
+
+def test_a_dependency_chain_does_not_land_on_one_producer():
+    """Every task inheriting its predecessor's agent must still spread across
+    the roster — the shape that put ten of eleven tasks on one seat."""
+    agents = [_agent(f"eng-{n}", ["coding"]) for n in "abc"]
+    load: dict = {}
+    picked = []
+    for _ in range(9):
+        t = _task(["coding"])
+        if picked:
+            t.preferred_continuity_agent = picked[-1]
+        agent = dispatch.select_agent(t, agents, load=dict(load))
+        picked.append(agent.id)
+        load[agent.id] = load.get(agent.id, 0) + 1
+
+    assert len(set(picked)) == 3, f"work never reached the whole roster: {load}"
+    assert max(load.values()) - min(load.values()) <= 1, (
+        f"work concentrated instead of spreading: {load}")

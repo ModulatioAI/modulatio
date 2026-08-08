@@ -210,9 +210,19 @@ def select_agent(
 
     hint = getattr(task, "preferred_continuity_agent", None)
     if hint:
+        least = min(load.get(a.id, 0) for a in producers)
         for a in producers:
             if a.id == hint:
-                return a
+                # Continuity holds only while it costs nothing: the hint wins
+                # among the LEAST-LOADED producers, which is what keeps it a
+                # preference rather than an assignment. Honored unconditionally
+                # it concentrates the whole graph on one producer, because each
+                # task inherits the hint from its dependency — so a chain hands
+                # every descendant to whoever ran its root while the rest of
+                # the roster stays idle.
+                if load.get(a.id, 0) <= least:
+                    return a
+                break
 
     return min(producers, key=lambda a: _producer_sort_key(a, load, effective_caps))
 
