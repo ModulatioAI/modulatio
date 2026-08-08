@@ -13771,3 +13771,50 @@ def test_prose_without_deliverables_never_reads_as_a_collapse():
         ),
     )
     assert _collapsed_plan_reason([task]) == ""
+
+
+def test_a_grown_leader_bench_is_reported_and_left_alone(project, monkeypatch):
+    """The workspace is the Leader's to keep — what it leaves may be wanted
+    next run — so the engine reports it and deletes nothing. An operator
+    cannot decide about a folder they never hear about."""
+    from modulatio import orchestration
+    from modulatio.orchestration import Orchestrator, leader_workspace_path
+
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    bench = leader_workspace_path(project.code)
+    bench.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(orchestration, "_LEADER_BENCH_DISCLOSE_BYTES", 1024)
+    (bench / "env").mkdir()
+    (bench / "env" / "blob.bin").write_bytes(b"x" * 4096)
+
+    summary = RunSummary(project=orch.project)
+    orch._disclose_leader_bench(summary)
+
+    told = [r for r in summary.recommendations
+            if "Leader's workspace" in r.get("concern", "")]
+    assert told, "a grown bench must reach the operator"
+    assert "4.0 KB" in told[0]["concern"]
+    assert str(bench) in told[0]["concern"]
+    # Reported, never swept.
+    assert (bench / "env" / "blob.bin").exists()
+
+
+def test_an_ordinary_bench_is_not_reported(project, monkeypatch):
+    """Scripts and notes are kilobytes and must stay silent, or the disclosure
+    becomes noise the operator learns to skip."""
+    from modulatio.orchestration import Orchestrator, leader_workspace_path
+
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    bench = leader_workspace_path(project.code)
+    bench.mkdir(parents=True, exist_ok=True)
+    (bench / "probe.py").write_text("print('hello')\n")
+
+    summary = RunSummary(project=orch.project)
+    orch._disclose_leader_bench(summary)
+    assert not summary.recommendations
+
+    # A workspace that was never created says nothing either.
+    import shutil
+    shutil.rmtree(bench)
+    orch._disclose_leader_bench(summary)
+    assert not summary.recommendations

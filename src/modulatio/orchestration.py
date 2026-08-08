@@ -279,6 +279,11 @@ _DEP_FAILED_MARKER = "dependency failed"
 #: refusal itself describes, so a second attempt with that reason in hand is
 #: worth one call; beyond that the goal is settled rather than retried at
 #: length, since nothing outside the engine is going to change.
+#: Size at which the Leader's workspace is reported to the operator. Ordinary
+#: work there — scripts, notes, patches — is kilobytes; one built environment
+#: is tens of megabytes, so the line separates a bench from a thing left on it.
+_LEADER_BENCH_DISCLOSE_BYTES = 25 * 1024 * 1024
+
 _PLAN_ATTEMPTS = 2
 
 #: File-ish tokens in a task's description — the deliverables the task says it
@@ -13635,6 +13640,44 @@ class Orchestrator:
                 issues.append(f"modified/removed test module {Path(path).name}")
         return issues
 
+    def _disclose_leader_bench(self, summary: "RunSummary") -> None:
+        """Tell the operator when the Leader's own workspace has grown.
+
+        The workspace is the Leader's to keep: it checks tools out of the
+        skills library when it needs them, and what it leaves behind may be
+        wanted next run, so the engine does not sweep it. What the engine owes
+        is the fact — an operator cannot decide about a folder they never hear
+        about. Reporting rather than deleting keeps the choice where it
+        belongs.
+
+        The threshold is set so ordinary work never trips it: scripts, notes
+        and patches are kilobytes, while one built environment is tens of
+        megabytes. Anything above the line is a thing, not a file.
+        """
+        try:
+            bench = leader_workspace_path(self.project.code)
+            if not bench.is_dir():
+                return
+            files = [p for p in bench.rglob("*") if p.is_file()]
+            total = sum(p.stat().st_size for p in files)
+        except OSError:
+            return  # a bench that cannot be measured is not worth a failure
+        if total < _LEADER_BENCH_DISCLOSE_BYTES:
+            return
+        from modulatio import vault as _vault
+        summary.recommendations.append({
+            "goal_id": "",
+            "concern": (
+                f"The Leader's workspace holds {_vault.human_size(total)} "
+                f"across {len(files)} file(s) at {bench}."
+            ),
+            "suggestion": (
+                "Kept, not cleaned: the Leader may want it next run. Remove "
+                "what you do not want to keep — nothing here ships with the "
+                "deliverable."
+            ),
+        })
+
     def _seat_label(self, agent_id: "str | None", role_word: str) -> str:
         """What to call a seat in operator-facing text: its NAME when it has
         one, else the role word.
@@ -18084,6 +18127,7 @@ class Orchestrator:
         # makes a leader call (slow, and unbounded on the Clay subprocess path)
         # that must NOT be able to block or delay the user's deliverable + end
         # report. The user gets their result first; codification runs after.
+        self._disclose_leader_bench(summary)
         if self._deliver_products:
             self._deliver_finished_products(summary)
         # F8-ONLY teardown (only the kill-switch blows out the
