@@ -1638,3 +1638,44 @@ def test_a_cmake_deliverable_builds_and_tests(tmp_path, enforceable):
     assert failed["status"] == "product_failed"
     assert failed["phases"][-1]["phase"] == "test"
     assert failed["phases"][-1]["origin"] == "deliverable"
+
+
+@_needs_bwrap
+@_needs_wheelhouse
+def test_a_build_backend_the_bundle_lacks_is_the_gates_limit(
+    tmp_path, enforceable, real_wheelhouse,
+):
+    """A backend the approved local source does not carry cannot be measured
+    here, and the project declaring it did nothing wrong. Attributed to the
+    deliverable it would clamp a verdict and tell the operator their code is
+    broken, which is the one thing an unmeasurable gate must not do."""
+    root = tmp_path / "art"
+    root.mkdir()
+    (root / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['flit_core>=3.2']\n"
+        "build-backend = 'flit_core.buildapi'\n\n"
+        "[project]\nname = 'apppkg'\nversion = '0.1.0'\n"
+    )
+    (root / "apppkg").mkdir()
+    (root / "apppkg" / "__init__.py").write_text("x = 1\n")
+
+    snap = cp.materialize_snapshot(
+        ["pyproject.toml", "apppkg/__init__.py"], root, tmp_path / "s")
+    res = cp.build_wheel_phase(snap, tmp_path / "s")
+    assert res.status is cp.ProbeStatus.ENGINE_UNAVAILABLE
+    assert res.origin == "engine"
+    assert "flit_core" in res.reason
+
+    # A backend that IS carried, over a project that cannot build, stays the
+    # deliverable's failure — the attribution must not swallow real faults.
+    (root / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['setuptools']\n"
+        "build-backend = 'setuptools.build_meta'\n\n"
+        "[project]\nname = 'apppkg'\nversion = '0.1.0'\n\n"
+        "[tool.setuptools]\npackages = ['nonexistent_package']\n"
+    )
+    snap2 = cp.materialize_snapshot(
+        ["pyproject.toml", "apppkg/__init__.py"], root, tmp_path / "s2")
+    res2 = cp.build_wheel_phase(snap2, tmp_path / "s2")
+    assert res2.status is cp.ProbeStatus.PRODUCT_FAILED
+    assert res2.origin == "deliverable"

@@ -629,7 +629,7 @@ def build_wheel_phase(
             reason=f"could not stage a writable build tree: {exc}"[:300],
         )
     target = str(build_dir)
-    return run_probe_phase(
+    res = run_probe_phase(
         [sys.executable, "-m", "pip", "wheel", "--no-index",
          "--find-links", str(wh), "--no-deps", "--no-cache-dir",
          "--wheel-dir", str(wheels_dir), target],
@@ -639,6 +639,26 @@ def build_wheel_phase(
         # explicit RO bind or the isolated build env sees an empty path.
         extra_ro=(wh,),
     )
+    if res.status is not ProbeStatus.PRODUCT_FAILED:
+        return res
+    # A build backend the approved local source does not carry is the GATE's
+    # limit, not the deliverable's fault: the project declares a perfectly
+    # ordinary backend and nothing about it can be measured here. Reported as
+    # the product's failure it would clamp a verdict and tell the operator
+    # their code is broken, which is the one thing an unmeasurable gate must
+    # not do. Same attribution the install phase makes for a missing
+    # dependency.
+    missing = _NO_DIST_RE.search(res.output_tail)
+    if missing:
+        return ProbePhaseResult(
+            status=ProbeStatus.ENGINE_UNAVAILABLE, phase="wheel",
+            origin="engine",
+            reason=f"declared build backend {missing.group(1)!r} absent from "
+                   "the approved local source (dependency_source)",
+            returncode=res.returncode, output_tail=res.output_tail,
+            duration_s=res.duration_s,
+        )
+    return res
 
 
 def _validated_wheel_metadata(wheels: "list[Path]"):
