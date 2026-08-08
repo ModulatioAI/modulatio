@@ -2678,6 +2678,12 @@ class Orchestrator:
         #: (fail-closed), so a producer emitting assembled-looking text can't
         #: bypass review. Per-run, in-memory; lost on crash-resume → fall back.
         self._assembly_records: dict = {}
+        #: Rel paths each task INTENTIONALLY wrote, keyed by task id. Collected
+        #: on every execution path so goal verification can name a file the
+        #: deliverable depends on that no task declared — such a file is on
+        #: disk while the producer works, so the build succeeds there and fails
+        #: for whoever receives only the declared set. Per-run, in-memory.
+        self._task_artifact_writes: dict[str, list[str]] = {}
         #: #101 C.0: the declared DeliverableSpec for this run — the verifier's expected
         #: values (per-unit floor / required structure / title). Empty == today's
         #: behavior; bound at intake from the JT field (or Leader-distill, later).
@@ -10448,6 +10454,15 @@ class Orchestrator:
         here with abort wiring — every other tool (custom or builtin) keeps
         its host-built binding — and the override is restored on every
         exit."""
+        # Artifact-write capture. An isolated worker installs this buffer
+        # itself (its writes must also ride back for the staging merge), so
+        # only the paths without one — sequential, decompose children,
+        # goal-redo — get a local buffer here. Without it, what a task wrote
+        # would be knowable under one executor and invisible under another,
+        # and a guard that depends on the scheduler is not a guard.
+        own_write_buffer = getattr(self._tls, "artifact_writes", None) is None
+        if own_write_buffer:
+            self._tls.artifact_writes = []
         installed_override = False
         if (
             getattr(self._tls, "tool_registry_override", None) is None
@@ -10465,6 +10480,13 @@ class Orchestrator:
         finally:
             if installed_override:
                 self._tls.tool_registry_override = None
+            written = list(getattr(self._tls, "artifact_writes", None) or ())
+            if own_write_buffer:
+                self._tls.artifact_writes = None
+            if written:
+                # Accumulate: a redo re-enters this funnel for the same task.
+                prior = self._task_artifact_writes.setdefault(t.id, [])
+                prior.extend(w for w in written if w not in prior)
             # All FOUR terminal states — incl. ABANDONED (a Leader-iterate
             # drop): the producer still worked the task and remembers it.
             # Best-effort: a memory-write failure
@@ -12878,6 +12900,28 @@ class Orchestrator:
                 roots.append(min(candidates, key=lambda p: len(p.parts)))
         return roots
 
+    def _undeclared_deliverable_writes(
+        self, tasks: "list[Task]",
+    ) -> "list[tuple[str, str]]":
+        """``(task_id, rel_path)`` for files a task wrote that NO task in this
+        goal declared as its output.
+
+        The comparison is against the goal's WHOLE declared set, not one
+        task's path: a task legitimately writes siblings, and a file another
+        task declares is shipped by that task. What survives the diff is a
+        file the run produces but never delivers — it sits in the working
+        tree while the producer builds and tests against it, and is simply
+        absent for anyone who receives only the declared artifacts. A
+        deliverable that depends on such a file therefore builds here and
+        nowhere else, which is invisible until someone installs it."""
+        declared = {t.output_path for t in tasks if t.output_path}
+        return sorted(
+            (t.id, rel)
+            for t in tasks
+            for rel in self._task_artifact_writes.get(t.id, ())
+            if rel not in declared
+        )
+
     def _goal_execution_probe(
         self, tasks: "list[Task]",
     ) -> "tuple[bool | None, str] | None":
@@ -13786,6 +13830,22 @@ class Orchestrator:
                             "acceptable evidence"
                         )
 
+        # Files the run wrote that nothing ships. Evidence, not a clamp: an
+        # undeclared file is only a defect when the deliverable needs it, and
+        # THAT the build already measures. What this adds is the cause — a
+        # failed build names the missing module, not the task that wrote it
+        # somewhere the delivery set will never reach.
+        undeclared = self._undeclared_deliverable_writes(tasks)
+        if undeclared:
+            artifact_blocks.append(
+                "### Files written but not declared by any task\n\n"
+                + "\n".join(f"  - {rel}  (written by {tid})"
+                            for tid, rel in undeclared)
+                + "\n\nThese exist in the working tree and are NOT part of the "
+                "deliverable. If anything shipped depends on one of them, it "
+                "builds here and fails for whoever receives only the declared "
+                "files — declare it or remove the dependency."
+            )
         prior_approvals_block = _format_prior_approvals(
             store.list_tickets(self.project.code, run_id=self.project.run_id)
         )

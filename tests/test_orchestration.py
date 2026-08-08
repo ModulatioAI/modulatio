@@ -13549,3 +13549,58 @@ def test_a_plan_that_stays_unexecutable_is_rejected(project: Project):
     assert ran == [], "no producer runs against a plan that cannot execute"
     assert store.list_goals(PROJECT_CODE)[0].status is GoalStatus.BLOCKED
     assert any("plan rejected" in e for e in summary.errors)
+
+
+def test_undeclared_writes_named_against_the_goals_whole_declared_set(project):
+    """A file no task declares is named; a sibling another task declares is not.
+
+    The diff is against the goal's whole declared set because a task
+    legitimately writes siblings — only a file nothing ships is a finding."""
+    from modulatio.orchestration import Orchestrator
+
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    a = _qcfix_task(id="proj-T-001", output_path="pkg/mod.py")
+    b = _qcfix_task(id="proj-T-002", output_path="pyproject.toml")
+    # T-001 also wrote the file T-002 declares (shipped by T-002 — not a
+    # finding) and a build backend nothing declares (the finding).
+    orch._task_artifact_writes["proj-T-001"] = [
+        "pkg/mod.py", "pyproject.toml", "_build_backend.py",
+    ]
+    orch._task_artifact_writes["proj-T-002"] = ["pyproject.toml"]
+
+    assert orch._undeclared_deliverable_writes([a, b]) == [
+        ("proj-T-001", "_build_backend.py")
+    ]
+
+
+def test_artifact_writes_are_captured_without_a_worker_buffer(project, tmp_path):
+    """The capture does not depend on which executor ran the task.
+
+    An isolated worker installs the buffer itself; every other path
+    (sequential, decompose children, goal-redo) gets one from the shared
+    funnel. Without that, a write is recorded under one executor and lost
+    under another, and the finding would depend on the scheduler."""
+    from modulatio.orchestration import Orchestrator
+
+    orch = Orchestrator(project, {"leader": _leader_stub})
+    task = _qcfix_task(id="proj-T-001", output_path="pkg/mod.py")
+    root = orch._artifacts_root()
+    root.mkdir(parents=True, exist_ok=True)
+
+    def _write_two(t, summary, notes=""):
+        for rel in ("pkg/mod.py", "stray.py"):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text("x")
+            orch._record_artifact_write(root / rel)
+        t.status = TaskStatus.COMPLETED
+
+    orch._run_task_with_redo_inner = _write_two
+    assert getattr(orch._tls, "artifact_writes", None) is None
+    orch._run_task_with_redo(task, RunSummary(project=project))
+
+    assert orch._task_artifact_writes["proj-T-001"] == ["pkg/mod.py", "stray.py"]
+    # The borrowed buffer is handed back, never left installed for the next task.
+    assert getattr(orch._tls, "artifact_writes", None) is None
+    assert orch._undeclared_deliverable_writes([task]) == [
+        ("proj-T-001", "stray.py")
+    ]
