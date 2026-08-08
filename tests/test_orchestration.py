@@ -13716,3 +13716,58 @@ def test_seat_label_survives_an_unreadable_roster(project, monkeypatch):
 
     monkeypatch.setattr(roster, "list_agents", _boom)
     assert orch._seat_label("qc", "QC") == "QC"
+
+
+def test_collapsed_plan_is_refused_before_dispatch():
+    """A plan naming more deliverables inside one task than it has tasks never
+    split the work — the job would run on a single producer, one review would
+    cover everything, and most of the deliverable would ship undeclared."""
+    from modulatio.orchestration import _collapsed_plan_reason
+
+    one = _qcfix_task(
+        id="proj-T-001",
+        description=(
+            "Build the package: apppkg/__init__.py, apppkg/store.py, "
+            "apppkg/report.py, apppkg/cli.py, pyproject.toml, README.md, "
+            "tests/test_store.py, tests/fixtures/items.json."
+        ),
+    )
+    reason = _collapsed_plan_reason([one])
+    assert "1 task(s)" in reason and "proj-T-001" in reason
+    assert "8 deliverables" in reason
+
+
+def test_a_split_plan_is_not_refused_for_naming_files():
+    """Naming files is normal — a task legitimately references what it builds
+    on and what it tests. Only naming more than the plan has tasks to carry is
+    the signal, so the comparison is against the plan's own size."""
+    from modulatio.orchestration import _collapsed_plan_reason
+
+    tasks = [
+        _qcfix_task(id=f"proj-T-{n:03d}", description=d)
+        for n, d in enumerate((
+            "Implement apppkg/store.py.",
+            "Implement apppkg/report.py using apppkg/store.py.",
+            "Implement apppkg/cli.py using apppkg/store.py and apppkg/report.py.",
+            "Write tests/test_store.py against apppkg/store.py.",
+        ), start=1)
+    ]
+    # The busiest task names three files; four tasks carry them.
+    assert _collapsed_plan_reason(tasks) == ""
+    # An empty plan is refused elsewhere and must not report a collapse.
+    assert _collapsed_plan_reason([]) == ""
+
+
+def test_prose_without_deliverables_never_reads_as_a_collapse():
+    """Ordinary sentences must not register — the match is on file extensions
+    so a description that merely discusses the work stays silent."""
+    from modulatio.orchestration import _collapsed_plan_reason
+
+    task = _qcfix_task(
+        id="proj-T-001",
+        description=(
+            "Research the domain, e.g. compare approaches and summarize "
+            "trade-offs. No files are produced by this task."
+        ),
+    )
+    assert _collapsed_plan_reason([task]) == ""

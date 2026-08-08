@@ -281,6 +281,43 @@ _DEP_FAILED_MARKER = "dependency failed"
 #: length, since nothing outside the engine is going to change.
 _PLAN_ATTEMPTS = 2
 
+#: File-ish tokens in a task's description — the deliverables the task says it
+#: will produce. Matching on an extension keeps ordinary prose from registering.
+_PLAN_FILE_RE = re.compile(
+    r"\b[\w./-]+\.(?:py|toml|md|json|txt|cfg|ini|yaml|yml|sh|rs|go|js|ts|java)\b"
+)
+
+
+def _collapsed_plan_reason(tasks: "list[Task]") -> str:
+    """Why a plan failed to decompose, or ``""`` when it did.
+
+    A plan that names more deliverables inside ONE task than the whole plan has
+    tasks did not split the work. The consequences compound: the job runs on a
+    single producer while the rest of the roster idles, one review covers
+    everything at once instead of each piece, and the declared outputs stop
+    resembling what the run actually writes, so most of the deliverable ships
+    undeclared.
+
+    Counting the files a task NAMES keeps the measure inside the plan, so no
+    expectation has to be recovered from the brief's prose. The comparison is
+    against the plan's own task count rather than a fixed number, because a
+    task legitimately naming several files is only suspect when there were not
+    enough tasks to carry them.
+    """
+    if not tasks:
+        return ""
+    named = {
+        t.id: len(set(_PLAN_FILE_RE.findall(t.description or "")))
+        for t in tasks
+    }
+    worst_id, worst = max(named.items(), key=lambda kv: kv[1])
+    if worst <= len(tasks):
+        return ""
+    return (
+        f"plan has {len(tasks)} task(s), but {worst_id} alone names {worst} "
+        f"deliverables — split the work so each task owns what it produces"
+    )
+
 #: A goal that has settled, however it settled. Named once because several call
 #: sites ask "is this goal still live?" and a terminal that one of them missed
 #: would leave a finished goal looking runnable.
@@ -17570,6 +17607,15 @@ class Orchestrator:
                     tasks = self._plan_tasks(g, correction)
                 except _PlanError as exc:
                     correction = plan_reason = str(exc)
+                    continue
+
+                # A plan that never split the work is refused before dispatch:
+                # the fault is legible enough to describe back to the planner,
+                # and executing it costs a whole cycle on one producer.
+                collapsed = _collapsed_plan_reason(tasks)
+                if collapsed:
+                    correction = plan_reason = collapsed
+                    plan_tasks = tasks
                     continue
 
                 # Slice #7a: topologically sort tasks so execution respects
