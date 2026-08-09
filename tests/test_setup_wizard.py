@@ -420,7 +420,11 @@ def test_commit_writes_no_team_template_when_no_agents(tmp_path):
     assert not config.TEAM_TEMPLATE_FILE.exists()
 
 
-def test_commit_writes_env_keys_chmod_600(tmp_path):
+def test_commit_writes_env_keys_to_the_one_store_chmod_600(tmp_path):
+    """Keys entered during setup land in the store every surface reads.
+    Writing them beside the user's work instead would put fresh keys somewhere
+    the rest of the engine no longer looks, and somewhere a settings wipe
+    cannot reach."""
     state = {
         "vault_root": str(tmp_path / "vault"),
         "shared_resources_path": str(tmp_path / "shared"),
@@ -431,19 +435,20 @@ def test_commit_writes_env_keys_chmod_600(tmp_path):
     }
     finalize.commit(state, version="2.0.0")
 
-    env_path = tmp_path / "vault" / ".env"
+    env_path = config.secrets_path()
     assert env_path.exists()
     assert "OPENAI_API_KEY=sk-test" in env_path.read_text()
-    mode = env_path.stat().st_mode & 0o777
-    assert mode == 0o600
+    assert env_path.stat().st_mode & 0o777 == 0o600
+    # Never beside the user's work.
+    assert not (tmp_path / "vault" / ".env").exists()
 
 
 def test_commit_preserves_existing_env_keys(tmp_path):
-    """Pre-existing keys in <vault>/.env survive when finalize merges in new ones."""
+    """Keys already in the store survive when setup adds new ones."""
     vault = tmp_path / "vault"
     vault.mkdir()
-    env_path = vault / ".env"
-    env_path.write_text("EXISTING_KEY=already-here\n")
+    config.set_env_secret("EXISTING_KEY", "already-here")
+    env_path = config.secrets_path()
 
     state = {
         "vault_root": str(vault),

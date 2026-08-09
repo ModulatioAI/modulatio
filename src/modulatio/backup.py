@@ -261,13 +261,21 @@ def export_backup(
             ),
         )
 
+    # The secret store, wherever it currently lives. Exporting only the vault
+    # copy would omit every key on an install whose secrets have moved to the
+    # settings directory, so a restore-with-secrets would hand back an empty
+    # store and read as a working import.
     vault_env = ""
-    env_path = vault_root / ".env" if vault_root else None
-    if not strip_secrets and env_path and env_path.exists():
-        try:
-            vault_env = env_path.read_text(encoding="utf-8")
-        except OSError:
-            vault_env = ""
+    if not strip_secrets:
+        for candidate in (config.secrets_path(),
+                          (vault_root / ".env") if vault_root else None):
+            if candidate is None or not candidate.exists():
+                continue
+            try:
+                vault_env = candidate.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            break
 
     backup = {
         "version": BACKUP_FORMAT_VERSION,
@@ -458,7 +466,10 @@ def import_backup(
 
     # vault .env (with secrets) — only when present in backup
     if backup.get("vault_env"):
-        env_path = vault_root / ".env"
+        # Restored into the ONE store the engine reads, whatever location the
+        # backup was taken from — an older archive carries the vault copy, and
+        # putting it back there would restore keys nothing looks for.
+        env_path = config.secrets_path()
         if env_path.exists() and not overwrite:
             summary["vault_files_skipped"] += 1
         else:

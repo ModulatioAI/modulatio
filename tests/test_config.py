@@ -696,3 +696,51 @@ def test_an_unfinished_move_keeps_the_source(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "set_env_secret", _fail)
     assert config.migrate_vault_secrets() == 0
     assert legacy.exists(), "the only copy must not be destroyed"
+
+
+def test_a_secret_directory_is_made_owner_only(tmp_path, monkeypatch):
+    """A file's mode does not protect it from its parent: anyone who can write
+    the DIRECTORY can rename a secret aside and put their own in its place,
+    whatever the mode on the file says."""
+    import os as _os
+
+    from modulatio import config
+
+    cfg = tmp_path / "cfg"
+    cfg.mkdir(mode=0o775)
+    monkeypatch.setattr(config, "CONFIG_DIR", cfg)
+
+    config.write_secret_file(cfg / ".env", "KEY=value\n")
+    assert oct(_os.stat(cfg).st_mode & 0o777) == "0o700"
+    assert oct((cfg / ".env").stat().st_mode & 0o777) == "0o600"
+
+
+def test_concurrent_secret_edits_do_not_lose_each_other(tmp_path, monkeypatch):
+    """Two writers that each read the file, change their own key, and write
+    the whole thing back would each write a copy that never saw the other's
+    change — so the edit that lands second silently drops the first."""
+    import threading
+
+    from modulatio import config
+
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    monkeypatch.setattr(config, "CONFIG_DIR", cfg)
+    config.set_env_secret("BASE", "0")
+
+    start = threading.Barrier(8)
+
+    def _writer(i: int) -> None:
+        start.wait()
+        config.set_env_secret(f"KEY_{i}", f"v{i}")
+
+    threads = [threading.Thread(target=_writer, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    body = (cfg / ".env").read_text()
+    for i in range(8):
+        assert f"KEY_{i}=v{i}" in body, f"writer {i} was lost:\n{body}"
+    assert "BASE=0" in body

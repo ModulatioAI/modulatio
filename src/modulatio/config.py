@@ -36,6 +36,8 @@ that explicitly rather than silently picking a model.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -154,6 +156,35 @@ def defaults_exist() -> bool:
     return DEFAULTS_FILE.exists()
 
 
+def _harden_secret_dir(directory: Path) -> None:
+    """Make the engine's own settings directory owner-only, and refuse one
+    owned by somebody else.
+
+    A file's mode does not protect it from its parent: anyone who can write
+    the DIRECTORY can rename a secret aside and put their own in its place,
+    whatever the mode on the file says. Directories created under an ordinary
+    group-writable umask therefore leave a 0600 secret replaceable.
+
+    Applies to the engine's own settings home only. A vault a user pointed at
+    their own folder is theirs, and its permissions are not the engine's to
+    rewrite.
+    """
+    try:
+        resolved = directory.resolve()
+        if resolved != CONFIG_DIR.resolve() and CONFIG_DIR.resolve() not in resolved.parents:
+            return
+        st = resolved.stat()
+    except OSError:
+        return
+    if st.st_uid != os.getuid():
+        raise PermissionError(
+            f"refusing to write a secret into {resolved}: it belongs to "
+            f"another user (uid {st.st_uid})"
+        )
+    if st.st_mode & 0o077:
+        os.chmod(resolved, 0o700)
+
+
 def write_secret_file(path: Path, content: str) -> None:
     """Atomically write *content* to *path* with mode 0o600 throughout.
 
@@ -170,6 +201,7 @@ def write_secret_file(path: Path, content: str) -> None:
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    _harden_secret_dir(path.parent)
     # Unique temp name (not a fixed ``<name>.tmp``): two concurrent writers for
     # the SAME secret path (an auth-alert write racing a key-pin write) would
     # otherwise share one temp file, clobber each other's bytes, and interleave
@@ -250,6 +282,33 @@ def _parse_env_assignments(path: Path) -> "dict[str, str]":
     return out
 
 
+#: Serializes the read-modify-replace behind every secret edit. Two writers
+#: that each read the file, change their own key, and write the whole thing
+#: back will each write a copy that never saw the other's change, so the edit
+#: that lands second silently drops the first. The lock spans the READ as well
+#: as the write, because reading stale content is what makes the loss.
+_SECRET_EDIT_LOCK = threading.RLock()
+
+
+@contextlib.contextmanager
+def _secret_edit_guard():
+    """Hold the in-process lock and a file lock over the secret store, so
+    concurrent editors in one process and in separate processes both
+    serialize."""
+    lock_path = Path(str(secrets_path()) + ".lock")
+    with _SECRET_EDIT_LOCK:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+
+
 def set_env_secret(name: str, value: str) -> Path:
     """Set/update a single secret (e.g. an API key) in the vault ``.env``,
     0600, and load it into ``os.environ`` so it's usable immediately.
@@ -270,6 +329,11 @@ def set_env_secret(name: str, value: str) -> Path:
         raise ValueError("env secret name/value must not contain newlines")
     if "=" in name or not name.strip():
         raise ValueError("env secret name must be non-empty and contain no '='")
+    with _secret_edit_guard():
+        return _set_env_secret_locked(name, value)
+
+
+def _set_env_secret_locked(name: str, value: str) -> Path:
     env_path = secrets_path()
     out_lines: list[str] = []
     replaced = False
@@ -295,6 +359,11 @@ def set_env_secret(name: str, value: str) -> Path:
 def remove_env_secret(name: str) -> bool:
     """Remove a secret from the vault ``.env`` and ``os.environ``. Returns True
     if it was present. Backs the Configuration tab's "remove key"."""
+    with _secret_edit_guard():
+        return _remove_env_secret_locked(name)
+
+
+def _remove_env_secret_locked(name: str) -> bool:
     removed = False
     env_path = secrets_path()
     if env_path.exists():

@@ -230,27 +230,16 @@ def commit(state: dict, *, version: str) -> None:
         config.save_team_template(team)
         theme.success(f"Wrote {len(team)}-agent team template to {config.TEAM_TEMPLATE_FILE}")
 
-    # 2. <vault>/.env — staged API keys
+    # 2. The secret store — staged API keys
     staged = state.get("staged_api_keys", {})
     if staged:
-        vault_root = Path(state["vault_root"])
-        vault_root.mkdir(parents=True, exist_ok=True)
-        env_path = vault_root / ".env"
-        existing: dict[str, str] = {}
-        if env_path.exists():
-            for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    existing[k.strip()] = v.strip()
-        existing.update(staged)
-        # write_secret_file: 0600 mode through the open(), no world-readable
-        # window between create and chmod. Vault .env can carry every API
-        # key the user added in the wizard.
-        config.write_secret_file(
-            env_path,
-            "\n".join(f"{k}={v}" for k, v in existing.items()) + "\n",
-        )
+        # The one store every surface reads and writes, which is the settings
+        # directory rather than the vault. Writing them beside the user's work
+        # instead would put fresh keys somewhere the rest of the engine no
+        # longer looks, and somewhere a wipe of settings cannot reach.
+        for name, value in staged.items():
+            config.set_env_secret(name, value)
+        env_path = config.secrets_path()
         theme.success(f"Wrote {len(staged)} API key(s) to {env_path} (chmod 600)")
 
     # 3. shared resources directory + per-role agent files (deferred
