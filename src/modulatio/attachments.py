@@ -121,7 +121,22 @@ def build_attachment(path: Path, *, kind: AttachmentKind) -> Attachment:
         DEFAULT_MAX_DOCUMENT_BYTES if kind == "document"
         else DEFAULT_MAX_IMAGE_BYTES
     )
+    sweep_orphan_snapshots()
     staged, digest, size = _stage(path, cap=cap, kind=kind)
+    try:
+        return _finish_attachment(path, kind, staged, digest, size)
+    except BaseException:
+        # Construction failed AFTER the copy was taken, so no caller ever
+        # received the path and nobody is left to release it. A snapshot with
+        # no owner is not evidence of anything — it is a file nothing will
+        # come back for.
+        staged.unlink(missing_ok=True)
+        raise
+
+
+def _finish_attachment(
+    path: Path, kind: AttachmentKind, staged: Path, digest: str, size: int,
+) -> Attachment:
     content: str | None = None
     if kind == "document":
         # Decoded from the SNAPSHOT, so the text dispatched and the bytes
@@ -227,6 +242,35 @@ def _stage(
         os.close(fd)
 
 
+#: How long an unclaimed snapshot may sit before the next load sweeps it. A
+#: turn that crashed between staging and dispatch leaves a copy nobody will
+#: come back for, and a staging directory that only grows is a pile of the
+#: operator's documents kept for no reason.
+_ORPHAN_TTL_S = 24 * 60 * 60
+
+
+def sweep_orphan_snapshots(now: "float | None" = None) -> int:
+    """Remove staged copies older than the retention window, returning how
+    many. Only age decides: an attachment in flight was staged moments ago, so
+    the window cannot reach one that is still in use."""
+    import time as _time
+
+    cutoff = (now if now is not None else _time.time()) - _ORPHAN_TTL_S
+    removed = 0
+    try:
+        entries = list(_staging_dir().iterdir())
+    except OSError:
+        return 0
+    for item in entries:
+        try:
+            if item.is_file() and item.stat().st_mtime < cutoff:
+                item.unlink(missing_ok=True)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 #: Leading bytes that identify an image. A name or a declared type is a claim
 #: about bytes that are already in hand, and reading them answers the same
 #: question without trusting it.
@@ -262,4 +306,5 @@ __all__ = [
     "DEFAULT_MAX_DOCUMENT_BYTES",
     "DEFAULT_MAX_IMAGE_BYTES",
     "looks_like_image",
+    "sweep_orphan_snapshots",
 ]

@@ -266,6 +266,15 @@ def test_a_pdf_loads_through_its_text_layer(tmp_path, monkeypatch):
         _pytest.skip("poppler-utils not installed")
     from tests.test_tools import _tiny_pdf
 
+    # Extraction of untrusted input happens confined or not at all, so the
+    # suite-wide bypass is lifted for this one.
+    from modulatio import sandbox
+    monkeypatch.delenv("MODULATIO_RUN_SHELL_UNSAFE", raising=False)
+    monkeypatch.setenv("MODULATIO_SANDBOX_PROFILE", "standard")
+    sandbox.reset_enforcement_state_cache()
+    if sandbox.enforcement_state() is not sandbox.EnforcementState.SANDBOXED_FULL:
+        _pytest.skip("host cannot seal the sandbox")
+
     monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
     src = tmp_path / "paper.pdf"
     src.write_bytes(_tiny_pdf())
@@ -274,3 +283,47 @@ def test_a_pdf_loads_through_its_text_layer(tmp_path, monkeypatch):
     assert "the owl flies at midnight" in (item.content or "")
     assert item.sha256.startswith("sha256:")
 
+
+
+def test_a_snapshot_does_not_outlive_a_failed_construction(tmp_path, monkeypatch):
+    """When construction fails after the copy is taken, no caller ever
+    received the path and nobody is left to release it. A snapshot with no
+    owner is not evidence of anything — it is a file nothing comes back for."""
+    import pytest
+
+    from modulatio import attachments, config
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    binary = tmp_path / "sheet.xlsx"
+    binary.write_bytes(b"PK\x03\x04" + bytes(range(256)) * 4)
+
+    with pytest.raises(UnicodeDecodeError):
+        attachments.build_attachment(binary, kind="document")
+
+    staged = tmp_path / "cfg" / "loaded"
+    assert not [p for p in staged.glob("*") if p.is_file()]
+
+
+def test_snapshots_nobody_claimed_are_swept_by_age(tmp_path, monkeypatch):
+    """A turn that died between staging and dispatch leaves a copy nobody
+    comes back for, and a staging directory that only grows is a pile of the
+    operator's documents kept for no reason. Age alone decides, so an
+    attachment in flight — staged moments ago — cannot be reached."""
+    import os as _os
+    import time as _time
+
+    from modulatio import attachments, config
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    src = tmp_path / "live.md"
+    src.write_text("in flight\n")
+    live = attachments.build_attachment(src, kind="document")
+
+    stale = (tmp_path / "cfg" / "loaded") / "abandoned"
+    stale.write_text("nobody's\n")
+    old = _time.time() - attachments._ORPHAN_TTL_S - 60
+    _os.utime(stale, (old, old))
+
+    assert attachments.sweep_orphan_snapshots() == 1
+    assert not stale.exists()
+    assert live.staged_path.exists(), "an in-flight snapshot was swept"

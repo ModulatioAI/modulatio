@@ -118,7 +118,26 @@ async def converse_upload(project: str, request: Request) -> dict:
     from modulatio import uploads
 
     code = valid_project(project)
-    data = await request.body()
+    # Read to the cap and stop. Taking the whole body first means a client
+    # decides how much memory the engine spends before any limit is consulted,
+    # and a chunked request never has to declare its size at all.
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > uploads.DEFAULT_MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"upload declares {declared} bytes; the cap is "
+                   f"{uploads.DEFAULT_MAX_UPLOAD_BYTES} bytes")
+    chunks: "list[bytes]" = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > uploads.DEFAULT_MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"upload exceeds the cap of "
+                       f"{uploads.DEFAULT_MAX_UPLOAD_BYTES} bytes")
+        chunks.append(chunk)
+    data = b"".join(chunks)
     name = request.headers.get("x-modulatio-filename") or "upload"
     try:
         handle, shown = uploads.stage_upload(
@@ -157,8 +176,14 @@ def converse(project: str, body: ConverseBody, request: Request) -> dict:
         # one must not outlive the refusal.
         for path in claimed:
             path.unlink(missing_ok=True)
-    reply = _actor(request, code).converse(
-        body.text, attachments=attachments or None)
+    try:
+        reply = _actor(request, code).converse(
+            body.text, attachments=attachments or None)
+    finally:
+        # Anything staged for this composer and not sent with it has no turn
+        # left to ride: the handles were claimed above, so what remains was
+        # attached and then abandoned.
+        uploads.discard_all(code)
     return {"reply": reply}
 
 
