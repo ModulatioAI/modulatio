@@ -736,20 +736,29 @@ def test_widened_exec_via_argv_path_not_bypassable(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="widened exec refused"):
         rs(cmd=f"python3 {script}", profile="full", cwd="")
 
-    # widened ARGV + sandbox AVAILABLE + bypass → must take the SANDBOXED branch,
-    # NOT the bypass pass-through. A sentinel in build_sandboxed_argv proves the
-    # widened run reached the sandbox builder rather than running unsandboxed.
+    # widened ARGV + a SEALED sandbox → the sandboxed branch. A sentinel in
+    # build_sandboxed_argv proves the widened run reached the sandbox builder
+    # rather than running unsandboxed.
     class _ReachedSandbox(Exception):
         pass
 
     def _sentinel(*a, **k):
         raise _ReachedSandbox
 
-    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: True)
-    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: True)
-    monkeypatch.setattr(sandbox, "current_profile", lambda: "off")
+    monkeypatch.setattr(sandbox, "enforcement_state",
+                        lambda: sandbox.EnforcementState.SANDBOXED_FULL)
     monkeypatch.setattr(sandbox, "build_sandboxed_argv", _sentinel)
     with pytest.raises(_ReachedSandbox):
+        rs(cmd=f"python3 {script}", profile="full", cwd="")
+
+    # An explicit bypass cannot buy a widened run its sandbox. Confinement is
+    # what makes a granted folder reachable, so a request to run unsandboxed
+    # and a request to reach outside the workspace are answered together: the
+    # run is refused rather than silently confined against the operator's
+    # stated choice, or silently widened against the sandbox's.
+    monkeypatch.setattr(sandbox, "enforcement_state",
+                        lambda: sandbox.EnforcementState.DEGRADED_ALLOWLIST)
+    with pytest.raises(RuntimeError, match="widened exec refused"):
         rs(cmd=f"python3 {script}", profile="full", cwd="")
 
     # control: a WORKSPACE-only run with bypass + no sandbox is unchanged (the
@@ -2564,9 +2573,11 @@ def test_sandboxed_payload_is_prlimit_wrapped_inside_bwrap(tmp_path, monkeypatch
     _patch_common(monkeypatch)
     prefix = _force_prlimit_available(monkeypatch)
 
-    monkeypatch.setattr(_sandbox, "current_profile", lambda: "passive")
-    monkeypatch.setattr(_sandbox, "is_bypass_requested", lambda: False)
-    monkeypatch.setattr(_sandbox, "is_sandbox_available", lambda: True)
+    # The sandbox truth is ONE typed state, and dispatch reads that state —
+    # patching the inputs it is derived from would leave the real probe to run
+    # a subprocess into this test's stubbed spawn.
+    monkeypatch.setattr(_sandbox, "enforcement_state",
+                        lambda: _sandbox.EnforcementState.SANDBOXED_FULL)
 
     captured: dict[str, list[str]] = {}
 
@@ -3395,13 +3406,103 @@ def test_a_sealed_sandbox_takes_an_ordinary_shell_command(tmp_path):
 
     (tmp_path / "a.txt").write_text("alpha\nbeta\n")
     sh = tools.make_run_shell(tmp_path)
+    # What was SPAWNED is the witness. Asserting only that the command
+    # succeeded proves it was admitted, not that it was confined — and it
+    # succeeds just as well when the payload runs bare.
+    spawned: list = []
+    real_builder = sandbox.build_sandboxed_argv
+
+    def _spy(payload, *a, **k):
+        argv, env = real_builder(payload, *a, **k)
+        spawned.append((argv, env))
+        return argv, env
+
     with patch.object(sandbox, "enforcement_state",
-                      lambda: sandbox.EnforcementState.SANDBOXED_FULL):
+                      lambda: sandbox.EnforcementState.SANDBOXED_FULL), \
+            patch.object(sandbox, "build_sandboxed_argv", _spy):
         for cmd in ("grep beta a.txt | wc -l",
                     "echo hi > out.txt && cat out.txt",
                     "for i in 1 2; do echo $i; done"):
             out = sh(cmd=cmd, profile="full", timeout=30)
             assert "exit_code: 0" in out, (cmd, out)
+
+    assert len(spawned) == 3, "every sealed command goes through the wrapper"
+    for argv, env in spawned:
+        assert argv[0] == "bwrap", argv
+        # The curated environment, not the parent's.
+        assert "PATH" in env and "MODULATIO_SANDBOX_PROFILE" not in env
+
+
+def test_a_sealed_reading_cannot_outlive_the_setting_that_made_it(tmp_path):
+    """The reading that admits an ordinary shell command is taken once and
+    carried to dispatch. Caching the ANSWER instead of the probe let a state
+    computed while confinement was sealed survive the profile being switched
+    off, so a pipe admitted under the stale answer dispatched under the live
+    one — outside the sandbox that justified admitting it."""
+    from unittest.mock import patch
+
+    from modulatio import sandbox
+
+    (tmp_path / "a.txt").write_text("alpha\nbeta\n")
+    sh = tools.make_run_shell(tmp_path)
+
+    for setting, value in (("MODULATIO_SANDBOX_PROFILE", "off"),
+                           ("MODULATIO_RUN_SHELL_UNSAFE", "1")):
+        sandbox.reset_enforcement_state_cache()
+        with patch.dict(_os.environ, {"MODULATIO_SANDBOX_PROFILE": "standard"},
+                        clear=False):
+            _os.environ.pop("MODULATIO_RUN_SHELL_UNSAFE", None)
+            if sandbox.enforcement_state() is not sandbox.EnforcementState.SANDBOXED_FULL:
+                pytest.skip("host cannot seal the sandbox")
+            with patch.dict(_os.environ, {setting: value}, clear=False):
+                assert sandbox.enforcement_state() is not (
+                    sandbox.EnforcementState.SANDBOXED_FULL), setting
+                with pytest.raises(ValueError, match="not allowed by profile"):
+                    sh(cmd="printf one | tr o O", profile="full", timeout=30)
+
+
+def test_the_legacy_availability_probe_cannot_select_dispatch(tmp_path):
+    """Dispatch consumes the state that admitted the command, never a second
+    opinion. Two independently cached readings can disagree, and a command
+    admitted by one while dispatched by the other runs under a boundary that
+    never authorized it."""
+    from unittest.mock import patch
+
+    from modulatio import sandbox
+
+    sh = tools.make_run_shell(tmp_path)
+    spawned: list = []
+    real_builder = sandbox.build_sandboxed_argv
+
+    def _spy(payload, *a, **k):
+        argv, env = real_builder(payload, *a, **k)
+        spawned.append(argv)
+        return argv, env
+
+    with patch.object(sandbox, "enforcement_state",
+                      lambda: sandbox.EnforcementState.SANDBOXED_FULL), \
+            patch.object(sandbox, "is_sandbox_available", lambda: False), \
+            patch.object(sandbox, "build_sandboxed_argv", _spy):
+        sh(cmd="printf one | tr o O", profile="full", timeout=30)
+
+    assert spawned and spawned[0][0] == "bwrap", (
+        "a sealed decision must still dispatch through the wrapper")
+
+
+def test_a_demanded_sandbox_that_is_absent_starts_no_payload(tmp_path):
+    """REFUSED is the state whose whole purpose is that nothing runs: a
+    working sandbox was demanded and there is none."""
+    from unittest.mock import patch
+
+    from modulatio import sandbox
+
+    sh = tools.make_run_shell(tmp_path)
+    with patch.object(sandbox, "enforcement_state",
+                      lambda: sandbox.EnforcementState.REFUSED), \
+            patch.object(subprocess, "Popen",
+                         lambda *a, **k: pytest.fail("a payload was started")):
+        with pytest.raises(RuntimeError, match="refused"):
+            sh(cmd="ls", profile="full", timeout=30)
 
 
 def test_an_unsealed_sandbox_keeps_the_allowlist(tmp_path):

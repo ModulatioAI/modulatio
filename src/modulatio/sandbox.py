@@ -270,9 +270,15 @@ class EnforcementState(enum.Enum):
     REFUSED = "refused"
 
 
-#: (state, computed_at_monotonic) — TTL-cached; any bwrap exec failure
-#: invalidates immediately (a wrapper failure never rides a stale FULL).
-_ENFORCEMENT_CACHE: "tuple[EnforcementState, float] | None" = None
+#: (probe_ok, probed_at_monotonic) — the SUBSTRATE probe alone, never the
+#: policy answer built from it. Probing costs a subprocess, so it is worth
+#: caching; the profile, the bypass, and the required-mode flag cost an env
+#: read and are re-read for every decision. Caching the ANSWER instead let a
+#: state computed while confinement was sealed outlive the setting that made
+#: it true — the profile could be switched off, or the bypass set, and the
+#: stale answer still reported sealed for the rest of its lifetime.
+#: Any bwrap exec failure invalidates immediately.
+_POLICY_PROBE_CACHE: "tuple[bool, float] | None" = None
 _ENFORCEMENT_TTL_S = 300.0
 
 
@@ -307,33 +313,35 @@ def enforcement_state() -> EnforcementState:
                                 path only; an explicit bypass/off wins)
     - ``DEGRADED_ALLOWLIST``  — everything else (the disclosed soft state)
     """
-    global _ENFORCEMENT_CACHE
-    now = time.monotonic()
-    if _ENFORCEMENT_CACHE is not None and now - _ENFORCEMENT_CACHE[1] < _ENFORCEMENT_TTL_S:
-        return _ENFORCEMENT_CACHE[0]
+    global _POLICY_PROBE_CACHE
+    # Policy is read fresh; only the probe behind it may be cached.
     explicit_unsafe = is_bypass_requested() or current_profile() == "off"
-    if not explicit_unsafe and _probe_policy_shape():
-        state = EnforcementState.SANDBOXED_FULL
-    elif is_sandbox_required() and not explicit_unsafe:
-        state = EnforcementState.REFUSED
+    if explicit_unsafe:
+        return EnforcementState.DEGRADED_ALLOWLIST
+    now = time.monotonic()
+    if _POLICY_PROBE_CACHE is not None and now - _POLICY_PROBE_CACHE[1] < _ENFORCEMENT_TTL_S:
+        probe_ok = _POLICY_PROBE_CACHE[0]
     else:
-        state = EnforcementState.DEGRADED_ALLOWLIST
-    _ENFORCEMENT_CACHE = (state, now)
-    return state
+        probe_ok = _probe_policy_shape()
+        _POLICY_PROBE_CACHE = (probe_ok, now)
+    if probe_ok:
+        return EnforcementState.SANDBOXED_FULL
+    return (EnforcementState.REFUSED if is_sandbox_required()
+            else EnforcementState.DEGRADED_ALLOWLIST)
 
 
 def note_bwrap_exec_failure() -> None:
     """A LIVE bwrap invocation failed: drop the cached state so the very
     next read re-probes. The caller must never retry the payload bare —
     it re-reads ``enforcement_state()`` and follows the typed answer."""
-    global _ENFORCEMENT_CACHE
-    _ENFORCEMENT_CACHE = None
+    global _POLICY_PROBE_CACHE
+    _POLICY_PROBE_CACHE = None
 
 
 def reset_enforcement_state_cache() -> None:
     """Test seam (mirrors ``reset_sandbox_probe_cache``)."""
-    global _ENFORCEMENT_CACHE
-    _ENFORCEMENT_CACHE = None
+    global _POLICY_PROBE_CACHE
+    _POLICY_PROBE_CACHE = None
 
 
 def is_sandbox_installed() -> bool:

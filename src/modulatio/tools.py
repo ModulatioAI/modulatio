@@ -1550,8 +1550,14 @@ def make_run_shell(
         # last thing standing between the model and the host, so it goes back
         # to doing that job. This branch never widens anything on a host whose
         # sandbox is not proven working.
+        # ONE reading of the sandbox truth for this call, taken here and
+        # carried to dispatch below. Deciding what a command may BE and
+        # deciding how it RUNS from two separate readings is how a command
+        # admitted as sealed reaches an unsandboxed execution: the readings
+        # can disagree, and the widest one wins by accident.
         from modulatio import sandbox as _sb
-        sealed = _sb.enforcement_state() is _sb.EnforcementState.SANDBOXED_FULL
+        _state = _sb.enforcement_state()
+        sealed = _state is _sb.EnforcementState.SANDBOXED_FULL
         if profile == "full" and sealed:
             refusal = _unbounded_shell_reason(cmd)
             if refusal:
@@ -1647,36 +1653,36 @@ def make_run_shell(
                 _argv_widened = True
                 break
         _widened = _wd_widened or _argv_widened
-        if _widened and not _sandbox.is_sandbox_available():
-            raise RuntimeError(
-                "widened exec refused: bwrap sandbox unavailable. Running "
-                "commands in an operator-granted folder requires a functional "
-                "sandbox (no bypass). Install/repair bubblewrap."
-            )
-        if (_sandbox.is_bypass_requested() or _profile == "off") and not _widened:
-            # Explicit opt-out (UNSAFE env or profile=off), run as-is — but ONLY
-            # for a WORKSPACE run. The global dev/test bypass must NEVER apply to
-            # a widened run: a widened run reaching here has a
-            # functional sandbox (the raise above caught the no-sandbox case), so
-            # it falls through to the sandboxed branch and is confined, not run
-            # unsandboxed with the parent env.
-            pass
-        elif _sandbox.is_sandbox_available():
-            run_argv, run_env = _sandbox.build_sandboxed_argv(
-                _payload_argv, artifacts_root, profile=_profile,
-                extra_rw_roots=tuple(Path(r) for r in extra_roots),
-            )
-        elif _sandbox.is_sandbox_required():
-            # Operator demanded a working sandbox (MODULATIO_REQUIRE_SANDBOX=1)
-            # but bwrap is missing/non-functional and no explicit bypass was set.
-            # Fail CLOSED — refuse to run unconfined rather than fall open.
+        # Dispatch reads the state decided above, never a second opinion. The
+        # command's SHAPE was already chosen against it: an ordinary shell
+        # command exists only because that reading said sealed, so any other
+        # reading here could hand a pipe to an unsandboxed process.
+        if _state is _sandbox.EnforcementState.REFUSED:
+            # A working sandbox was demanded and there is none. No payload
+            # starts — refusing is the whole point of the state.
             raise RuntimeError(
                 "run_shell refused: MODULATIO_REQUIRE_SANDBOX=1 but the bwrap "
                 "sandbox is unavailable on this host. Install/repair bubblewrap, "
                 "or set MODULATIO_RUN_SHELL_UNSAFE=1 to accept unsandboxed "
                 "execution explicitly."
             )
+        if _widened and not sealed:
+            # An operator-granted folder is reachable only from inside real
+            # confinement; the grant widens the mount graph, not the host.
+            raise RuntimeError(
+                "widened exec refused: bwrap sandbox unavailable. Running "
+                "commands in an operator-granted folder requires a functional "
+                "sandbox (no bypass). Install/repair bubblewrap."
+            )
+        if sealed:
+            run_argv, run_env = _sandbox.build_sandboxed_argv(
+                _payload_argv, artifacts_root, profile=_profile,
+                extra_rw_roots=tuple(Path(r) for r in extra_roots),
+            )
         else:
+            # DEGRADED_ALLOWLIST — the disclosed soft state: an explicit
+            # opt-out, or no usable sandbox where none was demanded. The argv
+            # allowlist was the boundary that admitted this command.
             _sandbox.warn_unsandboxed_once()
         try:
             # Own process group (start_new_session) + child rlimits so a
@@ -1748,6 +1754,13 @@ def make_run_shell(
                 stderr or "",
             )
         except FileNotFoundError as exc:
+            if sealed:
+                # Under a sealed decision the spawned head IS the wrapper, so
+                # this is the wrapper missing between the decision and the
+                # spawn. The payload never started; drop the substrate reading
+                # so the next decision re-probes instead of trusting one the
+                # host no longer supports.
+                _sandbox.note_bwrap_exec_failure()
             # Binary not on PATH (and, for python -m <tool> shapes, the
             # rewrite already used sys.executable so this is genuinely
             # "the tool isn't installed"). Return diagnostic text so
