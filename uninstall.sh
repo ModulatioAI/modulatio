@@ -84,8 +84,17 @@ backup_userdata() {
   # The archive holds everything about to be destroyed, secrets included, so
   # it is created owner-only rather than at whatever the ambient umask allows.
   # A pre-existing name is refused instead of overwritten.
-  if [ -e "$dest" ] || [ -L "$dest" ]; then
-    echo "  ! backup destination already exists: $dest" >&2
+  # Created exclusively, owner-only, refusing to follow a link — so the name
+  # cannot be replaced between a check and the write and aimed at a file the
+  # archive would overwrite. Checking first and writing second leaves exactly
+  # that window.
+  if ! (umask 077 && set -o noclobber && : > "$dest") 2>/dev/null; then
+    echo "  ! backup destination could not be created safely: $dest" >&2
+    return 1
+  fi
+  if [ -L "$dest" ]; then
+    echo "  ! backup destination is a link: $dest" >&2
+    rm -f "$dest"
     return 1
   fi
   if ! (umask 077 && tar -czf "$dest" "${items[@]}" 2>/dev/null); then
@@ -285,8 +294,37 @@ main() {
   # The pid file speaks only for the cron daemon. The servers run detached, so
   # they are found by inspection — a quiet daemon line otherwise reads as a
   # quiet machine while a server still serves the install being removed.
-  pkill -f "modulatio-api" 2>/dev/null || true
-  pkill -f "modulatio-tui" 2>/dev/null || true
+  #
+  # Matched on the EXECUTABLE, not the whole command line: a shell, an editor
+  # or a grep whose arguments merely name a Modulatio path is somebody's work,
+  # and stopping it would be worse than the leftover this is hunting. An entry
+  # point is either the executable itself or the script an interpreter was
+  # handed as its first argument.
+  local leftover=""
+  while read -r pid a0 a1 _rest; do
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    [ "$pid" = "$$" ] && continue
+    local n0 n1
+    n0="${a0##*/}"; n1="${a1##*/}"
+    case "$n0" in
+      modulatio*) ;;
+      python*) case "$n1" in modulatio*) ;; *) continue ;; esac ;;
+      *) continue ;;
+    esac
+    kill "$pid" 2>/dev/null || true
+    leftover="$leftover$pid "
+  done < <(ps -eo pid=,args= 2>/dev/null)
+  # A process that will not stop must not be followed by deletion: removing
+  # files from under a live server is the state this refuses to create.
+  sleep 1
+  local still=""
+  for pid in $leftover; do
+    kill -0 "$pid" 2>/dev/null && still="$still$pid "
+  done
+  if [ -n "$still" ]; then
+    echo "Refusing to uninstall — these Modulatio processes did not stop: $still" >&2
+    exit 1
+  fi
   if ! backup_userdata; then
     echo "Aborted — your data could not be backed up, so nothing was removed." >&2
     exit 1

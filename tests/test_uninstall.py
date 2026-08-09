@@ -745,3 +745,33 @@ def test_the_standalone_fallback_refuses_under_a_live_service(tmp_path):
     # Matched on the start command, so a renamed unit is still found.
     assert "renamed.service" in r.stderr
     assert cache.exists(), "it removed something while a service still runs"
+
+
+def test_the_fallback_stops_entry_points_without_killing_mentions(tmp_path):
+    """A shell, an editor or a grep whose arguments merely name a Modulatio
+    path is somebody's work, and stopping it would be worse than the leftover
+    this is hunting. An entry point is the executable itself, or the script an
+    interpreter was handed as its first argument."""
+    import time
+
+    # Blocks on stdin, so it stays alive while its arguments name Modulatio.
+    decoy = subprocess.Popen(
+        ["grep", "modulatio-api-mentioned-in-an-argument", "-"],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL)
+    try:
+        cache = tmp_path / ".cache" / "modulatio"
+        cache.mkdir(parents=True)
+        env = _fake_home_env(tmp_path)
+        env["MODULATIO_UNINSTALL_STANDALONE"] = "1"
+        env["MODULATIO_SYSTEMD_ROOTS"] = str(tmp_path / "no-units")
+        subprocess.run(
+            ["bash", str(UNINSTALL_SH), "--keep-package", "--yes"],
+            env=env, stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=60,
+        )
+        time.sleep(0.2)
+        assert decoy.poll() is None, "an unrelated process naming Modulatio was killed"
+    finally:
+        decoy.kill()
+        decoy.wait(timeout=10)
