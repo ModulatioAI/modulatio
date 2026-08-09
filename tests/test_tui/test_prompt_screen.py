@@ -270,6 +270,35 @@ async def test_pasted_image_temp_is_tracked_and_swept_on_exit(
     assert not img.exists()
 
 
+async def test_unsent_attachment_staged_copy_is_released_on_exit(
+    project_with_roster, tmp_path, monkeypatch
+):
+    """A staged copy holds the operator's file contents. Sending hands the list
+    downstream and clears it, so anything left in the composer at exit was
+    abandoned and is owned by nobody — released here rather than left for the
+    age-based sweep to reach a day later."""
+    from modulatio.tui.app import ModulatioApp
+    from modulatio.tui.screens.prompt import PromptScreen
+    from modulatio.tui.widgets.chat_input import ChatInput
+
+    img = tmp_path / "modulatio-paste-unsent.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr("modulatio.clipboard.paste_image", lambda: img)
+    app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one("#prompt-input", ChatInput).focus()
+        await pilot.pause()
+        await pilot.press("ctrl+v")
+        await pilot.pause()
+        screen = app.query_one(PromptScreen)
+        (att,) = screen.chatbox_attachments
+        staged = Path(att.staged_path)
+        assert staged.exists()
+        # never sent — the composer still holds it at exit
+    assert not staged.exists(), "the staged copy outlived the session that made it"
+
+
 async def test_failed_image_attach_removes_its_temp(
     project_with_roster, tmp_path, monkeypatch
 ):

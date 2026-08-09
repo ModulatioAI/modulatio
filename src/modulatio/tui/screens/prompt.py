@@ -244,6 +244,18 @@ class PromptScreen(Vertical):
             except OSError:
                 pass
         self._owned_paste_temps.clear()
+        # Attachments still staged here were never sent: sending copies the
+        # list out and clears it, so anything remaining is abandoned and owned
+        # by nobody downstream. Their engine-owned copies hold the operator's
+        # file contents, and only an age-based sweep would otherwise reach
+        # them — long after the session that staged them is gone.
+        for att in self._chatbox_attachments:
+            if att.staged_path is not None:
+                try:
+                    Path(att.staged_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+        self._chatbox_attachments.clear()
 
     def _focus_composer(self) -> None:
         """Land focus in the composer so it's ready to type. Called when the
