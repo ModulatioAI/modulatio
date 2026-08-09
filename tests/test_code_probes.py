@@ -1783,3 +1783,61 @@ def test_runner_env_without_a_bundle_is_engine_unavailable(tmp_path, monkeypatch
     # Never the environment the engine itself runs in.
     assert "never falling back to the live venv" in res.reason
     assert env.name == "runner"
+
+
+def test_a_build_cannot_talk_its_way_into_an_engine_shortfall(tmp_path, monkeypatch):
+    """Whether the engine could provision a backend is settled from the
+    project's own manifest before any hook runs. Reading it back out of what
+    the build PRINTED would let the build choose its own verdict by emitting
+    the phrase."""
+    wh = tmp_path / "wh"
+    wh.mkdir()
+    (wh / "hatchling-1.0.0-py3-none-any.whl").write_bytes(b"x")
+    monkeypatch.setenv("MODULATIO_WHEELHOUSE", str(wh))
+
+    root = _tree(tmp_path, **{
+        "pyproject.toml": (
+            "[build-system]\nrequires = ['hatchling']\n"
+            "build-backend = 'hatchling.build'\n"
+            "[project]\nname='x'\nversion='0'\n"),
+    })
+    scratch = tmp_path / "s"
+    snap = cp.materialize_snapshot(["pyproject.toml"], root, scratch)
+
+    def _hostile(*a, **k):
+        return cp.ProbePhaseResult(
+            status=cp.ProbeStatus.PRODUCT_FAILED, phase="wheel",
+            origin="deliverable", reason="build exit 1", returncode=1,
+            output_tail="No matching distribution found for hatchling")
+
+    monkeypatch.setattr(cp, "run_probe_phase", _hostile)
+    res = cp.build_wheel_phase(snap, scratch)
+
+    assert res.status is cp.ProbeStatus.PRODUCT_FAILED
+    assert res.origin == "deliverable"
+
+
+def test_a_declared_backend_with_no_wheel_is_named_before_anything_runs(
+        tmp_path, monkeypatch):
+    """A backend the approved local source cannot supply is the engine's
+    shortfall, and it is established from static text — so it is known before
+    a single line of the project's own code executes."""
+    wh = tmp_path / "wh"
+    wh.mkdir()
+    monkeypatch.setenv("MODULATIO_WHEELHOUSE", str(wh))
+    root = _tree(tmp_path, **{
+        "pyproject.toml": (
+            "[build-system]\nrequires = ['nowhere-backend>=2']\n"
+            "[project]\nname='x'\nversion='0'\n"),
+    })
+    scratch = tmp_path / "s"
+    snap = cp.materialize_snapshot(["pyproject.toml"], root, scratch)
+
+    ran: list = []
+    monkeypatch.setattr(cp, "run_probe_phase",
+                        lambda *a, **k: ran.append(1))
+    res = cp.build_wheel_phase(snap, scratch)
+
+    assert res.status is cp.ProbeStatus.ENGINE_UNAVAILABLE
+    assert "nowhere-backend" in res.reason
+    assert not ran, "producer code ran before the shortfall was known"

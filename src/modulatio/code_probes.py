@@ -592,6 +592,43 @@ def wheelhouse_fingerprint() -> str:
     return h.hexdigest()
 
 
+def declared_build_requires(root: Path) -> "list[str]":
+    """The build backend a project DECLARES, read from its own manifest
+    without running any of its code.
+
+    This is the trusted answer to "can this even be built here": it comes from
+    static text the engine reads itself, before a single build hook executes.
+    """
+    import tomllib
+
+    manifest = Path(root) / "pyproject.toml"
+    if not manifest.is_file():
+        return []
+    try:
+        data = tomllib.loads(manifest.read_text(encoding="utf-8", errors="replace"))
+    except (ValueError, OSError):
+        return []
+    reqs = (data.get("build-system") or {}).get("requires") or []
+    return [str(r) for r in reqs if isinstance(r, str)]
+
+
+def _unsatisfiable_build_requirement(root: Path, wheelhouse: Path) -> "str | None":
+    """The first declared build requirement with no wheel in the approved
+    local source, or ``None``. Compared by distribution name, which is what a
+    filename encodes; version constraints are the installer's business."""
+    import re as _re
+
+    available = {
+        w.name.split("-", 1)[0].replace("_", "-").lower()
+        for w in wheelhouse.glob("*.whl")
+    }
+    for req in declared_build_requires(root):
+        name = _re.split(r"[<>=!~\[; ]", req.strip(), 1)[0]
+        if name and name.replace("_", "-").lower() not in available:
+            return name
+    return None
+
+
 def build_wheel_phase(
     snapshot: Snapshot, scratch: Path, *,
     build_target: "Path | None" = None,
@@ -609,6 +646,28 @@ def build_wheel_phase(
             reason="no approved local wheelhouse configured "
                    f"(${_WHEELHOUSE_ENV}) — cannot provision a build backend "
                    "hermetically (dependency_source)",
+        )
+    # The rollup wall is answered first: a verification that has already run
+    # out of time reports that, rather than whatever it would have found next.
+    _deadline = _DEADLINE_VAR.get()
+    if _deadline is not None and _deadline - time.monotonic() <= 0:
+        return ProbePhaseResult(
+            status=ProbeStatus.ENGINE_UNAVAILABLE, phase="wheel",
+            origin="engine",
+            reason="overall verification deadline exceeded before phase start",
+        )
+    # Decided BEFORE any build hook runs, from the project's own manifest:
+    # whether the backend it declares exists in the approved local source. A
+    # shortfall found here is the engine's, and it is established by text the
+    # engine read rather than by anything the build printed.
+    absent = _unsatisfiable_build_requirement(
+        Path(build_target) if build_target else Path(snapshot.path), wh)
+    if absent:
+        return ProbePhaseResult(
+            status=ProbeStatus.ENGINE_UNAVAILABLE, phase="wheel",
+            origin="engine",
+            reason=f"declared build backend {absent!r} absent from the "
+                   "approved local source (dependency_source)",
         )
     wheels_dir = Path(scratch) / "wheels"
     wheels_dir.mkdir(parents=True, exist_ok=True)
@@ -648,16 +707,10 @@ def build_wheel_phase(
     # their code is broken, which is the one thing an unmeasurable gate must
     # not do. Same attribution the install phase makes for a missing
     # dependency.
-    missing = _NO_DIST_RE.search(res.output_tail)
-    if missing:
-        return ProbePhaseResult(
-            status=ProbeStatus.ENGINE_UNAVAILABLE, phase="wheel",
-            origin="engine",
-            reason=f"declared build backend {missing.group(1)!r} absent from "
-                   "the approved local source (dependency_source)",
-            returncode=res.returncode, output_tail=res.output_tail,
-            duration_s=res.duration_s,
-        )
+    # Deliberately NOT re-read from the build's own output. Whether the
+    # engine could provision a backend was settled by the preflight above; a
+    # failure here is the build's. Classifying from what the build PRINTED
+    # would let it choose its own verdict by emitting the phrase.
     return res
 
 
@@ -1056,19 +1109,39 @@ def provision_test_env(
     # Selected extras ride the requirement form so their declared deps
     # resolve from the wheelhouse under the same gates; empty selection
     # adds nothing beyond the runner.
-    suffix = f"[{','.join(extras)}]" if extras else ""
-    targets = ["pytest"] + ([f"{w}{suffix}" for w in wheels] if extras else [])
-    seed = run_probe_phase(
-        [_SANDBOX_PYTHON, "-m", "pip", "--python", str(test_env / "bin" / "python"),
-         "install", "--no-index", "--no-cache-dir", "--no-compile",
-         "--find-links", str(wh), *targets],
-        phase="test_env", snapshot=snap, scratch=scratch, timeout_s=timeout_s,
-        allow_network=False, env_extra=_HERMETIC_PIP_ENV, extra_ro=(wh,))
+    def _pip(*targets: str) -> ProbePhaseResult:
+        return run_probe_phase(
+            [_SANDBOX_PYTHON, "-m", "pip", "--python",
+             str(test_env / "bin" / "python"),
+             "install", "--no-index", "--no-cache-dir", "--no-compile",
+             "--find-links", str(wh), *targets],
+            phase="test_env", snapshot=snap, scratch=scratch,
+            timeout_s=timeout_s, allow_network=False,
+            env_extra=_HERMETIC_PIP_ENV, extra_ro=(wh,))
+
+    # The engine's runner and the product's declared extras are installed
+    # SEPARATELY, because a failure in each belongs to a different party.
+    # Installing them together made every failure the engine's, so a product
+    # whose extras are malformed or unsatisfiable read as an environment the
+    # engine could not provide -- and escaped the clamp its own metadata
+    # earned.
+    seed = _pip("pytest")
     if seed.status is not ProbeStatus.OK:
         return test_env, ProbePhaseResult(
             status=ProbeStatus.ENGINE_UNAVAILABLE, phase="test_env",
             origin="engine",
-            reason="runner/extras seeding failed", output_tail=seed.output_tail)
+            reason="engine runner seeding failed", output_tail=seed.output_tail)
+    if extras:
+        suffix = f"[{','.join(extras)}]"
+        added = _pip(*[f"{w}{suffix}" for w in wheels])
+        if added.status is not ProbeStatus.OK:
+            return test_env, ProbePhaseResult(
+                status=ProbeStatus.PRODUCT_FAILED, phase="test_env",
+                origin="deliverable",
+                reason=f"declared test extras could not be installed from the "
+                       f"approved local source: {','.join(extras)}",
+                output_tail=added.output_tail)
+        return test_env, added
     return test_env, seed
 
 
@@ -1326,7 +1399,12 @@ def run_ecosystem_probes(
         try:
             snapshot = materialize_snapshot(units_used, artifacts_root, scratch)
         except SnapshotError as exc:
-            return {"status": "engine_unavailable",
+            # A closure the engine refuses to copy is a fact about the
+            # DELIVERABLE — the same refusal the packaged path attributes to
+            # the product. Calling it an engine shortfall here would let an
+            # unsafe tree read as unmeasurable rather than as a defect, and
+            # differently depending on which ecosystem it was written in.
+            return {"status": "product_failed",
                     "reason": f"snapshot refused: {exc}", "phases": []}
 
         found = detect_ecosystem(snapshot.path)
