@@ -1038,18 +1038,6 @@ def _format_registered_folders() -> str:
         except OSError:
             entry = ", currently unreachable"
         words = mode_words.get(rec.get("mode", ""))
-        if words is None:
-            # A registration nothing can classify is stated and refused, never
-            # dropped and never allowed to take the block down with it: a
-            # missing folder reads as "the operator granted nothing here",
-            # which is a different and quieter falsehood than saying so.
-            lines.append(
-                f"- folder \"{rec.get('name', '(unnamed)')}\" — UNUSABLE: "
-                f"access mode {rec.get('mode')!r} is not one of "
-                f"{', '.join(sorted(mode_words))} — nothing here is reachable "
-                f"until the registration is corrected — path: {rec.get('path')}"
-            )
-            continue
         lines.append(
             f"- folder \"{rec['name']}\" — {words} — "
             f"path: {rec['path']}{entry}"

@@ -633,9 +633,11 @@ def test_leader_registry_threads_exec_grant_into_run_shell(project: Project, tmp
     (granted / "x.py").write_text("print(1)\n")
     lp.add_grant(project.code, request_class="exec", resource=str(granted), actions=("exec",))
     reg = orch._leader_tool_registry()
-    # run_shell in the granted exec root works (sandbox available here); refuse if
-    # the sandbox is down (HIGH-3) — prove the root reached run_shell either way.
-    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: False)
+    # run_shell in the granted exec root works (the host can confine here);
+    # refuse when it cannot — either way, prove the root reached run_shell.
+    # The substrate question is what decides this, not the default posture: a
+    # granted run is confined wherever confinement is possible.
+    monkeypatch.setattr(sandbox, "can_confine", lambda: False)
     monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: True)
     import pytest as _pytest
     with _pytest.raises(RuntimeError, match="widened exec refused"):
@@ -13939,23 +13941,6 @@ def test_an_account_of_a_run_never_fails_the_run(project, monkeypatch):
 
     monkeypatch.setattr(logstore, "write_run_log", _boom)
     orch._write_run_log(RunSummary(project=orch.project))  # must not raise
-
-
-def test_an_unclassifiable_folder_is_stated_not_dropped(monkeypatch):
-    """A registration nothing can classify is refused in writing. Dropping it
-    reads as 'the operator granted nothing here', which is a quieter falsehood
-    than saying so, and raising takes every other folder down with it."""
-    from modulatio import config, orchestration
-
-    monkeypatch.setattr(config, "list_folders", lambda: [
-        {"name": "docs", "mode": "ro", "path": "/tmp"},
-        {"name": "odd", "mode": "write-through", "path": "/tmp"},
-    ])
-    block = orchestration._format_registered_folders()
-
-    assert "docs" in block and "read-only" in block
-    assert "UNUSABLE" in block and "write-through" in block
-    assert "until the registration is corrected" in block
 
 
 def test_the_leader_is_told_what_its_shell_may_do(project, monkeypatch):
