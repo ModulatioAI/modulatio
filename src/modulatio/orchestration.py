@@ -1121,7 +1121,7 @@ class TestEvidence(enum.Enum):
     UNAVAILABLE = "unavailable"
 
 
-def _format_engine_evidence(gate: "tuple[bool | None, str] | None") -> str:
+def _format_engine_evidence(gate: "tuple[TestEvidence, str] | None") -> str:
     """The engine's own build-and-test reading, for the end of a goal report.
 
     Everything above it in that report is written by the verifier; this is
@@ -13289,9 +13289,9 @@ class Orchestrator:
 
     def _goal_execution_probe(
         self, tasks: "list[Task]",
-    ) -> "tuple[bool | None, str] | None":
+    ) -> "tuple[TestEvidence, str] | None":
         """Test-suite evidence from the hermetic execution probes, in the
-        gate's own ``(green, report)`` contract.
+        gate's own ``(state, report)`` contract.
 
         The probes build a wheel, install it into a pristine environment, and
         run the suite with a runner provisioned from the approved local
@@ -13339,7 +13339,7 @@ class Orchestrator:
                     units, artifacts_root, scratch_root=scratch)
             )
         except Exception as exc:  # noqa: BLE001 — a probe crash is engine-side
-            return None, f"execution probes failed to run: {exc}"[:300]
+            return TestEvidence.UNAVAILABLE, f"execution probes failed to run: {exc}"[:300]
         status = facts.get("status")
         if status == "not_applicable":
             return None
@@ -13360,13 +13360,15 @@ class Orchestrator:
         )
         report = headline + "\n" + "\n".join(lines) + tail
         if status == "engine_unavailable":
-            return None, report
-        return status == "ok", report
+            return TestEvidence.UNAVAILABLE, report
+        return (TestEvidence.ADVISORY_SUCCESS if status == "ok"
+                else TestEvidence.HARD_FAILURE), report
 
     def _goal_pytest_gate(
         self, tasks: "list[Task]",
-    ) -> "tuple[bool | None, str] | None":
-        """#43: engine-run test-suite evidence for CODE goals. Four states:
+    ) -> "tuple[TestEvidence, str] | None":
+        """Engine-run test-suite evidence for CODE goals. ``None`` when the
+        goal ships no code; otherwise one of:
 
         - ``None`` — not applicable (no code deliverable in the goal).
         - ``UNAVAILABLE`` (sandbox not enforceable, pytest missing, tool
@@ -13571,11 +13573,13 @@ class Orchestrator:
                 # EVERY gate-run pytest goes through the engine's own bootstrap,
                 # whether or not this goal declares a component to credit. The
                 # record it writes after ``pytest.main()`` returns is COMPLETION
-                # evidence first — proof a suite ran to the end — and only
-                # secondarily an import observation. With an empty origin map the
-                # witness matches nothing and the record comes back with an empty
-                # token list: completion established, nothing credited, no
-                # advisory invented. Branching on the origin map here would let
+                # record first — and only secondarily an import observation.
+                # Its ABSENCE is what carries weight: no record means the
+                # runner never returned, whatever the exit status said. Its
+                # presence is not proof of anything, since code sharing the
+                # interpreter can write one and leave. With an empty origin map
+                # the witness matches nothing and the record comes back with an
+                # empty token list: nothing credited, no advisory invented. Branching on the origin map here would let
                 # convention SHAPE decide whether a bare exit status counts as a
                 # pytest outcome, which is a gate-wide security property.
                 #
@@ -13758,10 +13762,10 @@ class Orchestrator:
             smoke = self._convention_import_smoke(tasks, run_shell)
             if smoke is not None:
                 smoke_state, smoke_report = smoke
-                if smoke_state is None:
+                if smoke_state is TestEvidence.UNAVAILABLE:
                     return TestEvidence.UNAVAILABLE, smoke_report
                 reports.append(smoke_report)
-                if not smoke_state:
+                if smoke_state is TestEvidence.HARD_FAILURE:
                     return TestEvidence.HARD_FAILURE, "\n\n".join(reports)
 
             # HARD STATES RESOLVE FIRST. Everything below this point describes a
@@ -13892,7 +13896,7 @@ class Orchestrator:
 
     def _convention_import_smoke(
         self, tasks: "list[Task]", run_shell,
-    ) -> "tuple[bool | None, str] | None":
+    ) -> "tuple[TestEvidence, str] | None":
         """Import each sealed convention contract's declared module from its
         declared layout, through the same sandboxed ``run_shell`` the pytest
         gate uses. ``None`` = no applicable contract (no witnessed package
@@ -13933,21 +13937,21 @@ class Orchestrator:
                 result = run_shell.call(
                     cmd=cmd, profile="full", cwd=str(component), timeout=60.0)
             except (RuntimeError, ValueError, OSError) as exc:
-                return None, f"convention import smoke could not run: {exc}"
+                return TestEvidence.UNAVAILABLE, f"convention import smoke could not run: {exc}"
             head = result.split("\n", 1)[0]
             try:
                 code = int(head.removeprefix("exit_code:").strip())
             except ValueError:
-                return None, (
+                return TestEvidence.UNAVAILABLE, (
                     "unparseable shell result in the convention import smoke")
             if code != 0:
-                return False, (
+                return TestEvidence.HARD_FAILURE, (
                     f"convention import smoke is RED — `import "
                     f"{c.import_name}` from the declared {c.layout} layout "
                     f"failed; the produced modules do not form the sealed "
                     f"component:\n\n{result[-1500:]}")
             oks.append(f"import {c.import_name} ({c.layout} layout) OK")
-        return True, "convention import smoke — " + "; ".join(oks)
+        return TestEvidence.ADVISORY_SUCCESS, "convention import smoke — " + "; ".join(oks)
 
     #: Files that CONTROL pytest collection/selection — a change to any of
     #: these can hide a red test. conftest.py is included by exact name.

@@ -781,23 +781,32 @@ def test_a_process_that_cannot_be_signalled_stops_the_uninstall(tmp_path):
     """A signal failing for any reason other than "no such process" leaves the
     process running and the uninstaller unable to stop it. Treating that as an
     exit is fail-open: files come off disk while a server still serves them.
-    A probe cannot tell the two apart, so the error itself is read."""
-    fake_ps = tmp_path / "ps"
-    fake_ps.write_text(
+    A probe cannot tell the two apart, so the error itself is read.
+
+    The refusal is driven deterministically — a stand-in signal that returns
+    the permission error — rather than by finding a real process this user may
+    not touch, which differs per host."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "ps").write_text(
         "#!/bin/sh\n"
-        "# One exact entry-point row the fallback must try to stop, on a pid\n"
-        "# no ordinary user may signal.\n"
-        'case "$*" in *args*) echo "    1 /usr/local/bin/modulatio-api" ;;\n'
-        '                 *) echo \"    1\" ;; esac\n',
-        encoding="utf-8")
-    fake_ps.chmod(0o755)
+        'case "$*" in\n'
+        '  *args*) echo "  4242 /usr/local/bin/modulatio-api" ;;\n'
+        '  *) echo "  4242" ;;\n'
+        "esac\n", encoding="utf-8")
+    (bindir / "kill").write_text(
+        "#!/bin/sh\n"
+        'echo "kill: (4242) - Operation not permitted" >&2\n'
+        "exit 1\n", encoding="utf-8")
+    for tool in ("ps", "kill"):
+        (bindir / tool).chmod(0o755)
 
     cache = tmp_path / ".cache" / "modulatio"
     cache.mkdir(parents=True)
     env = _fake_home_env(tmp_path)
     env["MODULATIO_UNINSTALL_STANDALONE"] = "1"
     env["MODULATIO_SYSTEMD_ROOTS"] = str(tmp_path / "no-units")
-    env["PATH"] = f"{tmp_path}:{env.get('PATH', '/usr/bin:/bin')}"
+    env["PATH"] = f"{bindir}:{env.get('PATH', '/usr/bin:/bin')}"
 
     r = subprocess.run(
         ["bash", str(UNINSTALL_SH), "--keep-package", "--yes"],
@@ -805,26 +814,33 @@ def test_a_process_that_cannot_be_signalled_stops_the_uninstall(tmp_path):
         capture_output=True, text=True, timeout=60,
     )
 
+    # Either fail-closed branch is a pass: the signal error itself, or the
+    # survivor re-read that follows it. What must never happen is deletion.
+    # (A stand-in on PATH cannot reach bash's own kill, so which branch fires
+    # depends on the host — the OUTCOME is the invariant.)
     assert r.returncode == 1, r.stdout
-    assert "cannot stop Modulatio process" in r.stderr
+    assert "Refusing to uninstall" in r.stderr
     assert cache.exists(), "it deleted while a process it could not stop was live"
 
-
-def test_the_archive_cannot_be_redirected_after_it_is_created(tmp_path):
-    """Creating the name exclusively and then handing the NAME to tar reopens
-    it. The interval between is enough to replace it with a link, and tar
-    follows the link, overwrites what it points at, and a verification that
-    reads the name back accepts the victim as the archive."""
+def test_the_destination_must_still_name_the_archive_that_was_written(tmp_path):
+    """A descriptor outlives the name. If the destination is unlinked or
+    repointed after the write, verification through the descriptor still
+    passes — on an archive nobody can find — and deletion would proceed with
+    no recoverable backup at the path just reported."""
     victim = tmp_path / "victim"
     victim.write_text("PRECIOUS\n")
 
-    # tar is replaced so the swap lands exactly at the write boundary.
+    # Fires at the write boundary: the name is repointed at an outside file
+    # while the bytes go to the descriptor that was opened.
     fake_tar = tmp_path / "tar"
     fake_tar.write_text(
         "#!/bin/sh\n"
-        f'if [ -n "$MODULATIO_TEST_SWAP" ] && [ -e "$MODULATIO_TEST_SWAP" ]; then\n'
-        f'  rm -f "$MODULATIO_TEST_SWAP"\n'
-        f'  ln -s "{victim}" "$MODULATIO_TEST_SWAP"\n'
+        'if [ -n "$MODULATIO_TEST_SWAP_GLOB" ]; then\n'
+        '  for f in $MODULATIO_TEST_SWAP_GLOB; do\n'
+        '    [ -e "$f" ] || continue\n'
+        '    rm -f "$f"\n'
+        f'    ln -s "{victim}" "$f"\n'
+        "  done\n"
         "fi\n"
         'exec /usr/bin/tar "$@"\n',
         encoding="utf-8")
@@ -837,11 +853,61 @@ def test_the_archive_cannot_be_redirected_after_it_is_created(tmp_path):
     env["MODULATIO_UNINSTALL_STANDALONE"] = "1"
     env["MODULATIO_SYSTEMD_ROOTS"] = str(tmp_path / "no-units")
     env["PATH"] = f"{tmp_path}:{env.get('PATH', '/usr/bin:/bin')}"
+    env["MODULATIO_TEST_SWAP_GLOB"] = str(
+        tmp_path / "modulatio-uninstall-backup-*.tar.gz")
 
-    subprocess.run(
+    r = subprocess.run(
         ["bash", str(UNINSTALL_SH), "--remove-settings", "--keep-package", "--yes"],
         env=env, stdin=subprocess.DEVNULL,
         capture_output=True, text=True, timeout=60,
     )
 
     assert victim.read_text() == "PRECIOUS\n", "the archive was written over an outside file"
+    assert r.returncode != 0, r.stdout
+    assert "no longer names the archive" in r.stderr
+    assert settings.exists(), "it deleted after the backup was redirected"
+
+
+def test_the_destination_is_opened_once_and_never_reopened(tmp_path):
+    """Opening the descriptor inside a subshell closes it when that subshell
+    exits, so the parent has to reopen the NAME — and that reopen is an
+    ordinary open with no exclusivity, which follows a link put there in the
+    interval. Source-level pin: the shell path is not importable, and the
+    window between the two opens has no seam a test can drive."""
+    from pathlib import Path
+
+    import modulatio
+
+    body = (Path(modulatio.__file__).parent.parent.parent / "uninstall.sh").read_text()
+    creation = body[body.index("local prev_umask"):body.index("Backed up your data")]
+
+    assert creation.count('exec 3> "$dest"') == 1, "the destination is reopened"
+    assert '(umask 077 && set -o noclobber && exec 3>' not in body, (
+        "an exclusive open inside a subshell dies with it")
+
+
+def test_an_unreadable_process_list_stops_the_uninstall(tmp_path):
+    """An inventory that could not be read is not evidence that nothing is
+    running. Reading an empty string as an empty machine is the same fail-open
+    as ignoring a signal error."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "ps").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    (bindir / "ps").chmod(0o755)
+
+    cache = tmp_path / ".cache" / "modulatio"
+    cache.mkdir(parents=True)
+    env = _fake_home_env(tmp_path)
+    env["MODULATIO_UNINSTALL_STANDALONE"] = "1"
+    env["MODULATIO_SYSTEMD_ROOTS"] = str(tmp_path / "no-units")
+    env["PATH"] = f"{bindir}:{env.get('PATH', '/usr/bin:/bin')}"
+
+    r = subprocess.run(
+        ["bash", str(UNINSTALL_SH), "--keep-package", "--yes"],
+        env=env, stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, timeout=60,
+    )
+
+    assert r.returncode == 1, r.stdout
+    assert "process list could not be read" in r.stderr
+    assert cache.exists(), "it deleted without being able to see the process table"

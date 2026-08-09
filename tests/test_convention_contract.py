@@ -1413,7 +1413,8 @@ def test_only_recognisable_observation_data_is_credited(
         orch, tasks, monkeypatch,
         _ObservationShell(build(contract.contract_id)))
 
-    assert state is finalised, report
+    assert state is (_TE.ADVISORY_SUCCESS if finalised
+                     else _TE.HARD_FAILURE), report
     if not finalised:
         assert _reports_unfinalised(report), report
         assert not _claims_green(report), report
@@ -1723,7 +1724,8 @@ def test_the_size_and_content_come_from_one_descriptor(
     assert swapped["done"], "the observation descriptor was never opened"
     # The decision follows A, not the swapped-in B: valid A finalises green,
     # invalid A leaves no wrapper result and clamps.
-    assert state is credited_a, report
+    expected = (_TE.ADVISORY_SUCCESS if credited_a else _TE.HARD_FAILURE)
+    assert state is expected, report
     if credited_a:
         assert not _reports_unloaded(report, "webapp"), report
     else:

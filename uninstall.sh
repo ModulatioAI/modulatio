@@ -83,18 +83,24 @@ backup_userdata() {
   local dest="$HOME/modulatio-uninstall-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
   # The archive holds everything about to be destroyed, secrets included, so
   # it is created owner-only rather than at whatever the ambient umask allows.
-  # ONE descriptor from creation through writing and verification. Creating
-  # the name exclusively and then handing the NAME to tar reopens it: the
-  # interval between is enough to replace it with a link, and tar follows the
-  # link, overwrites whatever it points at, and the verification that reads
-  # the name back accepts the victim as the archive. Holding the descriptor
-  # means the bytes go to the inode that was created and nowhere else.
-  if ! (umask 077 && set -o noclobber && exec 3> "$dest") 2>/dev/null; then
+  # ONE descriptor, opened in THIS shell, from creation through writing and
+  # verification. Opening it inside a subshell closes it when that subshell
+  # exits, so the parent has to reopen the NAME — and that reopen is an
+  # ordinary open with no exclusivity, which follows a link put there in the
+  # interval. tar then overwrites whatever it points at and the verification
+  # accepts the victim as the archive. Holding one descriptor means the bytes
+  # reach the inode that was created and nowhere else.
+  local prev_umask; prev_umask="$(umask)"
+  umask 077
+  set -o noclobber
+  if ! exec 3> "$dest"; then
+    set +o noclobber; umask "$prev_umask"
     echo "  ! backup destination could not be created safely: $dest" >&2
     return 1
   fi
-  exec 3> "$dest" || { echo "  ! backup destination unusable: $dest" >&2; return 1; }
-  if ! (umask 077 && tar -cz "${items[@]}" 2>/dev/null >&3); then
+  set +o noclobber
+  umask "$prev_umask"
+  if ! tar -cz "${items[@]}" 2>/dev/null >&3; then
     exec 3>&-
     echo "  ! backup FAILED — refusing to remove anything" >&2
     return 1
@@ -106,7 +112,18 @@ backup_userdata() {
     echo "  ! backup did not verify — refusing to remove anything" >&2
     return 1
   fi
+  # And the public NAME must still identify that same inode. A descriptor can
+  # outlive the name being unlinked or repointed: verification would then pass
+  # on an archive nobody can find, and deletion would proceed with no
+  # recoverable backup at the path just reported.
+  local fd_id name_id
+  fd_id="$(stat -L -c '%d:%i:%F' /proc/self/fd/3 2>/dev/null)"
+  name_id="$(stat -c '%d:%i:%F' "$dest" 2>/dev/null)"
   exec 3>&-
+  if [ -z "$fd_id" ] || [ "$fd_id" != "$name_id" ]; then
+    echo "  ! backup destination no longer names the archive that was written" >&2
+    return 1
+  fi
   echo "Backed up your data -> $dest"
 }
 
@@ -330,7 +347,13 @@ main() {
   sleep 1
   local still=""
   local live
-  live="$(ps -eo pid= 2>/dev/null)"
+  # An inventory that could not be read is not evidence that nothing is
+  # running. Failing here refuses rather than reading an empty string as an
+  # empty machine.
+  if ! live="$(ps -eo pid= 2>/dev/null)"; then
+    echo "Refusing to uninstall — the process list could not be read, so a live Modulatio process cannot be ruled out." >&2
+    exit 1
+  fi
   for pid in $leftover; do
     case " $(echo $live) " in
       *" $pid "*) still="$still$pid " ;;

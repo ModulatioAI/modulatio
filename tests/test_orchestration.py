@@ -515,15 +515,15 @@ def test_consume_mode_command_parses_strips_and_sets_mode(project: Project):
     assert orch._session_mode is RunMode.DEFAULT          # default
 
     matched, stripped = orch._consume_mode_command("/goal build a site")
-    assert matched is _TE.ADVISORY_SUCCESS and stripped == "build a site"  # command stripped
+    assert matched is True and stripped == "build a site"  # command stripped
     assert orch._session_mode is RunMode.GOAL
 
     matched, stripped = orch._consume_mode_command("/yolo")
-    assert matched is _TE.ADVISORY_SUCCESS and stripped == ""              # bare command
+    assert matched is True and stripped == ""              # bare command
     assert orch._session_mode is RunMode.YOLO
 
     matched, stripped = orch._consume_mode_command("hello there")
-    assert matched is _TE.HARD_FAILURE and stripped == "hello there"  # not a command
+    assert matched is False and stripped == "hello there"  # not a command
     assert orch._session_mode is RunMode.YOLO              # unchanged
 
     orch._consume_mode_command("/default")
@@ -8007,7 +8007,7 @@ def test_qc_fix_forward_disabled_falls_through(project, monkeypatch):
     handled = orch._attempt_qc_fix_forward(
         task, draft, (_rejected_verdict(), "fix the section"), summary
     )
-    assert handled is _TE.HARD_FAILURE
+    assert handled is False
     assert task.qc_authored_fix is False
 
 
@@ -8027,7 +8027,7 @@ def test_qc_fix_forward_builds_when_draft_empty(project, monkeypatch):
     summary = RunSummary(project=project)
 
     handled = orch._attempt_qc_fix_forward(task, draft, None, summary)
-    assert handled is _TE.ADVISORY_SUCCESS
+    assert handled is True
     assert task.status == TaskStatus.COMPLETED
     assert task.qc_authored_fix is True
     assert draft.read_text().strip()  # QC authored a real body
@@ -8046,7 +8046,7 @@ def test_qc_fix_forward_builds_when_draft_missing(project, monkeypatch):
     summary = RunSummary(project=project)
 
     handled = orch._attempt_qc_fix_forward(task, draft, None, summary)
-    assert handled is _TE.ADVISORY_SUCCESS
+    assert handled is True
     assert task.status == TaskStatus.COMPLETED
     assert draft.exists() and draft.read_text().strip()
 
@@ -8097,7 +8097,7 @@ def test_qc_fix_forward_completes_on_qc_patch(project, monkeypatch):
         task, draft, (_rejected_verdict(), "fix the section"), summary,
         defect_type="substantive",
     )
-    assert handled is _TE.ADVISORY_SUCCESS
+    assert handled is True
     assert task.status == TaskStatus.COMPLETED
     assert task.qc_authored_fix is True
     assert any(
@@ -11631,7 +11631,7 @@ def test_qc_fix_forward_rescues_single_file_code_draft(project, monkeypatch):
         task, draft, (_rejected_verdict(), "strip everything before <?xml"),
         summary,
     )
-    assert handled is _TE.ADVISORY_SUCCESS
+    assert handled is True
     assert task.status == TaskStatus.COMPLETED
     assert task.qc_authored_fix is True
 
@@ -11656,7 +11656,7 @@ def test_qc_fix_forward_still_declines_a_real_multifile_bundle(project, monkeypa
     handled = orch._attempt_qc_fix_forward(
         task, draft, (_rejected_verdict(), "fix it"), summary,
     )
-    assert handled is _TE.HARD_FAILURE
+    assert handled is False
     assert task.qc_authored_fix is False
 
 
@@ -13060,7 +13060,7 @@ def test_qc_fix_forward_refuses_multifile_draft(project: Project, monkeypatch):
     rescued = orch._attempt_qc_fix_forward(
         task, draft, (verdict, "fix util.py"), RunSummary(project=project),
     )
-    assert rescued is _TE.HARD_FAILURE, "a multi-file draft must not be single-file rescued"
+    assert rescued is False, "a multi-file draft must not be single-file rescued"
     assert not patched_called, "the single-file patch must not run"
     assert task.status != TaskStatus.COMPLETED
 
