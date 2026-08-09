@@ -81,9 +81,25 @@ backup_userdata() {
   [ "$REMOVE_DELIVERABLES" = 1 ] && [ -e "$DELIVERABLES" ] && items+=("$DELIVERABLES")
   [ "${#items[@]}" -eq 0 ] && return 0
   local dest="$HOME/modulatio-uninstall-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
-  if tar -czf "$dest" "${items[@]}" 2>/dev/null; then
-    echo "Backed up your data -> $dest"
+  # The archive holds everything about to be destroyed, secrets included, so
+  # it is created owner-only rather than at whatever the ambient umask allows.
+  # A pre-existing name is refused instead of overwritten.
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    echo "  ! backup destination already exists: $dest" >&2
+    return 1
   fi
+  if ! (umask 077 && tar -czf "$dest" "${items[@]}" 2>/dev/null); then
+    echo "  ! backup FAILED — refusing to remove anything" >&2
+    return 1
+  fi
+  # The removal that follows is irreversible and this file is its only safety
+  # net, so an unreadable or empty archive stops the uninstall rather than
+  # letting it proceed against a net with no rope in it.
+  if ! tar -tzf "$dest" >/dev/null 2>&1 || [ ! -s "$dest" ]; then
+    echo "  ! backup did not verify — refusing to remove anything" >&2
+    return 1
+  fi
+  echo "Backed up your data -> $dest"
 }
 
 remove_pandoc() {
@@ -209,7 +225,10 @@ main() {
   fi
 
   echo "Stopping daemon..."; stop_daemon
-  backup_userdata
+  if ! backup_userdata; then
+    echo "Aborted — your data could not be backed up, so nothing was removed." >&2
+    exit 1
+  fi
   echo "Removing install footprint..."
   safe_rm "$CACHE_DIR"
   safe_rm "$CONFIG_DIR/daemon.log"

@@ -635,3 +635,53 @@ def test_running_processes_matches_entry_points_not_mentions(monkeypatch):
     pids = [pid for pid, _ in uninstall.running_processes()]
 
     assert pids == [101, 102], "entry points only — not the shell or the editor"
+
+
+def test_the_backup_archive_is_owner_only_from_creation(tmp_path, monkeypatch):
+    """The archive holds everything the wipe is about to destroy, secrets
+    included. Writing it at the ambient umask and narrowing afterwards leaves
+    a window where the bytes are readable, which is the same disclosure as
+    leaving them readable."""
+    import os as _os
+
+    from modulatio import uninstall as un
+
+    old = _os.umask(0o022)
+    try:
+        work = tmp_path / "state"
+        work.mkdir()
+        (work / ".env").write_text("PROVIDER_KEY=secret\n")
+        plan = [un.Target("Settings", work, "settings", user_data=True)]
+        dest = tmp_path / "backup.tar.gz"
+        assert un.backup_plan(plan, dest) == dest
+        assert oct(dest.stat().st_mode & 0o777) == "0o600"
+    finally:
+        _os.umask(old)
+
+
+def test_an_existing_or_linked_destination_is_refused(tmp_path):
+    """Exclusive creation refuses a destination that is already there instead
+    of truncating it, and refusing to follow a link means the name cannot be
+    pointed at a file the archive would overwrite."""
+    import pytest
+
+    from modulatio import uninstall as un
+
+    work = tmp_path / "state"
+    work.mkdir()
+    (work / "x").write_text("data\n")
+    plan = [un.Target("Settings", work, "settings", user_data=True)]
+
+    taken = tmp_path / "taken.tar.gz"
+    taken.write_text("do not clobber\n")
+    with pytest.raises(un.BackupVerificationError):
+        un.backup_plan(plan, taken)
+    assert taken.read_text() == "do not clobber\n"
+
+    victim = tmp_path / "victim"
+    victim.write_text("also do not clobber\n")
+    link = tmp_path / "link.tar.gz"
+    link.symlink_to(victim)
+    with pytest.raises(un.BackupVerificationError):
+        un.backup_plan(plan, link)
+    assert victim.read_text() == "also do not clobber\n"

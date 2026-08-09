@@ -330,9 +330,26 @@ def backup_plan(plan: list[Target], dest: Path) -> Path | None:
     if not user_targets:
         return None
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(dest, "w:gz") as tar:
-        for t in user_targets:
-            tar.add(t.path, arcname=t.path.name)
+    # The archive holds everything the wipe is about to destroy, secrets
+    # included, so it is created owner-only FROM THE START rather than
+    # written at whatever the ambient umask allows and narrowed afterwards --
+    # a window where the bytes are readable is the same disclosure as leaving
+    # them readable. Exclusive creation refuses an existing destination
+    # instead of truncating it, and refusing to follow a link means the name
+    # cannot be pointed at a file the archive would then overwrite.
+    try:
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600)
+    except OSError as exc:
+        raise BackupVerificationError(
+            f"backup destination could not be created safely: {dest} ({exc})"
+        ) from exc
+    with os.fdopen(fd, "wb") as raw:
+        with tarfile.open(fileobj=raw, mode="w:gz") as tar:
+            for t in user_targets:
+                tar.add(t.path, arcname=t.path.name)
+        raw.flush()
+        os.fsync(raw.fileno())
     # Read the archive back before the caller deletes anything it names. The
     # removal that follows is irreversible and this file is its only safety net,
     # so an archive that wrote nothing has to stop the uninstall rather than let
