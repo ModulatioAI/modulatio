@@ -7238,9 +7238,16 @@ class Orchestrator:
                         "the operator's grant — asking for it IS how you load "
                         "from one.")
             try:
+                # The roots the resolution just authorized travel WITH the
+                # load, so the bytes are proven to come from inside one of them
+                # on the descriptor that is read — a name checked and then
+                # opened can be repointed in between.
                 item = build_attachment(
                     target,
-                    kind="image" if looks_like_image(target) else "document")
+                    kind="image" if looks_like_image(target) else "document",
+                    within=(workspace, *folder_rw, *folder_read,
+                            vault_root, shared_root, config_dir,
+                            *_lg.LiveGrantRoots(gate, "path")))
             except UnicodeDecodeError:
                 return (f"Can't load {path!r}: a binary document with no "
                         "extractor (DOCX/ODT/…) — convert it to text or PDF "

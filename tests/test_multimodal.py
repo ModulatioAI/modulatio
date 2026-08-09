@@ -40,10 +40,20 @@ def _make_agent(**overrides) -> Agent:
 # ─── Image encoding ─────────────────────────────────────────────────────────
 
 
+def _loaded(path, tmp_cfg=None):
+    """A loaded attachment for ``path`` — the one type the block accepts, so a
+    test exercises the same byte authority production does."""
+    from modulatio import attachments, config
+
+    if tmp_cfg is not None:
+        config.CONFIG_DIR = tmp_cfg
+    return attachments.build_attachment(path, kind="image")
+
+
 def test_build_image_block_png(tmp_path: Path):
     p = tmp_path / "x.png"
     p.write_bytes(b"\x89PNG\r\n\x1a\nfake-png-bytes")
-    block = build_image_content_block(p)
+    block = build_image_content_block(_loaded(p))
     assert block["type"] == "image_url"
     url = block["image_url"]["url"]
     assert url.startswith("data:image/png;base64,")
@@ -52,7 +62,7 @@ def test_build_image_block_png(tmp_path: Path):
 def test_build_image_block_jpeg(tmp_path: Path):
     p = tmp_path / "photo.jpg"
     p.write_bytes(b"\xff\xd8\xff\xe0fake-jpeg")
-    block = build_image_content_block(p)
+    block = build_image_content_block(_loaded(p))
     assert "image/jpeg" in block["image_url"]["url"]
 
 
@@ -60,7 +70,7 @@ def test_build_image_block_handles_jpeg_alt_extension(tmp_path: Path):
     """`.jpeg` and `.jpg` both map to image/jpeg."""
     p = tmp_path / "photo.jpeg"
     p.write_bytes(b"\xff\xd8\xff\xe0")
-    assert "image/jpeg" in build_image_content_block(p)["image_url"]["url"]
+    assert "image/jpeg" in build_image_content_block(_loaded(p))["image_url"]["url"]
 
 
 def test_build_image_block_unknown_extension_falls_back(tmp_path: Path):
@@ -68,7 +78,7 @@ def test_build_image_block_unknown_extension_falls_back(tmp_path: Path):
     pass the bytes through rather than failing."""
     p = tmp_path / "img.xyz"
     p.write_bytes(b"raw-bytes")
-    block = build_image_content_block(p)
+    block = build_image_content_block(_loaded(p))
     assert block["image_url"]["url"].startswith("data:image/")
 
 
@@ -246,7 +256,7 @@ def test_build_image_content_block_rejects_oversize(tmp_path, monkeypatch):
     p = tmp_path / "big.png"
     p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 4096)
     with pytest.raises(ValueError, match="exceeds the image cap"):
-        build_image_content_block(p)
+        build_image_content_block(_loaded(p))
 
 
 def test_build_image_content_block_accepts_under_cap(tmp_path, monkeypatch):
@@ -257,7 +267,7 @@ def test_build_image_content_block_accepts_under_cap(tmp_path, monkeypatch):
     monkeypatch.setenv("MODULATIO_MAX_ATTACHMENT_BYTES", "100000")
     p = tmp_path / "small.png"
     p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
-    block = build_image_content_block(p)
+    block = build_image_content_block(_loaded(p))
     assert block["type"] == "image_url"
     assert block["image_url"]["url"].startswith("data:image/png;base64,")
 

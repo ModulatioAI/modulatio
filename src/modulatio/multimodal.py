@@ -41,7 +41,7 @@ MIME_TYPES: dict[str, str] = {
 _FALLBACK_MIME = "image/octet-stream"
 
 
-def build_image_content_block(source: "Attachment | Path") -> dict[str, Any]:
+def build_image_content_block(source: Attachment) -> dict[str, Any]:
     """Build an OpenAI-format ``image_url`` content block for an image.
     Returns ``{"type": "image_url", "image_url": {"url": "data:..."}}``.
 
@@ -56,8 +56,9 @@ def build_image_content_block(source: "Attachment | Path") -> dict[str, Any]:
     and the digest describing the request would no longer describe what was
     sent. An attachment with no snapshot is refused rather than fetched.
 
-    A bare path is still accepted for images the engine itself produced (a
-    render it just wrote), which never passed through a load.
+    Only a loaded attachment is accepted. Images the engine itself renders go
+    through the same constructor first, so there is ONE type carrying byte
+    authority and no second way in that skips the snapshot.
 
     Re-checks the image-size cap before reading. The attach-time check in
     ``build_attachment`` is the primary gate; this is defense in depth.
@@ -68,18 +69,14 @@ def build_image_content_block(source: "Attachment | Path") -> dict[str, Any]:
         DEFAULT_MAX_IMAGE_BYTES, _OVERRIDE_ENV, _resolve_cap,
     )
 
-    expected = ""
-    if isinstance(source, Path):
-        path = source
-    else:
-        if source.staged_path is None:
-            raise ValueError(
-                f"image attachment {source.name!r} has no engine-held "
-                f"snapshot — refusing to re-read the original path, whose "
-                f"contents are no longer the ones that were loaded"
-            )
-        path = Path(source.staged_path)
-        expected = source.sha256
+    if source.staged_path is None:
+        raise ValueError(
+            f"image attachment {source.name!r} has no engine-held snapshot — "
+            f"refusing to re-read the original path, whose contents are no "
+            f"longer the ones that were loaded"
+        )
+    path = Path(source.staged_path)
+    expected = source.sha256
 
     cap = _resolve_cap(DEFAULT_MAX_IMAGE_BYTES)
     size = path.stat().st_size
@@ -90,8 +87,8 @@ def build_image_content_block(source: "Attachment | Path") -> dict[str, Any]:
             f"(override via {_OVERRIDE_ENV})."
         )
 
-    name = source.name if isinstance(source, Attachment) else path.name
-    mime = MIME_TYPES.get(Path(name).suffix.lower(), _FALLBACK_MIME)
+    mime = MIME_TYPES.get(Path(source.name).suffix.lower(), _FALLBACK_MIME)
+    name = source.name
     raw = path.read_bytes()
     if expected:
         seen = f"sha256:{hashlib.sha256(raw).hexdigest()}"

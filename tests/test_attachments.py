@@ -327,3 +327,39 @@ def test_snapshots_nobody_claimed_are_swept_by_age(tmp_path, monkeypatch):
     assert attachments.sweep_orphan_snapshots() == 1
     assert not stale.exists()
     assert live.staged_path.exists(), "an in-flight snapshot was swept"
+
+
+def test_bytes_must_come_from_the_folder_that_was_authorized(
+        tmp_path, monkeypatch):
+    """Resolving a name under an allowed root and then opening that name are
+    two acts, and the file can be repointed between them. The single open makes
+    the bytes internally consistent; only checking the DESCRIPTOR proves they
+    came from the root the grant covered."""
+    import pytest
+
+    from modulatio import attachments, config
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    granted = tmp_path / "granted"
+    granted.mkdir()
+    outside = tmp_path / "elsewhere" / "secret.md"
+    outside.parent.mkdir()
+    outside.write_text("NOT UNDER THE GRANT\n")
+
+    inside = granted / "notes.md"
+    inside.symlink_to(outside)
+
+    with pytest.raises(ValueError, match="outside the folder it was authorized"):
+        attachments.build_attachment(inside, kind="document", within=(granted,))
+
+    # A real file under the grant still loads, and so does a link that stays
+    # inside it — the check is about where the bytes came from, not about links.
+    real = granted / "real.md"
+    real.write_text("under the grant\n")
+    assert attachments.build_attachment(
+        real, kind="document", within=(granted,)).content == "under the grant\n"
+
+    hop = granted / "hop.md"
+    hop.symlink_to(real)
+    assert attachments.build_attachment(
+        hop, kind="document", within=(granted,)).content == "under the grant\n"

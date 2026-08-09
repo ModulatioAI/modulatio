@@ -92,7 +92,9 @@ class Attachment:
     size: int = 0
 
 
-def build_attachment(path: Path, *, kind: AttachmentKind) -> Attachment:
+def build_attachment(
+    path: Path, *, kind: AttachmentKind, within: "tuple[Path, ...]" = (),
+) -> Attachment:
     """Construct an ``Attachment`` from a filesystem path.
 
     For ``kind='document'``, reads the file as utf-8. Binary files raise
@@ -122,7 +124,7 @@ def build_attachment(path: Path, *, kind: AttachmentKind) -> Attachment:
         else DEFAULT_MAX_IMAGE_BYTES
     )
     sweep_orphan_snapshots()
-    staged, digest, size = _stage(path, cap=cap, kind=kind)
+    staged, digest, size = _stage(path, cap=cap, kind=kind, within=within)
     try:
         return _finish_attachment(path, kind, staged, digest, size)
     except BaseException:
@@ -174,6 +176,7 @@ def _staging_dir() -> Path:
 
 def _stage(
     path: Path, *, cap: int, kind: AttachmentKind,
+    within: "tuple[Path, ...]" = (),
 ) -> "tuple[Path, str, int]":
     """Copy the bytes aside and digest them: ``(staged, sha256, size)``.
 
@@ -211,6 +214,27 @@ def _stage(
             f"attachment {path.name!r} could not be opened: {exc.strerror}"
         ) from exc
     try:
+        if within:
+            # Where the caller authorized a ROOT, prove these bytes came from
+            # inside it — on the descriptor that is about to be read, not on
+            # the name that was checked. A name can be replaced with a link out
+            # of the root between the check and the open, and the copy would
+            # then be internally consistent while describing a file the grant
+            # never covered.
+            try:
+                opened = Path(os.readlink(f"/proc/self/fd/{fd}")).resolve()
+            except OSError as exc:
+                raise ValueError(
+                    f"attachment {path.name!r} could not be verified against "
+                    f"the folder it was authorized under"
+                ) from exc
+            roots = [Path(r).resolve() for r in within]
+            if not any(opened == r or r in opened.parents for r in roots):
+                raise ValueError(
+                    f"attachment {path.name!r} resolves outside the folder it "
+                    f"was authorized under — the name was repointed after it "
+                    f"was checked"
+                )
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             # A FIFO, device, socket or directory: its reported size is not
             # its content, and reading it can block or stream without end.
