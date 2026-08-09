@@ -2196,3 +2196,72 @@ def test_conflict_without_canonical_payload_fails_closed(
     assert any(
         "MNT-T-PF" in e and "reconciled" not in e for e in summary.errors
     ), "the summary must not claim reconciliation that never happened"
+
+
+def test_a_ticket_a_worker_raised_survives_the_wave_boundary(project_with_run):
+    """A worker runs in isolation and cannot write the shared store, so a
+    ticket it needs to open is buffered on its result and created here, on the
+    merging thread. If the buffer were dropped at the boundary the run would
+    finish with nothing recorded — the operator's only notice of the condition
+    is the ticket, and the task itself may well have completed."""
+    from modulatio import store
+    from modulatio.orchestration import (
+        RunSummary, TaskExecutionResult, _merge_task_result,
+    )
+    from modulatio.types import TicketPriority
+
+    run_id = project_with_run.run_id
+    task = _make_task(id="MNT-T-TK", minted_by="mint-1")
+    _seed_task(task, run_id=run_id)
+    summary = RunSummary(project=project_with_run)
+
+    res = TaskExecutionResult(task=task)
+    res.deferred_writes.append(lambda: store.create_ticket(
+        project_id=project_with_run.id,
+        project_code=PROJECT_CODE,
+        run_id=run_id,
+        priority=TicketPriority.CRITICAL,
+        title="Raised inside a worker",
+        body="The condition the worker could not write itself.",
+    ))
+
+    _merge_task_result(res, summary, merged_ids=set())
+
+    titles = [t.title for t in store.list_tickets(PROJECT_CODE, run_id=run_id)]
+    assert "Raised inside a worker" in titles, titles
+
+
+def test_one_failing_deferred_write_does_not_lose_the_others(project_with_run):
+    """The buffered writes are independent conditions from one task. Letting a
+    failure end the loop would discard every write queued behind it, and
+    letting it propagate would abort a merge that has already committed the
+    task — so each is attempted and a failure costs only itself."""
+    from modulatio import store
+    from modulatio.orchestration import (
+        RunSummary, TaskExecutionResult, _merge_task_result,
+    )
+    from modulatio.types import TicketPriority
+
+    run_id = project_with_run.run_id
+    task = _make_task(id="MNT-T-TK2", minted_by="mint-1")
+    _seed_task(task, run_id=run_id)
+    summary = RunSummary(project=project_with_run)
+
+    def _raise():
+        raise RuntimeError("the shared store refused this one")
+
+    res = TaskExecutionResult(task=task)
+    res.deferred_writes.extend([
+        _raise,
+        lambda: store.create_ticket(
+            project_id=project_with_run.id, project_code=PROJECT_CODE,
+            run_id=run_id, priority=TicketPriority.CRITICAL,
+            title="Queued behind the failure",
+            body="Must still reach the store.",
+        ),
+    ])
+
+    _merge_task_result(res, summary, merged_ids=set())   # must not raise
+
+    titles = [t.title for t in store.list_tickets(PROJECT_CODE, run_id=run_id)]
+    assert "Queued behind the failure" in titles, titles

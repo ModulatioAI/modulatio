@@ -997,6 +997,57 @@ def _litellm_stack_doctor_check() -> None:
         typer.echo(f"  ✗ tools-call path import failed: {type(e).__name__}: {e}")
 
 
+def _key_collision_doctor_check() -> None:
+    """Report a configured model whose key is stored under an env var a
+    catalog provider already owns.
+
+    A catalog provider's key lives under a fixed name. An endpoint the
+    operator adds by hand takes whatever name they type, so typing a name the
+    catalog already uses points two different endpoints at one secret: setting
+    the key for either silently replaces the other's. Nothing else surfaces
+    it — the value is valid, so both providers simply start sending the same
+    credential to different hosts.
+
+    Reported rather than refused: an operator may deliberately share one key
+    across two endpoints of the same vendor, and only they know whether the
+    endpoint behind their entry is that vendor's.
+    """
+    from modulatio import model_presets as _mp
+    from modulatio import provider_catalog as _pc
+
+    owners: "dict[str, tuple[str, str]]" = {}
+    for provider in _pc.PROVIDERS.values():
+        for option in provider.auth_options:
+            if option.env_var:
+                owners.setdefault(option.env_var, (provider.name, provider.base_url))
+
+    clashes = []
+    for key, preset in sorted(_mp.load_presets().items()):
+        if preset.get("auth_type") != "api_key":
+            continue
+        env_var = (preset.get("auth_config") or {}).get("env_var")
+        owned = owners.get(env_var or "")
+        if not owned:
+            continue
+        owner_name, owner_url = owned
+        base_url = (preset.get("base_url") or "").rstrip("/")
+        # Same name AND the catalog owner's own endpoint is the ordinary case:
+        # that is simply the provider's key under the provider's name.
+        if base_url and owner_url and base_url == owner_url.rstrip("/"):
+            continue
+        clashes.append((key, env_var, owner_name, base_url or "(no endpoint)"))
+
+    typer.echo("\nKey names:")
+    if not clashes:
+        typer.echo("  ✓ no model stores its key under another provider's env var")
+        return
+    for key, env_var, owner_name, base_url in clashes:
+        typer.echo(
+            f"  ⚠ '{key}' sends to {base_url} but stores its key as {env_var}, "
+            f"which is {owner_name}'s. Setting either key replaces the other. "
+            f"Rename this model's env var if the two are not the same account.")
+
+
 def _clay_doctor_check() -> None:
     """Clay (Claude avatar) availability — presence + login, reads NO secret."""
     from modulatio import oauth_helpers
@@ -1243,6 +1294,7 @@ def _run_doctor_checks() -> None:
     else:
         typer.echo("  OpenAI Codex: not signed in (run `modulatio auth login-openai`)")
     _clay_doctor_check()
+    _key_collision_doctor_check()
 
     # Surface the OAuth attribution caveat when any OAuth-backed model is configured.
     has_oauth_model = any(

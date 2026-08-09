@@ -823,3 +823,60 @@ def test_migration_does_not_overwrite_a_key_written_after_its_read(tmp_path):
     final = config._parse_env_assignments(config.secrets_path())
     assert final["SHARED_KEY"] == "new-value", (
         "the migration overwrote a key written after it read the destination")
+
+
+def _preset(base_url: str, env_var: str) -> dict:
+    return {"label": "L", "base_url": base_url, "api_format": "openai",
+            "auth_type": "api_key", "auth_config": {"env_var": env_var},
+            "model": "m"}
+
+
+@pytest.mark.parametrize("base_url, env_var, flagged", [
+    # An endpoint of the operator's own storing its key under a catalog name:
+    # two endpoints, one secret, and setting either replaces the other.
+    ("https://my-proxy.internal/v1", "OPENAI_API_KEY", True),
+    # The catalog provider's own endpoint under its own name is just its key.
+    ("https://api.openai.com/v1", "OPENAI_API_KEY", False),
+    # A name no catalog provider owns cannot collide with one.
+    ("https://my-proxy.internal/v1", "MY_PROXY_KEY", False),
+])
+def test_doctor_reports_a_key_stored_under_another_providers_name(
+    tmp_path, monkeypatch, base_url, env_var, flagged,
+):
+    """The value is valid either way, so nothing fails — both endpoints simply
+    start sending one credential to two hosts."""
+    from modulatio import cli, model_presets, provider_catalog
+
+    monkeypatch.setattr(model_presets, "load_presets",
+                        lambda: {"mine": _preset(base_url, env_var)})
+    printed: list[str] = []
+    monkeypatch.setattr(cli.typer, "echo", lambda msg="": printed.append(str(msg)))
+
+    cli._key_collision_doctor_check()
+
+    out = "\n".join(printed)
+    assert flagged == ("⚠" in out), out
+    if flagged:
+        owner = next(p.name for p in provider_catalog.PROVIDERS.values()
+                     for a in p.auth_options if a.env_var == env_var)
+        assert owner in out and env_var in out and "mine" in out, out
+    else:
+        assert "✓" in out, out
+
+
+def test_doctor_ignores_models_that_carry_no_key(tmp_path, monkeypatch):
+    """An endpoint with no key has no env var to collide, and reading one from
+    a preset that declares none would report a collision against nothing."""
+    from modulatio import cli, model_presets
+
+    monkeypatch.setattr(model_presets, "load_presets", lambda: {
+        "keyless": {"label": "L", "base_url": "http://localhost:8080/v1",
+                    "api_format": "openai", "auth_type": "none",
+                    "auth_config": {}, "model": "m"},
+    })
+    printed: list[str] = []
+    monkeypatch.setattr(cli.typer, "echo", lambda msg="": printed.append(str(msg)))
+
+    cli._key_collision_doctor_check()
+
+    assert "⚠" not in "\n".join(printed)
