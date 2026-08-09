@@ -1698,17 +1698,19 @@ CAPABILITY_STATES = frozenset(_GRANT_STATES | {STATE_ONCE})
 PARITY_EXCEPTIONS = (
     ("clay.dotfiles", "clay_confinement", "path",
      "dotfiles under bound roots",
-     "native file tools read whole bound roots; the engine tool loop "
-     "rejects every dot component", True),
+     "the confined kickoff seat's own file tools read whole bound roots; the "
+     "engine tool loop rejects every dot component", True),
     ("clay.local-network", "clay_confinement", "network", "local network",
-     "the confined seat runs network-on; the engine tool loop hard-refuses "
-     "loopback/private targets", True),
+     "the confined kickoff seat runs network-on; the engine tool loop "
+     "hard-refuses loopback/private targets", True),
     ("clay.permission-model", "clay_confinement", "capability",
      "per-request approval",
-     "the native seat decides tool use itself and is fenced only by the "
-     "sandbox around it, so nothing reaches the operator as an approvable "
-     "request; the engine tool loop asks per request and records the typed "
-     "grant it receives", False),
+     "the confined kickoff seat decides its own tool use and is fenced only "
+     "by the sandbox around it, so nothing reaches the operator as an "
+     "approvable request; it produces one artifact in its own workspace and "
+     "asks for nothing. The INTERACTIVE seat no longer diverges here: it "
+     "carries no tools of its own and acts through the engine tool loop, "
+     "which asks per request and records the typed grant", False),
     ("mcp-stdio.local-network", "mcp_servers", "network", "local network",
      "stdio servers run outside the engine sandbox; their egress is not "
      "engine-fenced", False),

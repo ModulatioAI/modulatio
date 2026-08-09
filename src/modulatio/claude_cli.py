@@ -85,6 +85,24 @@ _ALLOWED_CONFINED_TOOLS = (
     "Read", "Write", "Edit", "Grep", "Glob", "WebFetch", "WebSearch",
 )
 
+#: Every built-in tool removed. The CLI reads an empty tool name as "disable all
+#: tools", which is the fail-closed form: a denylist leaves whatever the next
+#: release adds, while an empty AVAILABLE set has nothing to add to.
+#:
+#: The interactive seat runs with this because its actions belong to the engine's
+#: own tool loop, where each one is checked against the operator's typed grants
+#: before it happens. A native tool cannot be checked that way: the seat runs
+#: under ``bypassPermissions``, so no prompt fires, and the sandbox binds the
+#: roots it was given before the turn started. The consequence is the defect this
+#: replaces — a grant to READ a folder arrived as a writable mount, and a native
+#: shell inside it could execute there, so a path widen quietly conferred code
+#: execution the operator never approved.
+TOOLS_NONE = ("",)
+
+#: Fence label for a tool request. A label of its own keeps the protocol clear of
+#: ordinary fenced code in the same reply, which a bare ``json`` fence would not.
+TOOL_FENCE = "modulatio-tool"
+
 #: A tool-activity sink ``(name, args, result) -> None`` — same signature as the
 #: orchestrator's tool-loop logger, so Clay's (otherwise-invisible) in-sandbox
 #: tool calls flow into the SAME per-task tool_calls jsonl + Team TV as a
@@ -168,6 +186,88 @@ def text_from_claude_json(raw: str) -> str:
     if not isinstance(data, dict):
         return ""
     return str(data.get("result") or "")
+
+
+def render_tool_protocol(tools: "list[dict]") -> str:
+    """Instructions letting a seat with no tools of its own ask the engine to
+    run one, for appending to the seat's system text.
+
+    The engine's tools reach this seat as text because the binary takes no
+    external tool schema, and the seat answers in text for the same reason.
+    What that buys is the whole point: the request comes back to the engine
+    before anything happens, so it passes the operator's typed grants like
+    every other seat's, instead of executing inside the subprocess where
+    nothing can check it.
+    """
+    if not tools:
+        return ""
+    lines = [
+        "You have no tools of your own. To act, ask the engine to run one by "
+        f"emitting a ```{TOOL_FENCE} fenced block holding a JSON object with "
+        '"name" and "arguments":',
+        "",
+        f"```{TOOL_FENCE}",
+        '{"name": "read_file", "arguments": {"path": "notes.md"}}',
+        "```",
+        "",
+        "Emit one block per call; several may appear in one reply. The result "
+        "of each comes back to you before your next turn, so ask and then "
+        "wait rather than assuming an outcome. A reply with no block is your "
+        "final answer. Available tools:",
+        "",
+    ]
+    for t in tools:
+        fn = t.get("function") if isinstance(t, dict) else None
+        if not isinstance(fn, dict):
+            continue
+        lines.append(
+            f"- {fn.get('name', '')}: {fn.get('description', '') or ''}".rstrip()
+        )
+        params = fn.get("parameters")
+        if params:
+            lines.append(f"  arguments: {json.dumps(params, sort_keys=True)}")
+    return "\n".join(lines)
+
+
+def parse_tool_protocol(text: str) -> "tuple[str, list[dict]]":
+    """Split a seat's reply into ``(prose, calls)``.
+
+    Each call is ``{"name": str, "args": dict}``, in the order emitted. A block
+    that is not an object, names nothing, or does not parse is DROPPED rather
+    than passed on: an unparseable request is one the engine cannot check
+    against a grant, and inventing arguments for it would act on a guess. The
+    block still leaves the prose, so a seat that malformed its request reads
+    its own output back on the next turn.
+    """
+    calls: "list[dict]" = []
+    out: "list[str]" = []
+    fence = f"```{TOOL_FENCE}"
+    rest = text or ""
+    while True:
+        start = rest.find(fence)
+        if start < 0:
+            out.append(rest)
+            break
+        out.append(rest[:start])
+        body_start = start + len(fence)
+        end = rest.find("```", body_start)
+        if end < 0:  # unterminated fence — the remainder is not a request
+            out.append(rest[start:])
+            break
+        block = rest[body_start:end]
+        rest = rest[end + 3:]
+        try:
+            payload = json.loads(block)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        name = payload.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        args = payload.get("arguments")
+        calls.append({"name": name, "args": args if isinstance(args, dict) else {}})
+    return "".join(out).strip(), calls
 
 
 def _tool_result_text(content) -> str:

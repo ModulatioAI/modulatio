@@ -246,3 +246,36 @@ def test_empty_reply_is_retriable():
 
 def test_real_text_on_clean_exit_is_not_an_error():
     assert claude_cli._claude_error_reason(0, "Here is the plan.") is None
+
+
+def test_an_unparseable_tool_request_is_dropped_not_guessed():
+    """A request the engine cannot read is one it cannot check against a grant,
+    and filling in arguments for it would act on a guess. The block still
+    leaves the prose, so the seat reads its own malformed output back."""
+    from modulatio.claude_cli import parse_tool_protocol
+
+    prose, calls = parse_tool_protocol(
+        "before\n```modulatio-tool\n{not json at all}\n```\nafter")
+    assert calls == []
+    assert "before" in prose and "after" in prose
+    assert "not json at all" not in prose
+
+    # A block naming no tool is equally unusable.
+    _, unnamed = parse_tool_protocol('```modulatio-tool\n{"arguments": {"a": 1}}\n```')
+    assert unnamed == []
+
+    # An unterminated fence is not a request; it stays as text.
+    tail_prose, none = parse_tool_protocol('```modulatio-tool\n{"name": "x"}')
+    assert none == []
+    assert "name" in tail_prose
+
+
+def test_ordinary_fenced_code_in_a_reply_is_not_a_tool_request():
+    """The protocol carries its own fence label, so a seat writing an ordinary
+    json block is not read as asking the engine to run something."""
+    from modulatio.claude_cli import parse_tool_protocol
+
+    prose, calls = parse_tool_protocol(
+        'here is config\n```json\n{"name": "run_shell"}\n```')
+    assert calls == []
+    assert "run_shell" in prose

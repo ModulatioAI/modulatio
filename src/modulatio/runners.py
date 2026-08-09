@@ -2120,16 +2120,57 @@ def _build_codex_chat_runner(
     return run
 
 
+def _render_transcript(messages: "list[dict]") -> str:
+    """The conversation so far as plain text, for a seat invoked fresh each
+    turn and holding no state between calls.
+
+    System messages are excluded — they ride the invocation's own system
+    channel. A tool result is labelled with the call it answers so a seat that
+    asked for several in one turn can tell the replies apart.
+    """
+    out: "list[str]" = []
+    for m in messages:
+        role = m.get("role")
+        if role == "system":
+            continue
+        content = m.get("content") or ""
+        if role == "tool":
+            out.append(f"[result of {m.get('tool_call_id') or 'a tool call'}]\n{content}")
+        elif role == "assistant":
+            requested = ""
+            for c in m.get("tool_calls") or ():
+                fn = c.get("function") or {} if isinstance(c, dict) else {}
+                requested += (
+                    f"\n[{c.get('id')}: you asked to run {fn.get('name')} "
+                    f"with {fn.get('arguments')}]"
+                )
+            if content or requested:
+                out.append(f"{content}{requested}".strip())
+        else:
+            out.append(str(content))
+    return "\n\n".join(p for p in out if p)
+
+
 def _build_claude_cli_chat_runner(
     litellm_model: str, model: str,
 ) -> "Callable[..., ChatResponse]":
     """Tool-loop runner for Clay (claude CLI subscription) avatar/coding path.
 
-    Clay runs Claude's own tool-loop internally — Modulatio doesn't translate
-    tools. The runner accepts the chat-runner protocol (messages/tools) and
-    returns a ``ChatResponse`` with the final artifact text as content and an
-    empty tool_calls tuple. The seat context (workspace + widen grants) is
-    read per-call to support future session-resume converse.
+    Two postures, decided per call by the seat's contextvar.
+
+    A CONFINED kickoff seat runs the binary's own tool loop inside the
+    subprocess, restricted to tools that make a file and cannot start a
+    process. It produces one artifact and never needs to widen anything.
+
+    The INTERACTIVE seat runs with no tools of its own and acts through the
+    engine's tool loop instead, which is what lets its actions be checked
+    against the operator's typed grants before they happen. A native tool
+    cannot be checked that way: it runs under ``bypassPermissions``, so no
+    prompt fires, and the mounts were fixed before the turn began — so a
+    folder granted for READING arrived writable, a native shell could execute
+    inside it, and a path widen conferred code execution nobody approved.
+    Going through the engine's loop also means a newly needed path can be
+    asked for, granted, and used without restarting the conversation.
     """
     # Strip the LiteLLM provider prefix ("anthropic/claude-opus-4-8" →
     # "claude-opus-4-8") — the claude CLI --model flag wants the bare name.
@@ -2148,26 +2189,50 @@ def _build_claude_cli_chat_runner(
                 "(set MODULATIO_CLAUDE_BIN). Run `claude` to sign in."
             )
         system = "\n\n".join(m.get("content") or "" for m in messages if m.get("role") == "system")
-        user = "\n\n".join(m.get("content") or "" for m in messages if m.get("role") == "user")
         ws, add_dirs, ro_dirs = claude_cli.current_seat_context()
         # A KICKOFF producer/QC chat-loop seat is fail-closed confined (same as the
         # single-shot path); the interactive Leader's chat loop is not. The
         # orchestrator sets the lane via the seat contextvar (default unconfined).
         confined = claude_cli.current_confined_mode()
-        text = claude_cli.run_claude(
-            claude_bin=claude_bin, model=bare_model, prompt=user,
-            system=system or None, workspace=ws, add_dirs=add_dirs,
-            read_only_dirs=ro_dirs,
-            allowed_tools=claude_cli._ALLOWED_CONFINED_TOOLS if confined else (),
-            safe_mode=confined,
-            disallowed_tools=claude_cli._DISALLOWED_TOOLS if confined else (),
-        )
-        return ChatResponse(content=text, tool_calls=())
+        if confined:
+            user = "\n\n".join(
+                m.get("content") or "" for m in messages if m.get("role") == "user")
+            text = claude_cli.run_claude(
+                claude_bin=claude_bin, model=bare_model, prompt=user,
+                system=system or None, workspace=ws, add_dirs=add_dirs,
+                read_only_dirs=ro_dirs,
+                allowed_tools=claude_cli._ALLOWED_CONFINED_TOOLS,
+                safe_mode=True,
+                disallowed_tools=claude_cli._DISALLOWED_TOOLS,
+            )
+            return ChatResponse(content=text, tool_calls=())
 
-    # The tool loop runs NATIVELY inside the subprocess — the outer dispatch
-    # loop sees zero tool_calls, so no per-call budget hook can fire here.
-    # Callers enforcing a durable tool budget read this marker and refuse or
-    # fall back rather than run an unbudgeted internal loop.
+        # Interactive: every turn of the conversation so far is replayed,
+        # because the binary is invoked fresh each time and keeps nothing
+        # between calls. Dropping the assistant turns and tool results — as a
+        # user-only flattening does — would hide from the seat both what it
+        # already asked for and what came back, so it would ask again.
+        protocol = claude_cli.render_tool_protocol(tools)
+        text = claude_cli.run_claude(
+            claude_bin=claude_bin, model=bare_model,
+            prompt=_render_transcript(messages),
+            system="\n\n".join(p for p in (system, protocol) if p) or None,
+            workspace=ws, add_dirs=add_dirs, read_only_dirs=ro_dirs,
+            allowed_tools=claude_cli.TOOLS_NONE,
+            safe_mode=True,
+            disallowed_tools=claude_cli._DISALLOWED_TOOLS,
+        )
+        prose, requested = claude_cli.parse_tool_protocol(text)
+        calls = tuple(
+            ToolCall(id=f"clay-{i}", name=c["name"], args=c["args"])
+            for i, c in enumerate(requested)
+        )
+        return ChatResponse(content=prose, tool_calls=calls)
+
+    # Only the CONFINED lane runs its tool loop inside the subprocess, and only
+    # that lane is asked: the marker is read on the budgeted producer path,
+    # which confines unconditionally. The interactive lane goes through the
+    # engine's loop, where each call meets the budget seam like any other.
     run.runs_native_tool_loop = True  # type: ignore[attr-defined]
     # One Clay runner serves BOTH seat postures — the per-call confined
     # contextvar decides which — so it registers both backends; the

@@ -48,9 +48,69 @@ def test_clay_chat_runner_returns_chatresponse(monkeypatch):
                             {"role": "user", "content": "build the thing"}], tools=[])
     assert resp.content == "ARTIFACT BODY"
     assert resp.tool_calls == ()
-    # HARNESS lane (interactive Leader converse / solo coding): NO confinement —
-    # orchestrating + delegating + running code IS the job ("yes in a kickoff, no
-    # in the harness"). No allowlist, no safe-mode, no disallow.
-    assert captured.get("disallowed_tools", ()) == ()
-    assert captured.get("allowed_tools", ()) == ()
-    assert captured.get("safe_mode", False) is False
+    # The interactive seat carries NO tools of its own: it acts through the
+    # engine's tool loop, where each request meets the operator's typed grants
+    # before it happens. A native tool cannot — it runs under bypassPermissions
+    # against mounts fixed before the turn, so a folder granted for reading
+    # arrives writable and a shell inside it executes there.
+    assert captured.get("allowed_tools") == runners.claude_cli.TOOLS_NONE
+    assert captured.get("safe_mode") is True
+    assert captured.get("disallowed_tools") == runners.claude_cli._DISALLOWED_TOOLS
+
+
+def test_interactive_seat_asks_the_engine_to_act_instead_of_acting(monkeypatch):
+    """The seat's request comes back as a tool call for the engine to dispatch,
+    which is what puts it in front of the operator's typed grants. Acting
+    inside the subprocess reaches nothing that can check it."""
+    monkeypatch.setattr(model_presets, "load_presets", lambda: {"clay": dict(_CLAY_PRESET)})
+    monkeypatch.setattr(oauth_helpers, "find_claude_binary", lambda: "/x/claude")
+    captured = {}
+    monkeypatch.setattr(
+        runners.claude_cli, "run_claude",
+        lambda **kw: (captured.update(kw) or
+                      'reading it now\n```modulatio-tool\n'
+                      '{"name": "read_file", "arguments": {"path": "/outside/notes.md"}}\n```'))
+
+    runner = runners.litellm_chat_runner("clay")
+    resp = runner(
+        messages=[{"role": "user", "content": "read the notes"}],
+        tools=[{"type": "function", "function": {
+            "name": "read_file", "description": "read a file",
+            "parameters": {"type": "object"}}}],
+    )
+
+    assert [c.name for c in resp.tool_calls] == ["read_file"]
+    assert resp.tool_calls[0].args == {"path": "/outside/notes.md"}
+    # The prose survives; the request is not left in it twice.
+    assert resp.content == "reading it now"
+    assert "modulatio-tool" not in resp.content
+    # The seat is told what it may ask for.
+    assert "read_file" in (captured.get("system") or "")
+
+
+def test_the_interactive_seat_is_shown_what_it_already_asked_and_got(monkeypatch):
+    """The binary is invoked fresh each turn and keeps nothing between calls,
+    so a flattening that drops the assistant turns and tool results hides from
+    the seat both what it asked for and what came back — and it asks again."""
+    monkeypatch.setattr(model_presets, "load_presets", lambda: {"clay": dict(_CLAY_PRESET)})
+    monkeypatch.setattr(oauth_helpers, "find_claude_binary", lambda: "/x/claude")
+    captured = {}
+    monkeypatch.setattr(runners.claude_cli, "run_claude",
+                        lambda **kw: (captured.update(kw) or "done"))
+
+    runners.litellm_chat_runner("clay")(
+        messages=[
+            {"role": "user", "content": "read the notes"},
+            {"role": "assistant", "content": "reading", "tool_calls": [
+                {"id": "clay-0", "type": "function",
+                 "function": {"name": "read_file", "arguments": '{"path": "n.md"}'}}]},
+            {"role": "tool", "tool_call_id": "clay-0", "content": "THE FILE BODY"},
+        ],
+        tools=[],
+    )
+
+    prompt = captured["prompt"]
+    assert "THE FILE BODY" in prompt
+    assert "read_file" in prompt
+    # The result is tied to the call it answers, so several in one turn stay apart.
+    assert "clay-0" in prompt
