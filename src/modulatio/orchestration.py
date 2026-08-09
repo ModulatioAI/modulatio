@@ -14067,6 +14067,40 @@ class Orchestrator:
         # THAT the build already measures. What this adds is the cause — a
         # failed build names the missing module, not the task that wrote it
         # somewhere the delivery set will never reach.
+        # A suite can pass without touching the product: tests asserting
+        # against values written into themselves go green and demonstrate
+        # nothing. Read from the source, so it costs no run and cannot be
+        # answered by the suite's own exit code.
+        try:
+            from modulatio import assembly_validate as _av
+            unbound = _av.unbound_test_units(
+                [t.output_path for t in tasks
+                 if t.status == TaskStatus.COMPLETED and t.output_path],
+                self._shared_artifacts_root(),
+            )
+        except Exception:  # noqa: BLE001 — a reading never fails a verdict
+            unbound = []
+        if unbound:
+            named_tests = "\n".join(f"  - {rel}" for rel in unbound)
+            artifact_blocks.append(
+                "### Test units that import nothing this goal ships\n\n"
+                + named_tests
+                + "\n\nThese pass without exercising the deliverable."
+            )
+            summary.recommendations.append({
+                "goal_id": goal.id,
+                "concern": (
+                    f"{len(unbound)} test unit(s) import nothing this goal "
+                    f"ships, so passing demonstrates nothing about it:\n"
+                    f"{named_tests}"
+                ),
+                "suggestion": (
+                    "Have each test import the module it ships beside, or "
+                    "drop it — a green suite that never reached the product "
+                    "is not evidence the product works."
+                ),
+            })
+
         undeclared = self._undeclared_deliverable_writes(tasks)
         if undeclared:
             named = "\n".join(f"  - {rel}  (written by {tid})"

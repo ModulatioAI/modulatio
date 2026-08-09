@@ -537,3 +537,60 @@ def test_bundle_falls_back_to_output_file_when_no_output_path(tmp_path):
     ok, reason, oracle = av.validate_media_assembly(rec, _task(), tmp_path)
     assert ok, reason
     assert oracle == "stdlib-zipfile-bytes"
+
+
+def test_a_test_unit_that_imports_nothing_shipped_is_named(tmp_path):
+    """A suite can pass without touching the product: tests asserting against
+    values written into themselves go green and demonstrate nothing."""
+    from modulatio.assembly_validate import unbound_test_units
+
+    (tmp_path / "apppkg").mkdir()
+    (tmp_path / "apppkg" / "__init__.py").write_text("")
+    (tmp_path / "apppkg" / "store.py").write_text("def load(): return []\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_selfmade.py").write_text(
+        "def test_x():\n    data = [1, 2]\n    assert sum(data) == 3\n")
+    (tmp_path / "tests" / "test_stdlib.py").write_text(
+        "import json\ndef test_x(): assert json.dumps({}) == '{}'\n")
+
+    units = ["apppkg/__init__.py", "apppkg/store.py",
+             "tests/test_selfmade.py", "tests/test_stdlib.py"]
+    assert unbound_test_units(units, tmp_path) == [
+        "tests/test_selfmade.py", "tests/test_stdlib.py"]
+
+
+def test_every_way_of_reaching_shipped_code_counts_as_bound(tmp_path):
+    """Naming the module, the package it lives in, or reaching it relatively
+    all bind — the check catches a suite that went somewhere else, it does not
+    adjudicate how a name arrives."""
+    from modulatio.assembly_validate import unbound_test_units
+
+    (tmp_path / "apppkg").mkdir()
+    (tmp_path / "apppkg" / "__init__.py").write_text("")
+    (tmp_path / "apppkg" / "store.py").write_text("def load(): return []\n")
+    (tmp_path / "tests").mkdir()
+    for rel, src in {
+        "tests/test_module.py":   "from apppkg.store import load\ndef test_x(): load()\n",
+        "tests/test_package.py":  "import apppkg\ndef test_x(): assert apppkg\n",
+        "tests/test_relative.py": "from ..apppkg import store\ndef test_x(): assert store\n",
+    }.items():
+        (tmp_path / rel).write_text(src)
+
+    units = ["apppkg/__init__.py", "apppkg/store.py",
+             "tests/test_module.py", "tests/test_package.py",
+             "tests/test_relative.py"]
+    assert unbound_test_units(units, tmp_path) == []
+
+
+def test_an_unreadable_test_unit_is_not_a_finding(tmp_path):
+    """Ambiguity is never a finding here: a unit that does not parse could be
+    reaching the shipped code in a way this cannot see."""
+    from modulatio.assembly_validate import unbound_test_units
+
+    (tmp_path / "apppkg.py").write_text("def load(): return []\n")
+    (tmp_path / "test_broken.py").write_text("def test_x(:\n")
+    assert unbound_test_units(["apppkg.py", "test_broken.py"], tmp_path) == []
+
+    # Nothing shipped to bind TO — a goal of pure tests reports nothing.
+    (tmp_path / "test_alone.py").write_text("def test_x(): assert True\n")
+    assert unbound_test_units(["test_alone.py"], tmp_path) == []

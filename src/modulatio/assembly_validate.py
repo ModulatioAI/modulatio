@@ -35,6 +35,7 @@ oracles (``zipfile``/``ast``) are ``cost_class`` free and never authorize.
 from __future__ import annotations
 
 import ast
+import re
 import zipfile
 import logging
 from dataclasses import dataclass
@@ -544,3 +545,66 @@ def validate_media_assembly(
     if oracle is None:
         return run_oracle(local)
     return run_oracle(oracle, authorize=authorize, fallback=local)
+
+
+#: A unit whose name marks it as a test rather than a shipped module.
+_TEST_UNIT = re.compile(r"(^|/)(test_[^/]+|[^/]+_test)\.py$")
+
+
+def unbound_test_units(
+    unit_paths: "list[str]", artifacts_root: Path,
+) -> "list[str]":
+    """Test units that import nothing the deliverable ships.
+
+    A suite can pass without touching the product: tests that assert against
+    values written into themselves, or that exercise the standard library
+    beside the module they are named for, go green and demonstrate nothing.
+    A test that never names the shipped code — directly, through the package,
+    or by a relative import within it — is not testing it, and that is
+    readable from the source without running anything.
+
+    Ambiguity is never a finding, matching the rest of this module: a unit
+    that does not parse, one reaching the shipped names through ``import *``,
+    and one resolving them dynamically all read as bound. The check is meant
+    to catch a suite that plainly went somewhere else, not to adjudicate every
+    way a name can arrive.
+    """
+    rels = [_norm_unit(u) for u in unit_paths]
+    py_units = {r for r in rels if r.endswith(".py")}
+    shipped = py_units - {r for r in py_units if _TEST_UNIT.search(r)}
+    if not shipped:
+        return []                      # nothing to be bound TO
+    local = _local_namespaces(shipped)
+    # Every dotted name that reaches shipped code: the package roots plus each
+    # module's own dotted path, so `from apppkg.store import x` counts and so
+    # does a bare `import store` beside it.
+    names = set(local) | {r[:-3].replace("/", ".") for r in shipped}
+    names |= {r.split("/")[-1][:-3] for r in shipped}
+
+    unbound: list[str] = []
+    for rel in sorted(r for r in py_units if _TEST_UNIT.search(r)):
+        try:
+            source = (Path(artifacts_root) / rel).read_text(
+                encoding="utf-8", errors="replace")
+            tree = ast.parse(source, filename=rel)
+        except (OSError, SyntaxError):
+            continue                   # unreadable or unparseable == ambiguous
+        bound = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                bound = any(
+                    a.name in names or a.name.split(".")[0] in local
+                    for a in node.names
+                )
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:         # relative — lands inside the deliverable
+                    bound = True
+                elif node.module:
+                    bound = (node.module in names
+                             or node.module.split(".")[0] in local
+                             or any(a.name in names for a in node.names))
+            if bound:
+                break
+        if not bound:
+            unbound.append(rel)
+    return unbound
