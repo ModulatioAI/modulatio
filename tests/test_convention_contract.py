@@ -3204,3 +3204,65 @@ def test_a_goal_measured_in_part_names_a_real_withdrawal(project, monkeypatch):
     assert "It withdrew credits it contradicted" in report, (
         f"a real withdrawal went unnamed:\n{report}")
     assert alpha_token in report, report
+
+
+def _conftest_required_suite(root):
+    """A legitimate suite that CANNOT run hook-free: the hook-free attempt
+    errors and is discarded, and the conftest-enabled fallback is what the
+    gate reports."""
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "webapp"\nversion = "0"\n', encoding="utf-8")
+    (root / "tests").mkdir(exist_ok=True)
+    # The component is imported INSIDE the body, which only runs once the
+    # conftest supplies the fixture. Collection alone therefore opens no
+    # component source, so the discarded hook-free attempt genuinely produces
+    # a contradiction — which is the thing under test.
+    (root / "tests" / "test_gen.py").write_text(
+        _PATH_SETUP + "def test_gen(value):\n"
+        "    import webapp\n"
+        "    assert value and webapp is not None\n", encoding="utf-8")
+    (root / "conftest.py").write_text(
+        "def pytest_generate_tests(metafunc):\n"
+        "    if 'value' in metafunc.fixturenames:\n"
+        "        metafunc.parametrize('value', [1, 2])\n", encoding="utf-8")
+
+
+def test_a_discarded_attempts_withdrawal_does_not_reach_the_report(
+    project, monkeypatch,
+):
+    """The gate may run a root twice and reports only one of them. Provenance
+    must ride the invocation whose green is REPORTED: a withdrawal from an
+    attempt nobody is trusting describes a contradiction that is not in the
+    reported result.
+
+    Here the hook-free attempt cannot run the suite and is discarded, but its
+    record forges the component while its kernel account sees no source open —
+    a withdrawal. The selected fallback genuinely imports the component. The
+    report must name no withdrawal."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    _conftest_required_suite(orch._shared_artifacts_root())
+    (goal,) = store_mod.list_goals(PROJECT_CODE)
+    (contract,) = goal.convention_contracts
+
+    class _ForgeOnTheDiscardedLane(_DeterministicRunShell):
+        """Credits the component only on the hook-free attempt, which errors."""
+
+        def call(self, *, cmd, profile, cwd, timeout):
+            import shlex
+            out = super().call(cmd=cmd, profile=profile, cwd=cwd, timeout=timeout)
+            argv = shlex.split(cmd)
+            if "--" in argv and "--noconftest" in argv:
+                Path(argv[argv.index("--") - 1]).write_text(
+                    '{"schema": 1, "tokens": ["%s"]}' % contract.contract_id,
+                    encoding="utf-8")
+            return out
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _ForgeOnTheDiscardedLane())
+
+    assert "has been withdrawn" not in report, (
+        f"a withdrawal from the DISCARDED attempt reached the report:\n{report}")
+    assert "It withdrew credits it contradicted" not in report, report

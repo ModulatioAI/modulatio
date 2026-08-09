@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from typing import NamedTuple
 from typing import Any, Callable, Protocol
 from uuid import uuid4
 
@@ -2606,6 +2607,27 @@ def _run():
 
 sys.exit(_run())
 """
+
+
+class KernelRunEvidence(NamedTuple):
+    """What the kernel established about ONE pytest invocation.
+
+    The gate may run a root twice — hook-free, then with the deliverable's own
+    conftest when the first cannot run the suite — and reports only one of
+    them. Evidence must ride the invocation whose green is reported: a
+    withdrawal from an attempt nobody is trusting describes a contradiction
+    that is not in the reported result, and an unchecked reason from a
+    discarded attempt downgrades a run that was measured. Returning this
+    instead of writing to goal-wide state keeps the choice with the caller
+    that makes it.
+    """
+
+    checked: "frozenset" = frozenset()
+    unchecked: "tuple" = ()
+    withdrawn: "frozenset" = frozenset()
+
+
+_NO_KERNEL_EVIDENCE = KernelRunEvidence()
 
 
 def _witness_paths(declared_origins: dict, root: "Path") -> "dict[str, set]":
@@ -13698,17 +13720,19 @@ class Orchestrator:
                     # before a single credit is withdrawn, and the report says
                     # so rather than describing a check that did not run.
                     refuted = set()
+                    run_checked: "set" = set()
+                    run_unchecked: "list[str]" = []
                     # A token with no source to watch cannot be refuted, so it
                     # must be disclosed rather than counted as checked.
                     blind = sorted(t for t, paths in watched.items() if not paths)
                     if blind:
-                        kernel_unchecked.append(
+                        run_unchecked.append(
                             "no source file to observe for " + ", ".join(blind[:3]))
                     if not stripped.complete:
-                        kernel_unchecked.append(
+                        run_unchecked.append(
                             stripped.reason or "cached bytecode may survive")
                     elif seen_open.unmeasured is not None:
-                        kernel_unchecked.append(seen_open.unmeasured)
+                        run_unchecked.append(seen_open.unmeasured)
                     else:
                         opened = seen_open.opened
                         # Opening ANY of a component's sources shows the run
@@ -13723,12 +13747,16 @@ class Orchestrator:
                         # removal of a credit that may never have been made —
                         # silence can refute an assertion, never manufacture
                         # one to then take away.
-                        kernel_checked.append(str(root))
+                        # COVERAGE, not readiness. An observer that opened
+                        # successfully over a root with nothing observable has
+                        # measured nothing, and counting it as checked lets a
+                        # goal claim coverage no token received.
+                        run_checked = {t for t, srcs in watched.items() if srcs}
                 except (RuntimeError, ValueError, OSError) as exc:
                     _logger.warning("pytest gate could not run: %s", exc)
                     if obs_path is not None:
                         obs_path.unlink(missing_ok=True)
-                    return None, f"gate could not run in {root}: {exc}", False, set()
+                    return None, f"gate could not run in {root}: {exc}", False, set(), _NO_KERNEL_EVIDENCE
                 try:
                     # Only components OBSERVABLE in this root may be
                     # credited from this root's run. A declaration belonging to
@@ -13747,16 +13775,16 @@ class Orchestrator:
                         obs_path, {t for t, srcs in watched.items() if srcs})
                     # NOW the two facts can meet: a withdrawal is a credit the
                     # record asserted AND the kernel contradicted.
-                    kernel_withdrew.extend(sorted(finally_seen & refuted))
+                    run_withdrawn = finally_seen & refuted
                 finally:
                     obs_path.unlink(missing_ok=True)
                 head = result.split("\n", 1)[0]
                 try:
                     code = int(head.removeprefix("exit_code:").strip())
                 except ValueError:
-                    return None, f"unparseable shell result in {root}", False, set()
+                    return None, f"unparseable shell result in {root}", False, set(), _NO_KERNEL_EVIDENCE
                 if code == -1 and "[TIMEOUT" not in result and "[INFO]" in result:
-                    return None, "pytest is not installed on this host", False, set()
+                    return None, "pytest is not installed on this host", False, set(), _NO_KERNEL_EVIDENCE
                 # The interpreter reports a missing runner on its own channel: the
                 # command is found and starts, then exits non-zero having imported
                 # nothing. Read as a pytest outcome that would be a suite failing,
@@ -13764,12 +13792,15 @@ class Orchestrator:
                 # it — the one thing this gate must never do, since it decides
                 # whether work ships.
                 if _NO_PYTEST_RE.search(result):
-                    return None, "pytest is not installed on this host", False, set()
+                    return None, "pytest is not installed on this host", False, set(), _NO_KERNEL_EVIDENCE
                 # A credit the kernel contradicts is withdrawn. Only refutation
                 # travels this way: the kernel reports that a file was opened,
                 # never that its contents ran, so an open cannot ADD a credit
                 # the record did not make.
-                return code, result, finalised, finally_seen - refuted
+                return (code, result, finalised, finally_seen - refuted,
+                        KernelRunEvidence(frozenset(run_checked),
+                                          tuple(run_unchecked),
+                                          frozenset(run_withdrawn)))
 
             # A real assertion/test FAILURE ("N failed") vs a setup/collection
             # ERROR ("N error"): a failure surfacing HOOK-FREE is authoritative RED
@@ -13819,6 +13850,12 @@ class Orchestrator:
             #: withdrawing nothing — so the two are counted apart and the
             #: withdrawal set is never used as a proxy for having measured.
             kernel_checked: "list[str]" = []
+
+            def _merge_kernel(evidence: "KernelRunEvidence") -> None:
+                """Fold in ONE invocation's provenance — the selected one."""
+                kernel_checked.extend(sorted(evidence.checked))
+                kernel_unchecked.extend(evidence.unchecked)
+                kernel_withdrew.extend(sorted(evidence.withdrawn))
             for repo_root in roots:
                 # Engine-selected explicit test files + neutralized addopts
                 #: the suite cannot steer collection via
@@ -13842,7 +13879,7 @@ class Orchestrator:
                 # stripped, a test the producer tried to hide/deselect/xfail RUNS
                 # and its failure surfaces — the engine cannot be tricked by code
                 # it did not run.
-                code, res, finalised, hookfree_seen = _run_pytest(
+                code, res, finalised, hookfree_seen, hookfree_kernel = _run_pytest(
                     repo_root, rel, noconftest=True)
                 if code is None:
                     return TestEvidence.UNAVAILABLE, res  # UNAVAILABLE (tool refusal / no pytest)
@@ -13858,6 +13895,7 @@ class Orchestrator:
                     # This invocation's green is the one being reported, so its
                     # observation is the evidence for this root.
                     observed_imports |= hookfree_seen
+                    _merge_kernel(hookfree_kernel)
                     reports.append(
                         f"engine-run pytest (hook-free, cwd: {repo_root}) — "
                         + _snip(res))
@@ -13888,7 +13926,7 @@ class Orchestrator:
                 # hook-free attempt above errored, so its observation describes
                 # a run nobody is trusting and is discarded — this one is the
                 # evidence, advisory label and all.
-                code_cf, res_cf, finalised_cf, advisory_seen = _run_pytest(
+                code_cf, res_cf, finalised_cf, advisory_seen, advisory_kernel = _run_pytest(
                     repo_root, rel, noconftest=False)
                 if code_cf is None:
                     return TestEvidence.UNAVAILABLE, res_cf
@@ -13898,6 +13936,10 @@ class Orchestrator:
                     # is the invocation whose green would be REPORTED.
                     return TestEvidence.HARD_FAILURE, _unfinalised_report(repo_root, res_cf)
                 observed_imports |= advisory_seen
+                # The hook-free attempt above errored, so ITS provenance
+                # describes a run nobody is trusting and is dropped with its
+                # credits.
+                _merge_kernel(advisory_kernel)
                 advisory = True
                 all_green = all_green and code_cf == 0
                 reports.append(
