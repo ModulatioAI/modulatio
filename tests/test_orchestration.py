@@ -6421,7 +6421,7 @@ def test_leader_verify_writes_transcript_sidecar(
     project: Project, tmp_path, monkeypatch
 ):
     """Leader's tool calls write to ``<run>/tool_calls/leader_<goal_id>.jsonl``
-    — the RUN dir, NOT the model-writable ``artifacts/`` tree (cadre R1 H3),
+    — the RUN dir, NOT the model-writable ``artifacts/`` tree,
     and a distinct namespace from drafter/QC transcripts."""
     from modulatio import skills as skills_mod
     from modulatio import tools as tools_mod

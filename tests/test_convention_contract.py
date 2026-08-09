@@ -1182,7 +1182,7 @@ def test_the_observer_command_runs_through_the_shipping_runner(
     orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
     orch.kickoff("build the webapp package")
     tasks = store_mod.list_tasks(PROJECT_CODE)
-    _gate_suite(orch._shared_artifacts_root(), shape="import")
+    _gate_suite(orch._shared_artifacts_root(), shape="none")
 
     # Which branch the runner took is OBSERVED, not assumed: the confining
     # wrapper is what the command is actually handed to.
@@ -1354,6 +1354,16 @@ class _ObservationShell(_DeterministicRunShell):
         self.out_paths.append(out)
         if self.payload is not None:
             Path(out).write_text(self.payload, encoding="utf-8")
+            # A record crediting a load stands in for a run that PERFORMED
+            # one, and a load cannot happen without opening the source. The
+            # engine reads that open from the kernel, so a double that skipped
+            # it would present a state production cannot reach — the record
+            # would be refuted for a reason the shape under test is not about.
+            for source in Path(cwd).rglob("*.py"):
+                try:
+                    source.read_bytes()
+                except OSError:
+                    continue
         return "exit_code: 0\n1 passed in 0.01s\n"
 
 
@@ -1897,7 +1907,7 @@ def test_a_no_origin_goal_runs_pytest_through_the_engine_wrapper(
     pytest_cmds = [c for c in runner.cmds if "pytest" in c]
     assert pytest_cmds, runner.cmds
     for cmd in pytest_cmds:
-        assert cmd.startswith("python3 -I -c "), cmd
+        assert cmd.startswith("python3 -I -B -c "), cmd
         assert not cmd.startswith("pytest "), cmd
 
 
@@ -2751,7 +2761,7 @@ def test_the_classification_tier_runs_where_the_host_cannot_confine(project, mon
     orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
     orch.kickoff("build the webapp package")
     tasks = store_mod.list_tasks(PROJECT_CODE)
-    _gate_suite(orch._shared_artifacts_root(), shape="import")
+    _gate_suite(orch._shared_artifacts_root(), shape="none")
     (goal,) = store_mod.list_goals(PROJECT_CODE)
     (contract,) = goal.convention_contracts
     contract.import_name = "not_what_was_sealed"
@@ -2801,3 +2811,41 @@ def test_the_simulated_tier_never_asks_the_host(monkeypatch):
         pytest.fail(f"the simulated tier consulted the host: {exc}")
 
     assert sandbox.enforcement_state() is sandbox.EnforcementState.SANDBOXED_FULL
+
+
+def test_a_forged_import_credit_is_withdrawn_by_the_kernel(project, monkeypatch):
+    """The import observation is written by the interpreter running the code
+    under judgement, so that code can credit itself a load it never performed.
+    A source file the kernel never saw OPENED was certainly never imported,
+    whatever the record claims — and the kernel is the one party to the run
+    the judged code cannot write to.
+
+    A green suite that never touches the shipped component, plus a forged
+    credit for it, must still be reported as not having loaded it."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    root = orch._shared_artifacts_root()
+    _gate_suite(root, shape="none")            # green, and imports nothing shipped
+    (goal,) = store_mod.list_goals(PROJECT_CODE)
+    (contract,) = goal.convention_contracts
+
+    class _ForgeImportCredit(_DeterministicRunShell):
+        """Stamps a load the suite never performed onto the observation."""
+
+        def call(self, *, cmd, profile, cwd, timeout):
+            import shlex
+            out = super().call(cmd=cmd, profile=profile, cwd=cwd, timeout=timeout)
+            argv = shlex.split(cmd)
+            if "--" in argv:
+                Path(argv[argv.index("--") - 1]).write_text(
+                    '{"schema": 1, "tokens": ["%s"]}' % contract.contract_id,
+                    encoding="utf-8")
+            return out
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _ForgeImportCredit())
+
+    assert "did not report loading" in report, (
+        f"the forged credit stood — state={state}\n{report}")

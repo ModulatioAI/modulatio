@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 from uuid import uuid4
 
+from modulatio import file_witness as _file_witness
 from modulatio import dispatch, job_template_library, job_templates, kickoff_history, lessons, qc_history, qc_notes, recoveries, research, roster, skill_git, skills, standards, standards_proposals, store, tools
 from modulatio.job_templates import DeliverableSpec, JobTemplate
 from modulatio import context_budget as _ctx_budget_module
@@ -2605,6 +2606,44 @@ def _run():
 
 sys.exit(_run())
 """
+
+
+def _witness_paths(declared_origins: dict, root: "Path") -> "dict[str, Path]":
+    """Contract id → the source file an import of its component must open.
+
+    A component is either a module beside the root or a package directory, and
+    only one of the two exists for any given name — a package is entered
+    through its ``__init__``, so that is the file an import opens. Names whose
+    source is not under this root belong to another root and are left out
+    rather than watched at a path that will never be opened.
+    """
+    paths: "dict[str, Path]" = {}
+    for token, origin in (declared_origins or {}).items():
+        try:
+            name, origin_root = origin
+        except (TypeError, ValueError):
+            continue
+        top = str(name).split(".")[0]
+        if not top:
+            continue
+        try:
+            base = Path(origin_root).resolve()
+            if base != root.resolve() and root.resolve() not in base.parents:
+                continue
+        except (OSError, ValueError):
+            continue
+        # The recorded root is either the component directory itself or a
+        # directory holding it, and the component is either a package or a
+        # single module — so the file an import opens is one of these. The
+        # first that exists is the one, since a name resolves to exactly one
+        # source.
+        for candidate in (base / "__init__.py",
+                          base / f"{top}.py",
+                          base / top / "__init__.py"):
+            if candidate.is_file():
+                paths[token] = candidate.resolve()
+                break
+    return paths
 
 
 class Orchestrator:
@@ -6454,7 +6493,7 @@ class Orchestrator:
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
         # Audit transcript carries verbatim tool args + results (run_shell
         # commands, http_get URLs, full responses) — 0600, per-task. NO
-        # preliminary pathname touch/chmod (cadre R2 H2): both follow a
+        # preliminary pathname touch/chmod: both follow a
         # symlink already planted at the predictable path, which let a model
         # with artifacts write-access make the trusted parent chmod an
         # OUTSIDE target to 0600. Creation + owner-only mode are established
@@ -6693,7 +6732,7 @@ class Orchestrator:
         }
         if interrupted:
             record["interrupted"] = True
-        # Owned no-follow append (cadre R2 H2): no O_CREAT-then-chmod window
+        # Owned no-follow append: no O_CREAT-then-chmod window
         # and no symlink-follow at the predictable path.
         _append_owned_jsonl(path, record)
 
@@ -9958,8 +9997,7 @@ class Orchestrator:
         slug = re.sub(r"[^A-Za-z0-9._-]", "_", f"{task_id or role}_{agent_id or role}")
         transcript_path: "Path | None" = self._scope_root() / "tool_calls" / f"seat_{slug}.jsonl"
         try:
-            # Only ensure the parent dir. NO pathname touch/chmod (cadre R3
-            # MED-2): both follow a pre-planted symlink at the predictable
+            # Only ensure the parent dir. NO pathname touch/chmod: both follow a pre-planted symlink at the predictable
             # path, which let a local/shared-fs preplant make the trusted
             # parent chmod an outside target. Creation + owner-only 0600 are
             # established atomically by _append_owned_jsonl on the first record.
@@ -10053,10 +10091,10 @@ class Orchestrator:
         the entire harness for this run — logs, reports, tickets, run state —
         when rendering its verdict (the "eyes everywhere" north-star).
 
-        EXEC stays at home (cadre R1 H2): ``run_shell``'s PRIMARY (writable /
+        EXEC stays at home: ``run_shell``'s PRIMARY (writable /
         cwd-eligible) root is the shared ARTIFACTS tree — never the whole run
         dir — so a full-profile command cannot overwrite engine-owned run
-        state. And it is SANDBOX-GATED (cadre R2 H1): this shell starts
+        state. And it is SANDBOX-GATED: this shell starts
         model-authored code automatically, so when the sandbox is not
         enforceable (no bwrap / explicit bypass / profile=off) ``run_shell``
         is OMITTED entirely rather than soft-falling to an unsandboxed child
@@ -10064,7 +10102,7 @@ class Orchestrator:
         reads. The chat loop's missing-tool filter drops it from the loadout.
 
         WRITE-class tools (``edit_file`` / ``write_artifact``) are rebuilt
-        STRICTLY against the shared artifacts tree (cadre R2 MED-3) — the
+        STRICTLY against the shared artifacts tree — the
         caller's registry binds registered read-write FOLDERS as ``edit_file``
         extra roots, and NEITHER lane may edit an operator project folder
         outside the deliverable. Registered-folder visibility stays READ-only."""
@@ -13217,8 +13255,7 @@ class Orchestrator:
 
     # ── Leader goal verification (slice #7d + auto-redo #7e) ────────────
     def _pytest_repo_roots(self, tasks: "list[Task]") -> "list[Path]":
-        """Suite roots for the goal's CODE deliverables — ENGINE-selected
-        (cadre R1 M1): derived from the code tasks' declared ``output_path``s
+        """Suite roots for the goal's CODE deliverables — ENGINE-selected: derived from the code tasks' declared ``output_path``s
         (nearest marker dir at or above each), so a producer cannot point the
         gate at a decoy tree it doesn't deliver into. The whole-tree
         shallowest-marker scan survives only as the fallback when no code
@@ -13414,7 +13451,7 @@ class Orchestrator:
         targets (defeats producer-authored ``testpaths`` decoys), one run per
         derived suite root, all must be green.
 
-        SANDBOX-MANDATORY (cadre R1 H1): unlike an operator-driven
+        SANDBOX-MANDATORY: unlike an operator-driven
         ``run_shell``, this gate starts model-authored code AUTOMATICALLY —
         it must not inherit the general soft-fall to unsandboxed execution.
         No functional bwrap, an explicit bypass, or profile=off →
@@ -13560,7 +13597,7 @@ class Orchestrator:
                 declared component origins, and is legitimately empty.
 
                 The HOOK-FREE binding pass suppresses captured output + traceback
-                and stops at the first failure (cadre R7 MED): ``run_shell`` keeps
+                and stops at the first failure: ``run_shell`` keeps
                 only the first 8 KB of stdout, and pytest's ``N failed`` summary is
                 at the END — a noisy failing test could otherwise push it past the
                 cap, hiding a real failure from the classifier below. With capture
@@ -13596,16 +13633,31 @@ class Orchestrator:
                 # Engine arguments travel as ISOLATED argv, not environment
                 # assignments: the runner execs argv directly, so a
                 # ``NAME=value`` prefix would be taken for the binary.
-                cmd = (f"{_shlex.quote(gate_python)} -I -c "
+                cmd = (f"{_shlex.quote(gate_python)} -I -B -c "
                        f"{_shlex.quote(_IMPORT_OBSERVER_BOOTSTRAP)} "
                        f"{_shlex.quote(json.dumps(declared_origins))} "
                        f"{_shlex.quote(str(obs_path))} -- {args}")
+                # The credit above is written by the interpreter running the
+                # code under judgement, so that code can credit itself an
+                # import it never performed. The kernel is the one party to
+                # the run it cannot write to: a source file that was never
+                # OPENED was certainly never imported, whatever the record
+                # says. An import satisfied from cached bytecode opens
+                # nothing, so the cache is removed first — the deliverable
+                # can otherwise supply the cache that blinds the account.
+                watched = _witness_paths(declared_origins, root)
+                _file_witness.strip_bytecode_cache(root)
                 try:
-                    result = run_shell.call(
-                        cmd=cmd,
-                        profile="full", cwd=str(root),
-                        timeout=_PYTEST_GATE_TIMEOUT_S,
-                    )
+                    with _file_witness.FileAccessWitness(watched.values()) as seen_open:
+                        result = run_shell.call(
+                            cmd=cmd,
+                            profile="full", cwd=str(root),
+                            timeout=_PYTEST_GATE_TIMEOUT_S,
+                        )
+                    refuted = set()
+                    if seen_open.unmeasured is None:
+                        never = seen_open.never_opened()
+                        refuted = {tok for tok, path in watched.items() if path in never}
                 except (RuntimeError, ValueError, OSError) as exc:
                     _logger.warning("pytest gate could not run: %s", exc)
                     if obs_path is not None:
@@ -13630,7 +13682,11 @@ class Orchestrator:
                 # whether work ships.
                 if _NO_PYTEST_RE.search(result):
                     return None, "pytest is not installed on this host", False, set()
-                return code, result, finalised, finally_seen
+                # A credit the kernel contradicts is withdrawn. Only refutation
+                # travels this way: the kernel reports that a file was opened,
+                # never that its contents ran, so an open cannot ADD a credit
+                # the record did not make.
+                return code, result, finalised, finally_seen - refuted
 
             # A real assertion/test FAILURE ("N failed") vs a setup/collection
             # ERROR ("N error"): a failure surfacing HOOK-FREE is authoritative RED
@@ -13670,7 +13726,7 @@ class Orchestrator:
             observed_imports: set = set()
             for repo_root in roots:
                 # Engine-selected explicit test files + neutralized addopts
-                # (cadre R2 MED-1): the suite cannot steer collection via
+                #: the suite cannot steer collection via
                 # testpaths / --ignore / norecursedirs / python_files. A root with
                 # a marker but NO engine-discoverable test file contributes no
                 # green evidence (handled by the any_tests check below).
@@ -13684,7 +13740,7 @@ class Orchestrator:
                 any_tests = True
                 rel = " ".join(
                     _shlex.quote(str(p.relative_to(repo_root))) for p in test_files)
-                # HOOK-FREE binding pass (cadre R6, "evidence not attestation"):
+                # HOOK-FREE binding pass:
                 # run with --noconftest so NO producer collection hook executes.
                 # This is the sound replacement for parsing a producer-controlled
                 # stdout manifest (which a conftest hook can forge): with hooks
@@ -13720,7 +13776,7 @@ class Orchestrator:
                         f"collection hooks are stripped:\n\n{_snip(res)}")
                 if "... [truncated," in res:
                     # Non-zero, no positively-identified failure, but the output
-                    # was capped (cadre R7 MED): we CANNOT tell an assertion
+                    # was capped: we CANNOT tell an assertion
                     # failure whose summary was truncated from a genuine
                     # conftest-dependency. Fail closed — never infer
                     # conftest-dependent (→ advisory green) from missing tail text.
@@ -13812,8 +13868,11 @@ class Orchestrator:
                 "deliverable's own and execute in one interpreter with the "
                 "code they judge — so a green result is evidence, never an "
                 "attestation that the run completed honestly. A FAILURE "
-                "remains binding; only success is advisory. A hard claim would "
-                "need an observer outside that interpreter."
+                "remains binding; only success is advisory. One fact here is "
+                "NOT producer-authored: a component the kernel never saw its "
+                "source file opened was not loaded, whatever the run reported, "
+                "and such a credit has been withdrawn. That refutes a false "
+                "load; it cannot establish that a loaded file's contents ran."
             )
 
             if advisory:
@@ -13962,7 +14021,7 @@ class Orchestrator:
     )
 
     def _discover_test_files(self, root: "Path") -> "list[Path]":
-        """Test modules under ``root`` the ENGINE selects (cadre R2 MED-1) —
+        """Test modules under ``root`` the ENGINE selects —
         by fixed pattern (``test_*.py`` / ``*_test.py``), NOT by the
         producer-authored ``python_files`` / ``testpaths`` / ``norecursedirs``
         the suite could weaponize to hide its own red tests."""
@@ -13980,7 +14039,7 @@ class Orchestrator:
         """``path → (kind, sha256)`` for every collection-relevant file under
         the goal's suite roots — ``kind`` is ``"config"`` (a collection-
         control file: conftest.py or a pytest config) or ``"test"`` (a test
-        module). The greenwash bind's evidence base (cadre R1/R2 MED-2):
+        module). The greenwash bind's evidence base:
         snapshotted before a LEADER fix dispatches; at re-verify, ANY change
         to a config file (add / remove / modify) and any modify/remove of a
         snapshotted test module is tamper — only ADDED test modules are free."""
@@ -14008,7 +14067,7 @@ class Orchestrator:
         """How a leader fix altered the suite's collection surface since the
         pre-fix snapshot. A collection-control file added, removed, or
         modified is tamper (a Leader could add a ``pytest.ini`` /
-        ``conftest.py`` that deselects the failing tests — cadre R2 MED-2); a
+        ``conftest.py`` that deselects the failing tests —); a
         snapshotted TEST module modified or removed is tamper; only ADDED
         test modules are free. Empty = untouched, or no snapshot (no leader
         fix ran / a floor redo cleared it)."""
@@ -14431,7 +14490,7 @@ class Orchestrator:
                         "the test-suite evidence block)"
                     )
                 else:
-                    # Greenwash bind (cadre R1): green over a suite the
+                    # Greenwash bind: green over a suite the
                     # LEADER fix modified non-additively is not evidence.
                     tampered = self._suite_tamper_issues(goal, tasks)
                     if tampered:
@@ -15686,7 +15745,7 @@ class Orchestrator:
         """
         if self._resolve_chat_runner("leader") is None:
             return False
-        # M3 (cadre R1): a Clay-backed Leader drives NATIVE tools, not this
+        # M3: a Clay-backed Leader drives NATIVE tools, not this
         # function registry — its writable workspace is the Leader workspace
         # and the run (artifacts included) is a read-only seat grant, so it
         # has no deliverable write path. Fall back to the floor WITHOUT
@@ -15708,7 +15767,7 @@ class Orchestrator:
         # This round is a LEADER fix — the deadlock guard's stale
         # qc_authored_fix flags must not kill the next fix cycle.
         self._goal_redo_was_leader[goal.id] = True
-        # Greenwash bind (cadre R1): snapshot the suite BEFORE the Leader's
+        # Greenwash bind: snapshot the suite BEFORE the Leader's
         # hands touch the tree — a later green gate over a non-additively
         # changed suite is a measured HARD issue at re-verify.
         self._goal_suite_snapshots[goal.id] = self._suite_fingerprint(tasks)
@@ -15742,7 +15801,7 @@ class Orchestrator:
             rationale=leader_rationale,
             gate_block=(
                 # Model-authored test output is UNTRUSTED — defuse fences
-                # before it rides into the fix prompt (cadre R1 H2).
+                # before it rides into the fix prompt.
                 "TEST-SUITE EVIDENCE (engine-run pytest)\n"
                 f"```\n{gate_report.replace('```', chr(39) * 3)}\n```"
                 if gate_report
@@ -15770,7 +15829,7 @@ class Orchestrator:
             self._scope_root() / "tool_calls"
             / f"leader_fix_{goal.id.lower()}.jsonl"
         )
-        # M2 (cadre R1): lane budgets. Clamp each shell run, cap the count,
+        # M2: lane budgets. Clamp each shell run, cap the count,
         # and hold the whole session to a wall-clock deadline the chat loop
         # itself enforces (model + tool dispatch, not just shell) — a
         # prompt-injected tool loop cannot stretch one fix cycle into hours.
@@ -20033,7 +20092,7 @@ Emit the complete artifact now.
 
 
 def _append_owned_jsonl(path: Path, payload: dict) -> None:
-    """Audit-append one JSON line, refusing symlink swaps (cadre R1 H3):
+    """Audit-append one JSON line, refusing symlink swaps:
     ``O_NOFOLLOW`` open + owner-only create mode + an fstat identity check,
     so a model that unlinks or symlink-replaces the transcript mid-loop can
     neither redirect the trusted parent's append outside its lane nor loosen

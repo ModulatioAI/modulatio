@@ -436,7 +436,7 @@ def test_fix_lane_unavailable_falls_back_to_floor(project, monkeypatch):
 
 
 def test_clay_leader_falls_back_to_floor_without_consuming(project, monkeypatch):
-    """M3 (cadre R1): a Clay-backed Leader has no deliverable write path in
+    """M3: a Clay-backed Leader has no deliverable write path in
     the fix lane (native tools, run dir read-only) — floor redo runs and the
     fix lane consumes nothing."""
     monkeypatch.setenv("MODULATIO_TASK_MAX_RETRIES", "3")
@@ -522,7 +522,7 @@ def test_fix_lane_shell_budget_caps_calls_and_timeout(project, monkeypatch):
 
 
 def test_green_over_tampered_suite_clamps_to_disappointed(project, monkeypatch):
-    """MED-2 greenwash bind (cadre R1): a green gate over a suite the leader
+    """MED-2 greenwash bind: a green gate over a suite the leader
     fix modified non-additively is a measured HARD issue — the verdict
     clamps to disappointed even when the Leader says satisfied."""
     monkeypatch.setenv("MODULATIO_GOAL_MAX_RETRIES", "0")
@@ -562,7 +562,7 @@ def test_green_over_tampered_suite_clamps_to_disappointed(project, monkeypatch):
     assert summary.verdicts[-1]["verdict"] == "disappointed"
 
 
-# --------------------------------------------- cadre R1 adversarial closures
+# --------------------------------------------- adversarial closures
 
 def test_gate_unavailable_never_runs_collection_code(project_with_run, monkeypatch):
     """A non-enforceable sandbox makes the gate UNAVAILABLE and the
@@ -699,7 +699,7 @@ def test_repo_roots_derive_from_declared_output_paths(project_with_run):
     assert roots == [(root / "src").resolve()]
 
 
-# --------------------------------------------- cadre R2 (R3 round) closures
+# --------------------------------------------- (R3 round) closures
 
 def test_leader_registry_omits_run_shell_when_sandbox_unenforceable(
         project_with_run, monkeypatch):
@@ -837,7 +837,7 @@ def test_transcript_preplanted_symlink_not_chmodded(project_with_run, tmp_path):
     assert outside.read_text(encoding="utf-8") == "x\n"  # not written through
 
 
-# --------------------------------------------- cadre R3 (R4 round) closures
+# --------------------------------------------- (R4 round) closures
 
 @pytest.mark.skipif(not sandbox.is_sandbox_available(),
                     reason="bwrap required: the gate never runs unsandboxed")
@@ -885,7 +885,7 @@ def test_seat_tool_sink_preplanted_symlink_not_chmodded(
     assert outside.read_text(encoding="utf-8") == "x\n"  # not written through
 
 
-# --------------------------------------------- cadre R4 (R5 round) closures
+# --------------------------------------------- (R5 round) closures
 
 @pytest.mark.skipif(not sandbox.is_sandbox_available(),
                     reason="bwrap required: the gate never runs unsandboxed")
@@ -992,7 +992,7 @@ def test_conftest_required_suite_that_fails_is_red(project_with_run, monkeypatch
     assert state is _TE.HARD_FAILURE
 
 
-# --------------------------------------------- cadre R5 (R6 round) closure
+# --------------------------------------------- (R6 round) closure
 
 @pytest.mark.skipif(not sandbox.is_sandbox_available(),
                     reason="bwrap required: the gate never runs unsandboxed")
@@ -1021,7 +1021,7 @@ def test_conftest_hook_cannot_hide_special_char_test_path(
     assert "test_red+case.py" in report and "hook-free" in report
 
 
-# --------------------------------------------- cadre R7 (R8 round) closure
+# --------------------------------------------- (R8 round) closure
 
 @pytest.mark.skipif(not sandbox.is_sandbox_available(),
                     reason="bwrap required: the gate never runs unsandboxed")
