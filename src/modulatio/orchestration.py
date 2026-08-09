@@ -7884,6 +7884,14 @@ class Orchestrator:
                             # the model continues rather than starts over.
                             mm_model = (self.project.agent_models.get("leader")
                                         or self.project.leader_model)
+                            # The look is a completion through the metered
+                            # provider path. A seat that runs as its own binary
+                            # does not reach it, so promising the turn will
+                            # re-run would be promising something that cannot
+                            # happen — the files are named as unexamined
+                            # instead.
+                            if mm_model and _r.is_native_seat_model(mm_model):
+                                mm_model = ""
                             if not mm_model:
                                 names = ", ".join(a.name for a in loaded)
                                 reply = (
@@ -18697,7 +18705,9 @@ Reply to the operator's latest message as yourself — directly, plainly,
 usefully. Use tools as the work requires. When they ask where things stand or
 whether the deliverables are any good, pull ``team_status`` and
 ``read_deliverable`` and see for yourself before answering — don't guess or
-punt it back. Keep it conversational.
+punt it back. When they point you at a file — a screenshot, a document — load
+it with ``load_document`` and look at it yourself rather than asking them to
+describe it. Keep it conversational.
 """
 
 #: Prepended to the verify prompt ONLY on the tool-using path, where the reviewer

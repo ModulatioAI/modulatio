@@ -237,7 +237,15 @@ export function mountConsole(page, ctx) {
   // is its role is written on screen as the role word.
   api(`/${ctx.project}/config/agents`)
     .then(({ agents }) => {
-      for (const a of agents || []) if (a.id && a.name) seatNames.set(a.id, a.name);
+      for (const a of agents || []) {
+        // A name that merely repeats the seat's own id or its role carries
+        // nothing, so it counts as unnamed and the humanized fallback stands
+        // — the same rule the engine applies when it credits a seat.
+        if (!a.id || !a.name) continue;
+        const n = a.name.trim().toLowerCase();
+        if (!n || n === a.id.toLowerCase() || n === (a.role ?? "").toLowerCase()) continue;
+        seatNames.set(a.id, a.name);
+      }
     })
     .catch(() => {});   // a listing that will not load costs names, never the feed
 

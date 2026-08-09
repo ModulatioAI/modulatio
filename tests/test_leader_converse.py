@@ -752,3 +752,37 @@ def test_load_document_is_gated_as_a_read(project: Project):
     assert reqs[0].action == "read"
     assert reqs[0].request_class == "path"
     assert reqs[0].resource == "/outside/shot.png"
+
+
+def test_a_seat_that_cannot_look_says_so_instead_of_promising_a_re_run(
+        project: Project, monkeypatch):
+    """The look is a completion through the provider path. A seat that runs as
+    its own binary never reaches it, so telling the operator the turn will
+    re-run with their file attached would promise something that cannot
+    happen."""
+    from modulatio import runners as _r
+
+    orch = Orchestrator(
+        project, _runners(),
+        chat_runners={"leader": lambda **k: ChatResponse(content="x", tool_calls=())},
+        chat_runner_models={"leader": "mock-model"},
+    )
+    workspace = orch._leader_workspace()
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "shot.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+
+    monkeypatch.setattr(_r, "is_native_seat_model", lambda _m: True)
+    monkeypatch.setattr(
+        orch, "_run_multimodal_leader",
+        lambda **k: pytest.fail("a look was attempted on a seat that has none"))
+
+    def _loop(**kwargs):
+        orch._leader_converse_registry()["load_document"].call(path="shot.png")
+        return "let me look"
+
+    monkeypatch.setattr(orch, "_run_chat_loop", _loop)
+    reply = orch.converse("what's in the screenshot?")
+
+    assert "shot.png" in reply
+    assert "could not be examined" in reply
+    assert "let me look" in reply, "the seat's own words are not discarded"

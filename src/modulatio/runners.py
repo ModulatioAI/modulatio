@@ -2158,6 +2158,26 @@ def _render_transcript(messages: "list[dict]") -> str:
     return "\n\n".join(p for p in out if p)
 
 
+def is_native_seat_model(model_id: str) -> bool:
+    """True when a model resolves to a seat that runs as its own binary rather
+    than through the provider completion path.
+
+    Such a seat has no multimodal completion to dispatch, so a caller that
+    needs one must say the work cannot be done rather than attempt it.
+    """
+    from modulatio import model_presets
+
+    try:
+        presets = model_presets.load_presets()
+    except Exception:  # noqa: BLE001 — an unreadable roster is not a seat claim
+        return False
+    key = (model_id or "").split("/", 1)[-1]
+    for name, preset in (presets or {}).items():
+        if name == model_id or preset.get("model") in (model_id, key):
+            return str(preset.get("endpoint") or "") == "claude_cli"
+    return False
+
+
 def _build_claude_cli_chat_runner(
     litellm_model: str, model: str,
 ) -> "Callable[..., ChatResponse]":
