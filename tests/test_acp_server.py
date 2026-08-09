@@ -724,3 +724,42 @@ def test_acp_approved_outside_read_lands_and_returns_content(tmp_path, monkeypat
     assert cb2("read_file", {"path": str(other)}) is False
     with pytest.raises(ValueError):
         read_file(path=str(other))
+
+
+def test_a_refused_attachment_is_stated_in_the_turn(tmp_path, monkeypatch):
+    """A file that was attached and never arrived is a silent hole in the
+    request: the operator believes it was sent and the model answers as though
+    nothing was offered, with neither able to tell. One bad attachment still
+    never sinks the turn."""
+    from modulatio import config
+    from modulatio.acp import server
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    text, attachments = server._parse_prompt({"prompt": [
+        {"type": "text", "text": "review these"},
+        {"type": "resource", "path": "/nonexistent/missing.md"},
+    ]})
+
+    assert attachments == []
+    assert "review these" in text          # the turn survives
+    assert "attachment refused" in text    # and says what did not arrive
+    assert "missing.md" in text
+    assert "NOT part of this request" in text
+
+
+def test_a_loadable_attachment_still_rides_the_turn(tmp_path, monkeypatch):
+    """The refusal path must not cost a good attachment its place."""
+    from modulatio import config
+    from modulatio.acp import server
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    doc = tmp_path / "notes.md"
+    doc.write_text("real content\n")
+    monkeypatch.setattr(server, "_validate_attachment_path", lambda raw: doc)
+
+    text, attachments = server._parse_prompt({"prompt": [
+        {"type": "text", "text": "read it"},
+        {"type": "resource", "path": str(doc)},
+    ]})
+    assert len(attachments) == 1
+    assert "attachment refused" not in text

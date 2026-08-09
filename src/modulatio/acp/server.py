@@ -126,9 +126,19 @@ def _parse_prompt(params: dict) -> tuple[str, list]:
                     safe_path = _validate_attachment_path(block["path"])
                     attachments.append(
                         build_attachment(safe_path, kind=kind))
-                except Exception as exc:  # a bad attachment shouldn't sink the turn
-                    _logger.warning("acp: dropped attachment %r: %s",
+                except Exception as exc:  # one bad attachment never sinks a turn
+                    # Stated in the turn, not only in a server log the client
+                    # cannot read. A file that was attached and never arrived
+                    # is a silent hole in the request: the operator believes
+                    # it was sent and the model answers as though nothing was
+                    # offered, with neither able to tell.
+                    _logger.warning("acp: refused attachment %r: %s",
                                     block.get("path"), type(exc).__name__)
+                    text_parts.append(
+                        f"[attachment refused: {block.get('path')!r} — "
+                        f"{type(exc).__name__}: {exc}. It is NOT part of this "
+                        f"request.]"
+                    )
     return ("\n".join(t for t in text_parts if t), attachments)
 
 
