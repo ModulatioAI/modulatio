@@ -1679,3 +1679,88 @@ def test_a_build_backend_the_bundle_lacks_is_the_gates_limit(
     res2 = cp.build_wheel_phase(snap2, tmp_path / "s2")
     assert res2.status is cp.ProbeStatus.PRODUCT_FAILED
     assert res2.origin == "deliverable"
+
+
+_ECOSYSTEM_FIXTURES = {
+    "Cargo.toml": ('[package]\nname = "apppkg"\nversion = "0.1.0"\n'
+                   'edition = "2021"\n', "src/main.rs", "fn main() {}\n"),
+    "go.mod": ("module apppkg\n\ngo 1.21\n", "main.go",
+               "package main\nfunc main() {}\n"),
+    "pom.xml": ("<project><modelVersion>4.0.0</modelVersion><groupId>a</groupId>"
+                "<artifactId>apppkg</artifactId><version>1.0</version></project>\n",
+                "src/main/java/App.java", "public class App {}\n"),
+    "CMakeLists.txt": ("cmake_minimum_required(VERSION 3.10)\nproject(apppkg C)\n",
+                       "main.c", "int main(void){return 0;}\n"),
+    "package.json": ('{"name":"apppkg","version":"1.0.0"}\n', "index.js",
+                     "module.exports = 1;\n"),
+}
+
+
+@pytest.mark.parametrize("manifest", sorted(_ECOSYSTEM_FIXTURES))
+def test_each_ecosystem_is_chosen_by_the_manifest_it_ships(manifest, tmp_path):
+    """Every declared row is reachable: the manifest a tree carries selects it,
+    and the row names both verbs. A row nothing can select is a language that
+    ships unmeasured while appearing to be covered."""
+    body, extra, extra_body = _ECOSYSTEM_FIXTURES[manifest]
+    root = tmp_path / manifest.replace(".", "_")
+    (root / extra).parent.mkdir(parents=True, exist_ok=True)
+    (root / manifest).write_text(body)
+    (root / extra).write_text(extra_body)
+
+    found = cp.detect_ecosystem(root)
+    assert found is not None, manifest
+    chosen, build, test = found
+    assert chosen == manifest
+    assert build and test, manifest
+
+
+@_needs_bwrap
+@pytest.mark.parametrize("manifest", sorted(_ECOSYSTEM_FIXTURES))
+def test_a_toolchain_this_host_lacks_is_the_gates_limit(manifest, tmp_path,
+                                                        enforceable):
+    """A deliverable is never blamed for a compiler the host does not have.
+    Attributed to the product it would clamp a verdict and report working code
+    as broken, which is the one thing an unmeasurable gate must not do."""
+    body, extra, extra_body = _ECOSYSTEM_FIXTURES[manifest]
+    root = tmp_path / "art"
+    (root / extra).parent.mkdir(parents=True, exist_ok=True)
+    (root / manifest).write_text(body)
+    (root / extra).write_text(extra_body)
+
+    facts = cp.run_ecosystem_probes(
+        [manifest, extra], root, scratch_root=tmp_path / "scratch")
+    assert facts["ecosystem"] == manifest
+    # Where the toolchain IS present the row runs for real; where it is not,
+    # the shortfall belongs to the engine. Never to the deliverable.
+    if facts["status"] == "engine_unavailable":
+        assert all(p["origin"] == "engine" for p in facts["phases"]
+                   if p["status"] == "engine_unavailable")
+    else:
+        assert facts["status"] in ("ok", "product_failed")
+
+
+@_needs_bwrap
+def test_a_javascript_deliverable_builds_and_tests(tmp_path, enforceable):
+    """The contract on a second real ecosystem: a module, a suite that
+    exercises it, and a failure that belongs to the deliverable."""
+    if shutil.which("npm") is None:
+        pytest.skip("npm not installed")
+    root = tmp_path / "art"
+    root.mkdir()
+    (root / "package.json").write_text(
+        '{"name":"apppkg","version":"1.0.0","scripts":{"test":"node test.js"}}\n')
+    (root / "index.js").write_text("module.exports = (a, b) => a + b;\n")
+    (root / "test.js").write_text(
+        "const add = require('./index');\n"
+        "if (add(2, 3) !== 5) { process.exit(1); }\n"
+        "console.log('1 passing');\n")
+    units = ["package.json", "index.js", "test.js"]
+
+    facts = cp.run_ecosystem_probes(units, root, scratch_root=tmp_path / "s")
+    assert facts["status"] == "ok", facts
+    assert [p["phase"] for p in facts["phases"]] == ["build", "test"]
+
+    (root / "test.js").write_text("process.exit(1);\n")
+    failed = cp.run_ecosystem_probes(units, root, scratch_root=tmp_path / "s2")
+    assert failed["status"] == "product_failed"
+    assert failed["phases"][-1]["origin"] == "deliverable"
