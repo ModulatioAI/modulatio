@@ -3652,3 +3652,58 @@ def test_a_pdf_is_not_parsed_at_all_without_containment(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="under containment"):
         tools._pdf_text(b"%PDF-1.4\nstub\n", "probe.pdf")
+
+
+def _parser_leaving(tmp_path, monkeypatch, make_output):
+    """Drive _pdf_text with a stand-in parser phase that leaves ``make_output``
+    behind, so what the trusted parent does with a parser-controlled directory
+    is what gets tested."""
+    from modulatio import code_probes as _probes
+
+    def _phase(argv, **kw):
+        make_output(Path(argv[2]))
+        return _probes.ProbePhaseResult(
+            status=_probes.ProbeStatus.OK, phase="pdf_text", origin="engine",
+            reason="")
+
+    monkeypatch.setattr(_probes, "run_probe_phase", _phase)
+    monkeypatch.setattr(tools.shutil, "which", lambda *a, **k: "/usr/bin/pdftotext")
+    return tools._pdf_text(b"%PDF-1.4 stub", "doc.pdf")
+
+
+def test_a_parser_cannot_make_the_engine_read_a_file_outside_its_sandbox(
+        tmp_path, monkeypatch):
+    """The parser owns the directory it writes into, so the NAME the engine
+    agreed on is not a promise about what that name points at once the sandbox
+    exits. Resolving it in the host namespace hands the parser every file the
+    ENGINE can reach — the exact access containment was there to remove."""
+    sentinel = tmp_path / "secret"
+    sentinel.write_text("HOST SECRET\n")
+
+    with pytest.raises(ValueError, match="no readable output"):
+        _parser_leaving(tmp_path, monkeypatch,
+                        lambda out: out.symlink_to(sentinel))
+
+
+def test_a_parser_output_that_is_not_an_ordinary_file_is_refused(
+        tmp_path, monkeypatch):
+    """A pipe blocks a reader forever and a directory is not a document.
+    Checked on the descriptor the engine opened, not on the name."""
+    import os as _os
+
+    for make in (lambda out: _os.mkfifo(out),
+                 lambda out: out.mkdir()):
+        with pytest.raises(ValueError, match="no readable output"):
+            _parser_leaving(tmp_path, monkeypatch, make)
+
+
+def test_a_parser_flood_is_bounded_by_the_ceiling_not_by_what_it_wrote(
+        tmp_path, monkeypatch):
+    """Reading the whole file and slicing afterwards lets the parser decide how
+    much memory the parent spends. Reading stops one byte past the ceiling."""
+    text = _parser_leaving(
+        tmp_path, monkeypatch,
+        lambda out: out.write_bytes(b"A" * (tools._READ_FILE_MAX_BYTES + 500_000)))
+
+    assert text.endswith(f"[...truncated at {tools._READ_FILE_MAX_BYTES} bytes]")
+    assert len(text) <= tools._READ_FILE_MAX_BYTES + 100

@@ -46,6 +46,7 @@ import contextvars
 import html
 import ipaddress
 import os
+import stat
 import re
 import shlex
 import shutil
@@ -2082,7 +2083,15 @@ def _pdf_text(data: bytes, path: str) -> str:
                 f"read_file: {path!r} is a PDF and its text could not be "
                 f"extracted under containment ({res.reason or res.status.value})"
             )
-        raw = out.read_bytes() if out.exists() else b""
+        raw = _read_parser_output(scratch, out.name)
+        if raw is None:
+            # The parser finished but left nothing the engine will read on its
+            # own terms — a link, a pipe, a device, or somebody else's file.
+            # That is a different fact from a document with no text in it.
+            raise ValueError(
+                f"read_file: {path!r} — the extractor left no readable output "
+                f"(its result was not an ordinary file this engine owns)"
+            )
     over = len(raw) > _READ_FILE_MAX_BYTES
     text = raw[:_READ_FILE_MAX_BYTES].decode("utf-8", "replace")
     if not text.strip():
@@ -2092,6 +2101,52 @@ def _pdf_text(data: bytes, path: str) -> str:
     if over:
         text += f"\n[...truncated at {_READ_FILE_MAX_BYTES} bytes]"
     return text
+
+
+def _read_parser_output(scratch: Path, name: str) -> "bytes | None":
+    """Read the parser's output from inside the scratch it was given, without
+    letting the parser choose what gets read.
+
+    The parser owns that directory, so the NAME the engine agreed on is not a
+    promise about what the name points at when the sandbox exits. Resolving it
+    in the host namespace would let a compromised parser leave a link and have
+    the trusted parent fetch any file the ENGINE can reach -- handing back the
+    host access the containment was there to remove.
+
+    The directory is opened once and the output is opened relative to that
+    descriptor without following links, then checked on the descriptor itself
+    rather than on the name: a regular file this user owns. Reading stops one
+    byte past the ceiling, so the caller's memory is bounded by the ceiling
+    and not by whatever the parser wrote.
+    """
+    try:
+        dir_fd = os.open(scratch, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return None
+    try:
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         dir_fd=dir_fd)
+        except OSError:
+            # Absent, a link, or otherwise not openable on its own terms.
+            return None
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+                return None
+            chunks: "list[bytes]" = []
+            remaining = _READ_FILE_MAX_BYTES + 1
+            while remaining > 0:
+                chunk = os.read(fd, min(remaining, 1 << 20))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            return b"".join(chunks)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(dir_fd)
 
 
 def make_read_file(
