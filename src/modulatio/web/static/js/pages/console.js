@@ -5,7 +5,7 @@
 // telemetry rail, the composer (`/kickoff … /end` brackets are the ONLY
 // job trigger), and the fail-closed approval modal.
 
-import { api, ApiError } from "../api.js";
+import { api, ApiError, apiUpload } from "../api.js";
 import { el } from "../dom.js";
 import { subscribe } from "../events.js";
 
@@ -156,6 +156,44 @@ export function mountConsole(page, ctx) {
     placeholder: "Speak with the Leader — or bracket a job:  /kickoff …objective… /end",
     "aria-label": "Composer",
   });
+  // Files staged for the NEXT turn. The engine holds the bytes and returns a
+  // handle naming nothing, so this list carries tokens rather than anything
+  // the browser could pass off as a path.
+  const pendingUploads = [];
+  const chips = el("div", { class: "row", style: "flex-wrap:wrap;gap:6px" });
+
+  function renderChips() {
+    chips.replaceChildren(...pendingUploads.map((u, i) =>
+      el("span", { class: "soft mono", style: "font-size:12px" },
+        el("span", {}, `\u{1F4CE} ${u.name} `),
+        el("button", {
+          class: "btn", title: "Do not send this file",
+          onclick: () => { pendingUploads.splice(i, 1); renderChips(); },
+        }, "\u00d7"))));
+  }
+
+  const filePicker = el("input", {
+    type: "file", multiple: "", style: "display:none",
+    onchange: async (ev) => {
+      for (const file of ev.target.files) {
+        try {
+          const { handle, name } = await apiUpload(
+            `/${ctx.project}/converse/upload`, file);
+          pendingUploads.push({ handle, name });
+        } catch (err) {
+          // Named here and not sent: a file the operator believes went with
+          // the turn, that did not, is a hole neither side can see.
+          statusLine.textContent = `\u2717 ${file.name} not attached — ${err.message}`;
+        }
+      }
+      ev.target.value = "";
+      renderChips();
+    },
+  });
+  const btnAttach = el("button", {
+    class: "btn", title: "Attach a file to the next message",
+    onclick: () => filePicker.click(),
+  }, "\u{1F4CE} Attach");
   const btnSend = el("button", { class: "btn btn--primary", onclick: send }, "Send");
   const btnKick = el("button", {
     class: "btn", title: "Bracket what you typed as a job and kick it off",
@@ -181,7 +219,8 @@ export function mountConsole(page, ctx) {
     el("div", { class: "spread" },
       el("span", { class: "soft", style: "font-size:12.5px" },
         "Enter sends · Shift+Enter newline · /kickoff … /end starts the job"),
-      el("div", { class: "row" }, btnKick, btnStop, btnSend)),
+      el("div", { class: "row" }, btnAttach, btnKick, btnStop, btnSend)),
+    chips, filePicker,
   );
 
   // — approval modal —
@@ -627,7 +666,9 @@ export function mountConsole(page, ctx) {
 
   async function send() {
     const text = input.value.trim();
-    if (!text) return;
+    // A turn carrying only files still has something to say; requiring text
+    // would make an attached file unsendable on its own.
+    if (!text && !pendingUploads.length) return;
     input.value = "";
     const m = text.match(KICKOFF_RE);
     if (m) {
@@ -649,8 +690,12 @@ export function mountConsole(page, ctx) {
     operatorLine(text);
     statusLine.textContent = "◌ the Leader is thinking…";
     try {
+      // Handles leave the composer with the turn that claims them: each is
+      // single-use, so a retry after a failure re-attaches nothing.
+      const uploads = pendingUploads.splice(0).map((u) => u.handle);
+      renderChips();
       const { reply } = await api(`/${ctx.project}/converse`, {
-        method: "POST", body: { text },
+        method: "POST", body: { text, uploads },
       });
       leaderSpeech(reply);
     } catch (err) {

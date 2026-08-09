@@ -182,3 +182,190 @@ def test_the_agents_listing_carries_the_name_a_seat_is_shown_by(client):
     assert agents, "a seeded project lists its seats"
     for a in agents:
         assert a["id"] and a["name"], a
+
+
+def test_an_upload_handle_names_nothing_and_works_once(tmp_path, monkeypatch):
+    """A client that can name a server-side file is the one choosing what gets
+    read, so the reply is a token this store alone resolves. Claiming it twice
+    finds nothing: bytes sent in one turn cannot be replayed into a later one."""
+    import pytest
+
+    from modulatio import config, uploads
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    handle, shown = uploads.stage_upload(
+        b"body bytes", display_name="../../etc/passwd", project="WEB")
+
+    # The display name is a label, never a location.
+    assert "/" not in shown and ".." not in shown
+
+    staged, name = uploads.consume(handle, project="WEB")
+    assert staged.read_bytes() == b"body bytes"
+    assert name == shown
+    # Single use.
+    with pytest.raises(uploads.UploadRefused):
+        uploads.consume(handle, project="WEB")
+
+
+def test_a_handle_does_not_cross_into_another_project(tmp_path, monkeypatch):
+    """A token is unguessable, but a leaked one must not reach a project its
+    holder is not already working in. The refusal reads the same as an unknown
+    handle — saying which case it was confirms the other handle exists."""
+    import pytest
+
+    from modulatio import config, uploads
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    handle, _ = uploads.stage_upload(b"x", display_name="n.txt", project="WEB")
+
+    with pytest.raises(uploads.UploadRefused) as wrong:
+        uploads.consume(handle, project="OTHER")
+    with pytest.raises(uploads.UploadRefused) as unknown:
+        uploads.consume("not-a-real-handle", project="WEB")
+    assert str(wrong.value) == str(unknown.value)
+
+    # Refusing another project's claim leaves the real owner's upload intact.
+    staged, _ = uploads.consume(handle, project="WEB")
+    assert staged.read_bytes() == b"x"
+
+
+def test_an_expired_upload_is_gone_from_disk_not_just_from_the_index(
+        tmp_path, monkeypatch):
+    """Bytes nobody claimed must not sit in the staging directory waiting to
+    be. Dropping only the entry would leave the file with no owner to remove
+    it."""
+    import pytest
+
+    from modulatio import config, uploads
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    handle, _ = uploads.stage_upload(
+        b"x", display_name="n.txt", project="WEB", ttl_s=-1)
+    staged = tmp_path / "cfg" / "uploads"
+
+    with pytest.raises(uploads.UploadRefused):
+        uploads.consume(handle, project="WEB")
+    assert not [p for p in staged.glob("*") if p.is_file()]
+
+
+def test_uploads_waiting_for_one_project_are_bounded(tmp_path, monkeypatch):
+    """A size cap alone bounds nothing: a client can hold unlimited staging
+    space in pieces that each pass it."""
+    import pytest
+
+    from modulatio import config, uploads
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    for i in range(uploads.DEFAULT_MAX_PENDING):
+        uploads.stage_upload(b"x", display_name=f"{i}.txt", project="WEB")
+
+    with pytest.raises(uploads.UploadRefused) as caught:
+        uploads.stage_upload(b"x", display_name="one-too-many", project="WEB")
+    assert "already waiting" in str(caught.value)
+
+    # A different project is unaffected by another's backlog.
+    uploads.stage_upload(b"x", display_name="fine.txt", project="OTHER")
+
+
+def test_a_sent_turn_carries_the_uploaded_bytes_and_frees_them(
+        client, tmp_path, monkeypatch):
+    """The composer's bytes reach the turn through the same constructor a disk
+    load uses, so an upload meets one policy rather than a second written for
+    it. The upload's own copy does not outlive the turn that claimed it."""
+    from modulatio import config, uploads
+    from modulatio.web.routes import console as _console
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    seen = {}
+
+    class _Actor:
+        def converse(self, text, *, attachments=None):
+            seen["text"] = text
+            seen["attachments"] = attachments or []
+            return "ack"
+
+    monkeypatch.setattr(_console, "_actor", lambda *a, **k: _Actor())
+    handle, _ = uploads.stage_upload(
+        b"the uploaded body\n", display_name="notes.md", project="web")
+
+    resp = client.post("/api/web/converse",
+                       json={"text": "look at this", "uploads": [handle]})
+    assert resp.status_code == 200, resp.text
+
+    att = seen["attachments"]
+    assert [a.name for a in att] == ["notes.md"]
+    assert att[0].content == "the uploaded body\n"
+    assert att[0].sha256.startswith("sha256:")
+    # The staged upload is released; the attachment's own snapshot is not.
+    assert not [p for p in (tmp_path / "cfg" / "uploads").glob("*") if p.is_file()]
+    assert att[0].staged_path.exists()
+
+
+def test_a_turn_naming_an_unknown_upload_is_refused_not_sent_bare(
+        client, tmp_path, monkeypatch):
+    """Dropping a handle that will not resolve would send the turn without the
+    file: the operator believes it went and the model answers as though nothing
+    was offered, with neither able to tell."""
+    from modulatio import config
+    from modulatio.web.routes import console as _console
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    called = {"n": 0}
+
+    class _Actor:
+        def converse(self, text, *, attachments=None):
+            called["n"] += 1
+            return "ack"
+
+    monkeypatch.setattr(_console, "_actor", lambda *a, **k: _Actor())
+
+    resp = client.post("/api/web/converse",
+                       json={"text": "hi", "uploads": ["nope"]})
+    assert resp.status_code == 404
+    assert called["n"] == 0
+
+
+def test_a_turn_carrying_only_a_file_is_accepted_but_an_empty_one_is_not(
+        client, tmp_path, monkeypatch):
+    """Showing a screenshot and asking nothing in particular is an ordinary
+    way to start a turn, so words are not what makes one worth sending. A turn
+    carrying neither words nor a file is the one with nothing in it."""
+    from modulatio import config, uploads
+    from modulatio.web.routes import console as _console
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    seen = {}
+
+    class _Actor:
+        def converse(self, text, *, attachments=None):
+            seen["text"] = text
+            return "ack"
+
+    monkeypatch.setattr(_console, "_actor", lambda *a, **k: _Actor())
+    handle, _ = uploads.stage_upload(
+        b"just this\n", display_name="n.md", project="web")
+
+    assert client.post("/api/web/converse",
+                       json={"text": "", "uploads": [handle]}).status_code == 200
+    assert seen["text"] == ""
+    assert client.post("/api/web/converse", json={"text": "  "}).status_code == 422
+
+
+def test_an_uploads_modality_is_read_from_its_bytes(tmp_path):
+    """A browser's declared type is the client's claim about bytes the engine
+    is already holding, and reading them answers the same question without
+    trusting it."""
+    from modulatio.web.routes.console import _looks_like_image
+
+    png = tmp_path / "a.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+    assert _looks_like_image(png)
+
+    webp = tmp_path / "b.webp"
+    webp.write_bytes(b"RIFF" + b"\x00\x00\x00\x00" + b"WEBP" + b"\x00" * 4)
+    assert _looks_like_image(webp)
+
+    # Text named like an image is text; the name never decides.
+    liar = tmp_path / "c.png"
+    liar.write_bytes(b"just words in a file\n")
+    assert not _looks_like_image(liar)

@@ -23,6 +23,30 @@ export class ApiError extends Error {
   }
 }
 
+// Raw bytes rather than JSON: encoding a file as JSON would inflate it and
+// force the whole thing through a string on both sides. The filename travels
+// in a header as a LABEL — the server treats it as one, never as a location.
+export async function apiUpload(path, file) {
+  const resp = await fetch(`/api${path}`, {
+    method: "POST",
+    headers: {
+      "X-Modulatio-WebOS": "1",
+      ...authHeaders(),
+      "Content-Type": "application/octet-stream",
+      "X-Modulatio-Filename": encodeURIComponent(file.name || "upload"),
+    },
+    body: file,
+  });
+  let payload = null;
+  try {
+    payload = await resp.json();
+  } catch {
+    /* non-JSON error body — status carries the story */
+  }
+  if (!resp.ok) throw new ApiError(resp.status, payload?.detail ?? resp.statusText);
+  return payload;
+}
+
 export async function api(path, { method = "GET", body } = {}) {
   const resp = await fetch(`/api${path}`, {
     method,

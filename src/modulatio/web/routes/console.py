@@ -12,11 +12,12 @@ from __future__ import annotations
 import asyncio
 import json
 import queue
+from dataclasses import replace
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 from modulatio import vault
 from modulatio.web.actors import KickoffBusy, get_actor
@@ -50,15 +51,42 @@ def _actor(request: Request, code: str):
     return get_actor(code, stub=bool(request.app.state.stub))
 
 
-class ConverseBody(BaseModel):
-    text: str
+#: Leading bytes that decide an upload's modality. The composer cannot say
+#: which it sent -- a browser's declared type is the client's claim about
+#: bytes the engine is holding, and reading the bytes answers the same
+#: question without trusting it.
+_IMAGE_SIGNATURES: "tuple[bytes, ...]" = (
+    b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"BM",
+)
 
-    @field_validator("text")
-    @classmethod
-    def _non_blank(cls, v: str) -> str:
-        if not v.strip():
+
+def _looks_like_image(path) -> bool:
+    """True when the staged bytes carry an image signature. RIFF containers
+    (WEBP) name their format after the size field, so they are checked at the
+    offset they actually appear at."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(16)
+    except OSError:
+        return False
+    if any(head.startswith(sig) for sig in _IMAGE_SIGNATURES):
+        return True
+    return head.startswith(b"RIFF") and head[8:12] == b"WEBP"
+
+
+class ConverseBody(BaseModel):
+    text: str = ""
+    #: Handles from ``converse/upload``, claimed once as this turn is sent.
+    uploads: "list[str]" = []
+
+    @model_validator(mode="after")
+    def _says_something(self) -> "ConverseBody":
+        # A turn carrying a file says something without words — showing a
+        # screenshot and asking nothing in particular is an ordinary way to
+        # start. An empty turn carrying neither is the one with nothing in it.
+        if not self.text.strip() and not self.uploads:
             raise ValueError("text must be non-blank")
-        return v
+        return self
 
 
 class KickoffBody(BaseModel):
@@ -100,10 +128,60 @@ def conversation(project: str) -> dict:
     return {"turns": turns[-_HISTORY_LIMIT:]}
 
 
+@router.post("/{project}/converse/upload")
+async def converse_upload(project: str, request: Request) -> dict:
+    """Take bytes from the composer and return a handle naming nothing.
+
+    A browser has no filesystem the engine can reach, so the path a disk load
+    names does not exist here and the bytes travel in the request instead. The
+    reply is an opaque token rather than the location it was written to: a
+    client that can name a server-side file is the one choosing what gets
+    read, and every check after that answers a question the caller picked.
+    """
+    from modulatio import uploads
+
+    code = valid_project(project)
+    data = await request.body()
+    name = request.headers.get("x-modulatio-filename") or "upload"
+    try:
+        handle, shown = uploads.stage_upload(
+            data, display_name=name, project=code)
+    except uploads.UploadRefused as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    return {"handle": handle, "name": shown, "size": len(data)}
+
+
 @router.post("/{project}/converse")
 def converse(project: str, body: ConverseBody, request: Request) -> dict:
+    from modulatio import uploads
+    from modulatio.attachments import build_attachment
+
     code = valid_project(project)
-    reply = _actor(request, code).converse(body.text)
+    attachments = []
+    claimed: "list" = []
+    try:
+        for handle in body.uploads:
+            staged, shown = uploads.consume(handle, project=code)
+            claimed.append(staged)
+            # The same constructor a disk load goes through, so an upload
+            # meets one policy rather than a second one written for it: the
+            # byte cap, the digest, the regular-inode check, and the decode
+            # that refuses a binary posing as a document.
+            kind = "image" if _looks_like_image(staged) else "document"
+            item = build_attachment(staged, kind=kind)
+            attachments.append(replace(item, name=shown))
+    except uploads.UploadRefused as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, OSError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=415, detail=str(exc)) from exc
+    finally:
+        # The upload's own copy has served its purpose either way: the
+        # attachment carries an engine-held snapshot of its own, and a refused
+        # one must not outlive the refusal.
+        for path in claimed:
+            path.unlink(missing_ok=True)
+    reply = _actor(request, code).converse(
+        body.text, attachments=attachments or None)
     return {"reply": reply}
 
 
