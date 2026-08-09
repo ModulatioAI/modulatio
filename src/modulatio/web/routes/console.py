@@ -13,6 +13,7 @@ import asyncio
 import json
 import queue
 from dataclasses import replace
+from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -49,6 +50,15 @@ def _sse(name: str, data: dict) -> str:
 
 def _actor(request: Request, code: str):
     return get_actor(code, stub=bool(request.app.state.stub))
+
+
+def _composer_id(request: Request) -> str:
+    """Which composer these bytes belong to. Two browsers open on one project
+    are two people, so a turn finishing in one must not throw away what the
+    other has attached and not yet sent. The client names itself; an
+    unidentified one shares the default, which is no worse than the
+    project-wide behavior it replaces."""
+    return (request.headers.get("x-modulatio-composer") or "").strip()[:64]
 
 
 class ConverseBody(BaseModel):
@@ -141,7 +151,8 @@ async def converse_upload(project: str, request: Request) -> dict:
     name = request.headers.get("x-modulatio-filename") or "upload"
     try:
         handle, shown = uploads.stage_upload(
-            data, display_name=name, project=code)
+            data, display_name=name, project=code,
+            composer=_composer_id(request))
     except uploads.UploadRefused as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
     return {"handle": handle, "name": shown, "size": len(data)}
@@ -180,10 +191,14 @@ def converse(project: str, body: ConverseBody, request: Request) -> dict:
         reply = _actor(request, code).converse(
             body.text, attachments=attachments or None)
     finally:
-        # Anything staged for this composer and not sent with it has no turn
-        # left to ride: the handles were claimed above, so what remains was
-        # attached and then abandoned.
-        uploads.discard_all(code)
+        # This route built the attachments, so this route releases them: they
+        # were taken for one turn and that turn is over, however it ended.
+        for item in attachments:
+            if item.staged_path is not None:
+                Path(item.staged_path).unlink(missing_ok=True)
+        # Anything staged by THIS composer and not sent with the turn has no
+        # turn left to ride; another composer's pending work is untouched.
+        uploads.discard_all(code, _composer_id(request))
     return {"reply": reply}
 
 

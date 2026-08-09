@@ -5,6 +5,18 @@
 
 const TOKEN_KEY = "modulatio-webos-token";
 
+//: This tab's identity for staged uploads. Two browsers open on one project
+//: are two people: a turn finishing in one must not discard what the other has
+//: attached and not yet sent.
+let _composer = "";
+
+export function composerId() {
+  if (!_composer) {
+    _composer = (crypto.randomUUID?.() ?? String(Math.random())).slice(0, 32);
+  }
+  return _composer;
+}
+
 export function authHeaders() {
   const token = localStorage.getItem(TOKEN_KEY);
   return token ? { Authorization: `Bearer ${token}` } : {};
@@ -34,6 +46,7 @@ export async function apiUpload(path, file) {
       ...authHeaders(),
       "Content-Type": "application/octet-stream",
       "X-Modulatio-Filename": encodeURIComponent(file.name || "upload"),
+      "X-Modulatio-Composer": composerId(),
     },
     body: file,
   });
@@ -54,6 +67,7 @@ export async function api(path, { method = "GET", body } = {}) {
       // A custom header a cross-origin "simple request" can't set — the
       // CSRF guard requires it on every state-changing call.
       "X-Modulatio-WebOS": "1",
+      "X-Modulatio-Composer": composerId(),
       ...authHeaders(),
       ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
     },

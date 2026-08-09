@@ -296,9 +296,11 @@ def test_a_sent_turn_carries_the_uploaded_bytes_and_frees_them(
     assert [a.name for a in att] == ["notes.md"]
     assert att[0].content == "the uploaded body\n"
     assert att[0].sha256.startswith("sha256:")
-    # The staged upload is released; the attachment's own snapshot is not.
+    # Both copies are released: the upload's, and the snapshot the constructor
+    # took from it. The turn they were staged for is the only thing that could
+    # have sent them, and it is over.
     assert not [p for p in (tmp_path / "cfg" / "uploads").glob("*") if p.is_file()]
-    assert att[0].staged_path.exists()
+    assert not att[0].staged_path.exists()
 
 
 def test_a_turn_naming_an_unknown_upload_is_refused_not_sent_bare(
@@ -369,3 +371,24 @@ def test_an_uploads_modality_is_read_from_its_bytes(tmp_path):
     liar = tmp_path / "c.png"
     liar.write_bytes(b"just words in a file\n")
     assert not _looks_like_image(liar)
+
+
+def test_one_composer_finishing_a_turn_does_not_discard_another_s_uploads(
+        tmp_path, monkeypatch):
+    """Two browsers open on one project are two people. Discarding by project
+    threw away what the other had attached and not yet sent."""
+    from modulatio import config, uploads
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    mine, _ = uploads.stage_upload(
+        b"mine\n", display_name="a.md", project="web", composer="tab-a")
+    theirs, _ = uploads.stage_upload(
+        b"theirs\n", display_name="b.md", project="web", composer="tab-b")
+
+    assert uploads.discard_all("web", "tab-a") == 1
+
+    staged, _ = uploads.consume(theirs, project="web")
+    assert staged.read_bytes() == b"theirs\n"
+    import pytest
+    with pytest.raises(uploads.UploadRefused):
+        uploads.consume(mine, project="web")

@@ -44,6 +44,7 @@ class _Pending:
     path: Path
     display_name: str
     project: str
+    composer: str
     expires_at: float
 
 
@@ -83,7 +84,7 @@ def _expire_locked(now: float) -> None:
 
 
 def stage_upload(
-    data: bytes, *, display_name: str, project: str,
+    data: bytes, *, display_name: str, project: str, composer: str = "",
     cap: int = DEFAULT_MAX_UPLOAD_BYTES, ttl_s: float = DEFAULT_TTL_S,
     max_pending: int = DEFAULT_MAX_PENDING,
 ) -> "tuple[str, str]":
@@ -111,7 +112,7 @@ def stage_upload(
             sink.write(data)
         _pending[handle] = _Pending(
             path=dest, display_name=shown, project=project,
-            expires_at=now + ttl_s,
+            composer=composer, expires_at=now + ttl_s,
         )
     return handle, shown
 
@@ -137,13 +138,19 @@ def consume(handle: str, *, project: str) -> "tuple[Path, str]":
     return item.path, item.display_name
 
 
-def discard_all(project: str) -> int:
-    """Drop every pending upload for a project, returning how many. Used when
-    a turn ends so nothing outlives the composer that staged it."""
+def discard_all(project: str, composer: str = "") -> int:
+    """Drop the pending uploads one composer staged, returning how many.
+
+    Scoped to the composer rather than the project: two browsers open on the
+    same project are two people, and finishing a turn in one must not throw
+    away what the other has attached and not yet sent. A composer is named by
+    the session that staged the bytes, so the only uploads a turn discards are
+    the ones it could have sent.
+    """
     dropped = 0
     with _lock:
         for handle, item in list(_pending.items()):
-            if item.project == project:
+            if item.project == project and item.composer == composer:
                 _pending.pop(handle, None)
                 item.path.unlink(missing_ok=True)
                 dropped += 1

@@ -7734,6 +7734,31 @@ class Orchestrator:
         stub mode) returns a plain acknowledgement so the UI flow still works.
         """
         attachments = attachments or []
+        try:
+            return self._converse_inner(
+                attachments, message, on_token=on_token,
+                permission_callback=permission_callback,
+                prompt_fn=prompt_fn, ask=ask)
+        finally:
+            # The snapshots supplied for THIS turn were taken for it and are
+            # spent when it ends, however it ends — a reply, a refusal, a model
+            # failure, an interrupt. A caller that hands them over has no later
+            # moment to release them, so the boundary that consumed them does.
+            for _att in attachments:
+                staged = getattr(_att, "staged_path", None)
+                if staged is not None:
+                    Path(staged).unlink(missing_ok=True)
+
+    def _converse_inner(
+        self,
+        attachments: list,
+        message: str,
+        *,
+        on_token: "Callable[[str], None] | None" = None,
+        permission_callback: "Callable[[str, dict], bool] | None" = None,
+        prompt_fn: "Callable | None" = None,
+        ask: "Callable | None" = None,
+    ) -> str:
         # A new operator turn starts fresh: clear any abort flag left set by a
         # prior ESC interrupt, so it stops THIS turn's work only — never the next.
         # FUTURE (concurrency): this Event is SHARED with a converse-driven
