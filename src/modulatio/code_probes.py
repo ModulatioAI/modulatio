@@ -1095,6 +1095,30 @@ def provision_runner_env(
     evidence about the product.
     """
     env = Path(scratch) / "envs" / "runner"
+    # The runner is the engine's own interpreter, so where it lives decides
+    # who can change what it does. A predictable path under a tree the
+    # deliverable can write is enough to own it: a ``.pth`` dropped in its
+    # site-packages runs on every interpreter start, survives the environment
+    # being rebuilt over it, and is executed even in isolated mode -- so the
+    # process that is supposed to MEASURE the deliverable can be replaced by
+    # the deliverable. Refuse to build one anywhere reachable that way; the
+    # caller supplies a fresh engine-owned location per invocation.
+    if env.exists():
+        return env, ProbePhaseResult(
+            status=ProbeStatus.ENGINE_UNAVAILABLE, phase="runner_env",
+            origin="engine",
+            reason="runner location is not fresh — refusing to reuse an "
+                   "environment whose contents cannot be vouched for",
+        )
+    scratch_p = Path(scratch)
+    if scratch_p.is_symlink() or any(p.is_symlink() for p in scratch_p.parents
+                                     if str(p) != p.root):
+        return env, ProbePhaseResult(
+            status=ProbeStatus.ENGINE_UNAVAILABLE, phase="runner_env",
+            origin="engine",
+            reason="runner location is reached through a link — the path a "
+                   "name resolves to is not the path that was authorized",
+        )
     wh = wheelhouse_path()
     if wh is None or not any(wh.glob("pytest-*.whl")):
         return env, ProbePhaseResult(

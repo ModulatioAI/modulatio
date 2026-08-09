@@ -1732,3 +1732,71 @@ def test_unmeasured_suite_is_disclosed_to_the_operator_without_clamping(
     report = summary.goal_reports[-1].read_text(encoding="utf-8")
     assert "NOT MEASURED" in report
     assert "unverified" in report
+
+
+def test_the_gate_runner_is_not_built_where_the_deliverable_can_write(
+        project_with_run, monkeypatch):
+    """The runner is the engine's own interpreter, so where it lives decides
+    who can change what it does. A predictable path under a tree the
+    deliverable writes is enough to own it: a file dropped in its
+    site-packages executes on every interpreter start, survives the
+    environment being rebuilt over it, and runs even in isolated mode — so the
+    process that is supposed to MEASURE the deliverable becomes the
+    deliverable's."""
+    _enforceable_sandbox(monkeypatch)
+    orch = _orch(project_with_run)
+    root = orch._shared_artifacts_root()
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "app"\nversion = "0.0.1"\n', encoding="utf-8")
+    (root / "tests").mkdir(exist_ok=True)
+    (root / "tests" / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8")
+
+    built: list = []
+    import modulatio.code_probes as _probes
+    real = _probes.provision_runner_env
+
+    def _watch(scratch, **kw):
+        built.append(Path(scratch))
+        return real(scratch, **kw)
+
+    monkeypatch.setattr(_probes, "provision_runner_env", _watch)
+    orch._goal_pytest_gate([_code_task()])
+
+    assert built, "the gate provisioned no runner"
+    for where in built:
+        assert not where.is_relative_to(root), (
+            f"runner built inside the writable deliverable tree: {where}")
+        # And it does not outlive the measurement it was built for.
+        assert not where.exists(), f"runner left behind: {where}"
+
+
+def test_a_preplanted_runner_location_is_refused(tmp_path):
+    """An environment whose contents cannot be vouched for is not reused:
+    rebuilding over a planted file does not remove it, so 'fresh' has to mean
+    the location was never there."""
+    from modulatio import code_probes as cp
+
+    home = tmp_path / "gate"
+    (home / "envs" / "runner").mkdir(parents=True)
+    _, res = cp.provision_runner_env(home)
+
+    assert res.status is cp.ProbeStatus.ENGINE_UNAVAILABLE
+    assert res.origin == "engine"
+    assert "fresh" in res.reason
+
+
+def test_a_runner_location_reached_through_a_link_is_refused(tmp_path):
+    """A name can be redirected after it is authorized, so the path a link
+    resolves to is not the path that was checked."""
+    from modulatio import code_probes as cp
+
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    link = tmp_path / "gate"
+    link.symlink_to(outside)
+
+    _, res = cp.provision_runner_env(link)
+    assert res.status is cp.ProbeStatus.ENGINE_UNAVAILABLE
+    assert "link" in res.reason

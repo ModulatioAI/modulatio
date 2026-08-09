@@ -1470,6 +1470,7 @@ def _unbounded_shell_reason(cmd: str) -> str:
 def make_run_shell(
     artifacts_root: Path, extra_roots=(),
     should_abort: "Callable[[], bool] | None" = None,
+    extra_ro_binds=(),
 ) -> Callable[..., str]:
     """Return a ``run_shell`` callable bound to ``artifacts_root`` (plus any
     operator-granted ``extra_roots`` for exec-widen — cwd + file-args may resolve
@@ -1683,6 +1684,9 @@ def make_run_shell(
             run_argv, run_env = _sandbox.build_sandboxed_argv(
                 _payload_argv, artifacts_root, profile=_profile,
                 extra_rw_roots=tuple(Path(r) for r in extra_roots),
+                # Engine-owned inputs the payload must SEE but must never be
+                # able to edit: a writable interpreter is a writable engine.
+                extra_binds=tuple(Path(b) for b in extra_ro_binds),
             )
         else:
             # DEGRADED_ALLOWLIST — the disclosed soft state: an explicit
@@ -2358,6 +2362,7 @@ def build_registry(
     on_artifact_write: "Callable[[Path], None] | None" = None,
     extra_roots=(),
     run_shell_extra_roots=(),
+    run_shell_ro_binds=(),
     extra_read_roots=(),
     should_abort: "Callable[[], bool] | None" = None,
 ) -> dict[str, Tool]:
@@ -2574,6 +2579,7 @@ def build_registry(
             call=make_run_shell(
                 artifacts_root, run_shell_extra_roots,
                 should_abort=should_abort,
+                extra_ro_binds=run_shell_ro_binds,
             ),
             params_schema={
                 "type": "object",
