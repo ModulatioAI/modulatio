@@ -14067,6 +14067,50 @@ class Orchestrator:
         # THAT the build already measures. What this adds is the cause — a
         # failed build names the missing module, not the task that wrote it
         # somewhere the delivery set will never reach.
+        # Documentation written from leaked context describes a DIFFERENT
+        # product — an install example for something this goal never built,
+        # which a reader follows and finds nothing.
+        try:
+            from modulatio import assembly_validate as _av
+            shipped_names = {
+                Path(t.output_path).stem for t in tasks
+                if t.status == TaskStatus.COMPLETED and t.output_path
+            } | {
+                Path(t.output_path).parts[0].removesuffix(".py")
+                for t in tasks
+                if t.status == TaskStatus.COMPLETED and t.output_path
+            } | {self.project.code.lower(), self.project.name.lower()}
+            root = self._shared_artifacts_root()
+            foreign: list[tuple[str, str]] = []
+            for t in tasks:
+                rel = t.output_path or ""
+                if not rel.endswith((".md", ".rst", ".txt")):
+                    continue
+                try:
+                    body = (root / rel).read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                for name in _av.foreign_invocations(body, shipped_names):
+                    foreign.append((rel, name))
+        except Exception:  # noqa: BLE001 — a reading never fails a verdict
+            foreign = []
+        if foreign:
+            named_foreign = "\n".join(
+                f"  - {rel} tells the reader to run {name!r}"
+                for rel, name in foreign)
+            summary.recommendations.append({
+                "goal_id": goal.id,
+                "concern": (
+                    "Documentation names commands this goal did not build, so "
+                    f"following it leads nowhere:\n{named_foreign}"
+                ),
+                "suggestion": (
+                    "Rewrite the example against what this deliverable ships. "
+                    "A command from another product, or from the environment "
+                    "the work was checked in, does not exist for a reader."
+                ),
+            })
+
         # A suite can pass without touching the product: tests asserting
         # against values written into themselves go green and demonstrate
         # nothing. Read from the source, so it costs no run and cannot be

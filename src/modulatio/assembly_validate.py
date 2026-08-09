@@ -608,3 +608,51 @@ def unbound_test_units(
         if not bound:
             unbound.append(rel)
     return unbound
+
+
+#: Commands a deliverable's own documentation may name without describing a
+#: different product: interpreters, packaging and test tooling, and the shell
+#: verbs an install example is written with.
+_AMBIENT_COMMANDS = frozenset({
+    "python", "python3", "py", "pip", "pip3", "pipx", "uv", "poetry",
+    "pytest", "tox", "nox", "ruff", "mypy", "black", "coverage",
+    "sh", "bash", "zsh", "source", "cd", "ls", "cat", "echo", "export",
+    "mkdir", "cp", "mv", "rm", "sudo", "env", "make", "cmake", "ctest",
+    "git", "curl", "wget", "docker", "npm", "npx", "node", "yarn",
+    "cargo", "rustc", "go", "java", "javac", "mvn", "gradle", "dotnet",
+    "virtualenv", "venv", "activate", "deactivate",
+})
+
+#: Invocations in documentation. Two shapes, matched separately: an
+#: interpreter running a module, and a command on a shell-prompt line. One
+#: pattern alternating between them would let the prompt branch consume
+#: ``$ python -m NAME`` and report the interpreter instead of the module.
+_INVOCATIONS = (
+    re.compile(r"python3?\s+-m\s+([A-Za-z_][A-Za-z0-9_.-]*)"),
+    re.compile(r"^\s*\$\s+([A-Za-z_][A-Za-z0-9_.-]*)", re.M),
+)
+
+
+def foreign_invocations(text: str, shipped_names: "set[str]") -> "list[str]":
+    """Commands a document tells the reader to run that this deliverable does
+    not provide.
+
+    Documentation written from a producer's leaked context describes a
+    DIFFERENT product — an install example for something the goal never
+    built, which a reader will follow and find nothing. The name being
+    invoked is the evidence: the deliverable's own entry point and modules
+    are known, and ambient tooling is known, so a third name is neither.
+
+    Compares the first segment of a dotted name, so ``python -m pkg.module``
+    is judged by the package it belongs to. Returns the foreign names in
+    first-seen order.
+    """
+    known = {n.lower() for n in shipped_names if n} | _AMBIENT_COMMANDS
+    seen: list[str] = []
+    found = [m for pat in _INVOCATIONS for m in pat.findall(text or "")]
+    for raw in found:
+        name = raw.split(".")[0].lower()
+        if name in known or name in seen:
+            continue
+        seen.append(name)
+    return seen

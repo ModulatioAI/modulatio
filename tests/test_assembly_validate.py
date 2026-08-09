@@ -594,3 +594,44 @@ def test_an_unreadable_test_unit_is_not_a_finding(tmp_path):
     # Nothing shipped to bind TO — a goal of pure tests reports nothing.
     (tmp_path / "test_alone.py").write_text("def test_x(): assert True\n")
     assert unbound_test_units(["test_alone.py"], tmp_path) == []
+
+
+def test_documentation_naming_another_product_is_caught():
+    """Documentation written from leaked context describes a DIFFERENT
+    product — an install example for something the goal never built, which a
+    reader follows and finds nothing."""
+    from modulatio.assembly_validate import foreign_invocations
+
+    doc = (
+        "# apppkg\n\n```console\n$ python -m otherpkg fixtures/sample.json\n"
+        "carrier: 1000.0 Hz\n```\n"
+    )
+    assert foreign_invocations(doc, {"apppkg"}) == ["otherpkg"]
+
+    # An interpreter running a module must report the MODULE. One pattern
+    # alternating with the prompt shape would report the interpreter.
+    assert foreign_invocations("$ python -m otherpkg\n", {"apppkg"}) == ["otherpkg"]
+    # A dotted name is judged by the package it belongs to.
+    assert foreign_invocations("python -m otherpkg.cli\n", {"apppkg"}) == ["otherpkg"]
+
+
+def test_a_document_about_its_own_deliverable_is_clean():
+    """The shipped name and ambient tooling are both expected; flagging them
+    would fire on every correct document and be learned as noise."""
+    from modulatio.assembly_validate import foreign_invocations
+
+    doc = (
+        "# apppkg\n\nInstall and run:\n\n```console\n"
+        "$ pip install .\n$ pytest -q\n$ apppkg items.json\n"
+        "$ python -m apppkg.cli items.json\n```\n"
+    )
+    assert foreign_invocations(doc, {"apppkg"}) == []
+
+
+def test_the_environment_the_work_was_checked_in_is_not_shippable():
+    """A path into the throwaway environment used to verify the work does not
+    exist for a reader, the same way another product's command does not."""
+    from modulatio.assembly_validate import foreign_invocations
+
+    doc = "```console\n$ verify-env/bin/python -m pytest\n```\n"
+    assert foreign_invocations(doc, {"apppkg"}) == ["verify-env"]
