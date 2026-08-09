@@ -173,10 +173,15 @@ def _build_prompt(
         parts.append("# Attachments")
         for att in attachments:
             if att.kind == "image":
+                # The operator's own filesystem layout is not part of the
+                # request. A host path in the prompt discloses where the
+                # operator keeps things and names a file the model may then
+                # try to reach by other means; the loaded bytes are held by
+                # the engine and identified by digest instead.
                 parts.append(
-                    f"- image attached: `{att.name}` "
-                    f"(path: {att.path})  "
-                    f"[vision content blocks land in a future slice]"
+                    f"- image attached: `{att.name}`"
+                    + (f" ({att.sha256[:19]}…)" if att.sha256 else "")
+                    + "  [vision content blocks land in a future slice]"
                 )
             else:  # document
                 content = att.content or ""

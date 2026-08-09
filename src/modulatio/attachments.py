@@ -28,7 +28,9 @@ text is far past most context windows — and overridable via
 """
 from __future__ import annotations
 
+import hashlib
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -80,6 +82,14 @@ class Attachment:
     #: images (path travels through as a reference until the multimodal
     #: slice promotes them to content blocks).
     content: str | None
+    #: An engine-owned 0600 copy of the bytes as they were when loaded, and
+    #: their digest. Everything downstream reads THIS, never ``path`` again:
+    #: a source file replaced, truncated, grown, or re-pointed after loading
+    #: cannot change what was loaded, and nothing has to re-open a path the
+    #: operator may no longer control.
+    staged_path: Path | None = None
+    sha256: str = ""
+    size: int = 0
 
 
 def build_attachment(path: Path, *, kind: AttachmentKind) -> Attachment:
@@ -132,12 +142,70 @@ def build_attachment(path: Path, *, kind: AttachmentKind) -> Attachment:
         # utf-8 with strict errors so binary inputs fail fast.
         content = path.read_text(encoding="utf-8")
 
+    staged, digest = _stage(path, kind)
     return Attachment(
         kind=kind,
         path=path,
         name=path.name,
         content=content,
+        staged_path=staged,
+        sha256=digest,
+        size=size,
     )
+
+
+#: Where loaded bytes are held. Engine-owned and outside every tree a model
+#: can write, so a staged snapshot cannot be edited by the work that reads it.
+def _staging_dir() -> Path:
+    from modulatio import config as _config
+    d = Path(_config.CONFIG_DIR) / "loaded"
+    d.mkdir(parents=True, exist_ok=True)
+    os.chmod(d, 0o700)
+    return d
+
+
+def _stage(path: Path, kind: AttachmentKind) -> "tuple[Path | None, str]":
+    """Copy the bytes aside and digest them, returning ``(staged, sha256)``.
+
+    Opened WITHOUT following symlinks and verified to be a regular file on the
+    OPEN DESCRIPTOR rather than on the path: a check against the path answers
+    for whatever the name pointed at a moment ago, which is a different
+    question from what is now being read.
+
+    Best-effort — a snapshot that cannot be taken costs the guarantee, never
+    the attachment, so an operator's file still loads on a filesystem that
+    refuses the copy.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None, ""
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None, ""
+        digest = hashlib.sha256()
+        dest = _staging_dir() / f"{os.urandom(16).hex()}-{_safe_stem(path.name)}"
+        out = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(out, "wb") as sink:
+                while chunk := os.read(fd, 1 << 20):
+                    digest.update(chunk)
+                    sink.write(chunk)
+        except OSError:
+            dest.unlink(missing_ok=True)
+            return None, ""
+        return dest, f"sha256:{digest.hexdigest()}"
+    except OSError:
+        return None, ""
+    finally:
+        os.close(fd)
+
+
+def _safe_stem(name: str) -> str:
+    """A display name reduced to something safe to sit in a filename."""
+    keep = "".join(c if c.isalnum() or c in "-._" else "-" for c in name)
+    return keep.strip("-.")[:64] or "item"
 
 
 __all__ = [

@@ -123,3 +123,58 @@ def test_build_attachment_malformed_env_falls_back_to_default(tmp_path, monkeypa
     p.write_text("hello", encoding="utf-8")
     att = build_attachment(p, kind="document")
     assert att.content == "hello"
+
+
+def test_replacing_the_source_after_loading_changes_nothing(tmp_path, monkeypatch):
+    """What was loaded is what gets used. A source replaced, truncated or
+    grown after the fact would otherwise change the request already made."""
+    from modulatio import attachments, config
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    src = tmp_path / "note.md"
+    src.write_text("original bytes\n")
+
+    att = attachments.build_attachment(src, kind="document")
+    assert att.staged_path is not None
+    assert oct(att.staged_path.stat().st_mode & 0o777) == "0o600"
+    assert att.sha256.startswith("sha256:")
+
+    src.write_text("swapped entirely\n")
+    assert att.staged_path.read_text() == "original bytes\n"
+
+
+def test_a_symlink_is_not_followed_when_loading(tmp_path, monkeypatch):
+    """The regular-file check runs on the OPEN DESCRIPTOR, not the path: a
+    check against a name answers for whatever it pointed at a moment ago,
+    which is a different question from what is now being read."""
+    from modulatio import attachments, config
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    target = tmp_path / "secret.txt"
+    target.write_text("secret\n")
+    link = tmp_path / "link.md"
+    link.symlink_to(target)
+
+    staged, digest = attachments._stage(link, "document")
+    assert staged is None and digest == ""
+
+
+def test_an_image_does_not_put_a_host_path_in_the_prompt(tmp_path, monkeypatch):
+    """The operator's filesystem layout is not part of the request: a host
+    path discloses where they keep things and names a file the model may then
+    try to reach by other means."""
+    from modulatio import attachments, chat, config
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    img = tmp_path / "diagram.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+    att = attachments.build_attachment(img, kind="image")
+
+    from modulatio.roster import Agent
+
+    prompt = chat._build_prompt(
+        agent=Agent(id="leader", name="Leader", role="leader", model="stub"),
+        message="look at this", history=[], attachments=[att])
+    assert "diagram.png" in prompt
+    assert str(tmp_path) not in prompt
+    assert str(img) not in prompt
