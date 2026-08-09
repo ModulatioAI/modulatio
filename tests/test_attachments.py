@@ -50,11 +50,11 @@ def test_build_attachment_raises_when_path_missing(tmp_path: Path):
 
 
 def test_build_attachment_raises_on_non_utf8_document(tmp_path: Path):
-    """Binary documents (.pdf, .docx) aren't supported in this slice —
-    fail fast rather than dispatch a garbled prompt. PDF/DOCX text
-    extraction is a follow-up if ever needed."""
-    p = tmp_path / "binary.pdf"
-    p.write_bytes(b"%PDF-1.4\x00\x01\x02\x03not-utf-8-binary\xff\xfe")
+    """A binary document with no extractor fails fast rather than dispatch a
+    garbled prompt. A PDF is the exception: it routes to text extraction, and
+    a malformed one gets the extractor's own named refusal."""
+    p = tmp_path / "binary.docx"
+    p.write_bytes(b"PK\x03\x04\x00\x01\x02\x03not-utf-8-binary\xff\xfe")
     with pytest.raises(UnicodeDecodeError):
         build_attachment(p, kind="document")
 
@@ -229,3 +229,25 @@ def test_an_image_does_not_put_a_host_path_in_the_prompt(tmp_path, monkeypatch):
     assert "diagram.png" in prompt
     assert str(tmp_path) not in prompt
     assert str(img) not in prompt
+
+
+def test_a_pdf_loads_through_its_text_layer(tmp_path, monkeypatch):
+    """A PDF document is extracted by the same contained helper a file read
+    uses — one parser for both paths — so the ingestion pipe carries its text
+    instead of refusing the bytes as undecodable."""
+    import pytest as _pytest
+
+    from modulatio import attachments, config, tools
+
+    if tools.shutil.which("pdftotext") is None:
+        _pytest.skip("poppler-utils not installed")
+    from tests.test_tools import _tiny_pdf
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    src = tmp_path / "paper.pdf"
+    src.write_bytes(_tiny_pdf())
+
+    item = attachments.build_attachment(src, kind="document")
+    assert "the owl flies at midnight" in (item.content or "")
+    assert item.sha256.startswith("sha256:")
+

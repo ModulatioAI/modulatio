@@ -127,8 +127,16 @@ def build_attachment(path: Path, *, kind: AttachmentKind) -> Attachment:
     if kind == "document":
         # Decoded from the SNAPSHOT, so the text dispatched and the bytes
         # digested are the same bytes. utf-8 with strict errors so binary
-        # inputs fail fast.
-        content = staged.read_bytes().decode("utf-8")
+        # inputs fail fast — except a PDF, whose text layer is extracted by
+        # the same contained helper a file read uses (stripped env, rlimits,
+        # kill-group timeout, output ceilings), so one parser serves both
+        # paths and its refusals are one actionable line each.
+        data = staged.read_bytes()
+        if data[:5] == b"%PDF-":
+            from modulatio.tools import _pdf_text
+            content = _pdf_text(data, path.name)
+        else:
+            content = data.decode("utf-8")
     return Attachment(
         kind=kind,
         path=path,

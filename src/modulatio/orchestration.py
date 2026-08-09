@@ -7234,9 +7234,9 @@ class Orchestrator:
                     target,
                     kind="image" if looks_like_image(target) else "document")
             except UnicodeDecodeError:
-                return (f"Can't load {path!r}: a binary document (PDF/DOCX/…) "
-                        "— extraction for those isn't wired into loading yet; "
-                        "read_file can pull a PDF's text layer.")
+                return (f"Can't load {path!r}: a binary document with no "
+                        "extractor (DOCX/ODT/…) — convert it to text or PDF "
+                        "first; PDFs load through their text layer.")
             except (ValueError, OSError, FileNotFoundError) as exc:
                 return f"Can't load {path!r}: {exc}"
             queue.append(item)

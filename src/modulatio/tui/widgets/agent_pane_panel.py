@@ -514,9 +514,9 @@ class AgentPanePanel(Vertical):
             return
         except UnicodeDecodeError as exc:
             log.write(
-                f"[bold red]Attach failed:[/] {escape(path.name)} is not a "
-                f"text-readable document. PDF/DOCX support is a future "
-                f"slice. ({escape(str(exc))})"
+                f"[bold red]Attach failed:[/] {escape(path.name)} is a binary "
+                f"document with no extractor (DOCX/ODT/…) — convert it to "
+                f"text or PDF first. ({escape(str(exc))})"
             )
             return
         except (ValueError, OSError) as exc:
