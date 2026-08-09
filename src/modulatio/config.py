@@ -331,7 +331,7 @@ def _secret_edit_guard():
     outermost holder, and the depth is tracked under the lock that guards it.
     """
     global _SECRET_EDIT_DEPTH
-    lock_path = Path(str(secrets_path()) + ".lock")
+    lock_domain = Path(secrets_path()).parent
     with _SECRET_EDIT_LOCK:
         if _SECRET_EDIT_DEPTH:
             _SECRET_EDIT_DEPTH += 1
@@ -340,29 +340,39 @@ def _secret_edit_guard():
             finally:
                 _SECRET_EDIT_DEPTH -= 1
             return
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        # O_NOFOLLOW: a link planted at this path would otherwise be followed,
-        # creating a file wherever it points and taking the lock on THAT inode.
-        # Two processes whose links differ would then both hold "the" lock and
-        # serialize against nothing, which is exactly the lost update this
-        # exists to prevent.
-        # O_NONBLOCK as well as O_NOFOLLOW: refusing to FOLLOW a link says
-        # nothing about WHAT was opened, and opening a FIFO waits forever for a
-        # writer — one planted here would hang every secret edit in the
-        # process, a denial of service that costs an attacker one mkfifo.
-        # The object is then checked to BE a regular file owned by this user
-        # before any lock is taken, since a lock on a device or a directory
-        # serializes nothing.
-        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW
-                     | os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
+        lock_domain.mkdir(parents=True, exist_ok=True)
+        # THE LOCK DOMAIN IS THE SETTINGS DIRECTORY, not a file inside it.
+        # A lock addressed by PATHNAME is only as stable as the name: whoever
+        # can write the directory can rename the lock file aside and put
+        # another valid one in its place, after which two processes each hold
+        # a perfectly good lock on DIFFERENT inodes and serialize against
+        # nothing — the lost update this exists to prevent, reached without
+        # ever defeating a single check on the object itself. Holding the
+        # DIRECTORY's inode removes the name from the question: the secret it
+        # guards lives inside that directory, so an attacker who replaces the
+        # directory replaces the thing being protected too.
+        #
+        # The directory is hardened and owner-checked BEFORE it is trusted as
+        # a domain, since a lock inside a directory someone else may write is
+        # not a lock. O_NOFOLLOW refuses a link put in its place; O_DIRECTORY
+        # refuses anything that is not a directory, so no FIFO or device can
+        # be substituted to block the open forever.
+        _harden_secret_dir(lock_domain)
+        fd = os.open(lock_domain, os.O_RDONLY | os.O_DIRECTORY
+                     | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
             info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode):
+            if not stat.S_ISDIR(info.st_mode):
                 raise OSError(
-                    f"refusing to lock {lock_path}: not a regular file")
+                    f"refusing to lock {lock_domain}: not a directory")
             if info.st_uid != os.getuid():
                 raise OSError(
-                    f"refusing to lock {lock_path}: owned by uid {info.st_uid}")
+                    f"refusing to lock {lock_domain}: owned by uid "
+                    f"{info.st_uid}")
+            if info.st_mode & 0o077:
+                raise OSError(
+                    f"refusing to lock {lock_domain}: reachable by others "
+                    f"(mode {info.st_mode & 0o777:o})")
         except OSError:
             os.close(fd)
             raise

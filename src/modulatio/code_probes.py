@@ -640,8 +640,9 @@ def _target_wheel_tags() -> "frozenset | None":
                 "from packaging import tags\n"
                 "print(json.dumps([str(t) for t in tags.sys_tags()]))\n")
         try:
-            out = subprocess.run([_SANDBOX_PYTHON, "-c", prog],
-                                 capture_output=True, text=True, timeout=30)
+            out = subprocess.run([_SANDBOX_PYTHON, "-I", "-c", prog],
+                                 capture_output=True, text=True, timeout=30,
+                                 cwd=_ENGINE_OWNED_CWD)
             if out.returncode == 0:
                 import json as _json
                 reported = _json.loads(out.stdout)
@@ -913,6 +914,15 @@ _HERMETIC_PIP_ENV = {
 #: venv creation + the engine pip frontend run as THIS, never the live venv.
 _SANDBOX_PYTHON = "/usr/bin/python3"
 
+#: Where the target probes run. ``-c`` puts the INHERITED WORKING DIRECTORY on
+#: ``sys.path``, so a probe launched from a deliverable's tree imports that
+#: deliverable's ``packaging``/``platform``/``json`` and executes it in the
+#: host process context — outside every containment the probes exist to
+#: precede. ``-I`` drops the directory from the path and ignores the ambient
+#: interpreter environment; running from a directory the engine owns means
+#: there is nothing to find even if a future flag change reopens the path.
+_ENGINE_OWNED_CWD = str(Path(__file__).resolve().parent)
+
 
 def create_pristine_env(
     scratch: Path, *, snapshot: "Snapshot | None" = None,
@@ -989,8 +999,9 @@ def _pep508_env() -> "dict | None":
             " '.'.join(platform.python_version_tuple()[:2]),\n"
             " 'sys_platform': sys.platform}))\n")
         try:
-            out = subprocess.run([_SANDBOX_PYTHON, "-c", prog],
-                                 capture_output=True, text=True, timeout=30)
+            out = subprocess.run([_SANDBOX_PYTHON, "-I", "-c", prog],
+                                 capture_output=True, text=True, timeout=30,
+                                 cwd=_ENGINE_OWNED_CWD)
             _PEP508_ENV_CACHE = (
                 _json.loads(out.stdout) if out.returncode == 0 else {})
         except Exception:  # noqa: BLE001 — dump failure = conservative mode

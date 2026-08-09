@@ -2906,3 +2906,99 @@ def test_a_component_with_no_source_resolves_to_nothing_to_watch(tmp_path):
     resolved = _witness_paths({"cvc-x": ("webapp", str(component))}, root)
 
     assert resolved["cvc-x"] == set()
+
+
+def test_a_credit_for_another_root_is_not_accepted_from_this_run(tmp_path):
+    """The observation reader accepts only components this run could OBSERVE.
+
+    A declaration belonging to a different suite root is not watched here, so
+    accepting its credit would take a claim no measurement in this invocation
+    could contradict — and the run that CAN measure it might never credit it at
+    all. An absent watch entry is not a verdict; it is a reason the token has
+    no business in this run's accepted set."""
+    from modulatio.orchestration import _witness_paths
+
+    root_a, root_b = tmp_path / "a", tmp_path / "b"
+    (root_a / "alpha").mkdir(parents=True)
+    (root_a / "alpha" / "__init__.py").write_text("", encoding="utf-8")
+    (root_b / "beta").mkdir(parents=True)
+    (root_b / "beta" / "__init__.py").write_text("", encoding="utf-8")
+
+    declared = {
+        "cvc-a": ("alpha", str(root_a / "alpha")),
+        "cvc-b": ("beta", str(root_b / "beta")),
+    }
+
+    watched_in_a = _witness_paths(declared, root_a)
+
+    # B is not observable from A's run, so it must not be an acceptable token
+    # there — the credit for it can only come from a run that can measure it.
+    assert "cvc-b" not in watched_in_a, (
+        "a component from another root entered this run's watch map")
+    assert set(watched_in_a) == {"cvc-a"}
+
+    # And from B's own root it IS observable, so its own run answers for it.
+    assert set(_witness_paths(declared, root_b)) == {"cvc-b"}
+
+
+_TWO_ROOT_PLAN = [
+    {"description": "alpha init", "artifact_kind": "code",
+     "output_path": "alpha/alpha/__init__.py",
+     "evidence_required": [{"kind": "artifact", "description": "exists"}]},
+    {"description": "beta init", "artifact_kind": "code",
+     "output_path": "beta/beta/__init__.py",
+     "evidence_required": [{"kind": "artifact", "description": "exists"}]},
+]
+
+
+def test_a_forged_credit_for_another_root_cannot_ride_out_on_this_run(
+    project, monkeypatch,
+):
+    """A suite root can only measure its OWN components. A record produced
+    while one root's suite ran may still name a component belonging to
+    another, and that credit is beyond the reach of every check in this
+    invocation — nothing here watches it, so nothing here can contradict it,
+    while the run that COULD measure it may never credit it at all.
+
+    Accepting it would let a forged credit survive by choosing the run in
+    which to make the claim."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _TWO_ROOT_PLAN, [], monkeypatch)
+    orch.kickoff("build two packages")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    root = orch._shared_artifacts_root()
+    for name in ("alpha", "beta"):
+        _gate_suite(root / name, shape="none")
+
+    goal, = store_mod.list_goals(PROJECT_CODE)
+    contracts = {c.import_name: c for c in goal.convention_contracts}
+    if len(contracts) < 2:
+        pytest.skip("the plan did not seal two separate components")
+    beta_token = contracts["beta"].contract_id
+
+    class _ForgeOtherRoot(_DeterministicRunShell):
+        """Credits BETA in every record, including the runs under alpha."""
+
+        def call(self, *, cmd, profile, cwd, timeout):
+            import shlex
+            out = super().call(cmd=cmd, profile=profile, cwd=cwd, timeout=timeout)
+            argv = shlex.split(cmd)
+            if "--" in argv:
+                Path(argv[argv.index("--") - 1]).write_text(
+                    '{"schema": 1, "tokens": ["%s"]}' % beta_token,
+                    encoding="utf-8")
+            return out
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _ForgeOtherRoot())
+
+    # Read the advisory LINE, not the whole report: the component name also
+    # appears in artifact paths, so a substring test over the report passes
+    # whatever the gate decided.
+    line = next((ln for ln in report.splitlines()
+                 if "did not report loading" in ln), "")
+    named = line.split("did not report loading", 1)[-1] if line else ""
+
+    assert "beta" in named, (
+        f"a forged beta credit survived a run that could not measure it — "
+        f"state={state}\nadvisory: {line!r}")

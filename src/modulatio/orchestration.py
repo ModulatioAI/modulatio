@@ -13564,7 +13564,7 @@ class Orchestrator:
                 return TestEvidence.UNAVAILABLE, "run_shell tool unavailable (no artifacts root bound)"
 
         try:
-            def _read_observation(path: "Path") -> "tuple[bool, set]":
+            def _read_observation(path: "Path", acceptable: set) -> "tuple[bool, set]":
                 """``(finalised, credited_tokens)`` for one observation record.
 
                 FINALISED reports only that the wrapper COMPLETED and left a
@@ -13580,9 +13580,13 @@ class Orchestrator:
                 outcome while the other has none at all. Collapsing them lets
                 exit status stand in for evidence.
 
-                Tokens the engine did not declare are filtered OUT of the credited
-                set without disturbing finalisation: an unrecognised token is a
-                record that credits nothing, not a wrapper that never ran.
+                Tokens this run cannot OBSERVE are filtered OUT of the credited
+                set without disturbing finalisation: an unrecognised token, or
+                one belonging to another root, is a record that credits nothing
+                here — not a wrapper that never ran. Accepting a token no
+                measurement in this invocation could contradict would let a
+                forged credit ride out of reach of the very check that exists
+                to refute it.
 
                 Size is judged on the SAME descriptor the content comes from:
                 a separate ``stat()`` leaves a window in which a surviving child
@@ -13605,7 +13609,7 @@ class Orchestrator:
                 if not isinstance(tokens, list):
                     return False, set()
                 return True, {t for t in tokens
-                              if isinstance(t, str) and t in declared_origins}
+                              if isinstance(t, str) and t in acceptable}
 
             def _run_pytest(root: "Path", rel: str, noconftest: bool):
                 """Run the engine-selected test files under ``root``.
@@ -13711,7 +13715,15 @@ class Orchestrator:
                         obs_path.unlink(missing_ok=True)
                     return None, f"gate could not run in {root}: {exc}", False, set()
                 try:
-                    finalised, finally_seen = _read_observation(obs_path)
+                    # Only components OBSERVABLE in this root may be
+                    # credited from this root's run. A declaration belonging to
+                    # another root is not watched here, so accepting its credit
+                    # would take a claim no measurement in this invocation
+                    # could contradict — and the run that CAN measure it might
+                    # never credit it at all. Its own root's run answers for
+                    # it; the absence of a key is not a verdict.
+                    finalised, finally_seen = _read_observation(
+                        obs_path, set(watched))
                 finally:
                     obs_path.unlink(missing_ok=True)
                 head = result.split("\n", 1)[0]

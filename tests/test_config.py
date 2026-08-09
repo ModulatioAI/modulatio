@@ -6,10 +6,10 @@ Covers defaults.json load/save/reload + path accessors with fallbacks
 
 from __future__ import annotations
 
-import errno
 import json
 import os
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -749,24 +749,44 @@ def test_concurrent_secret_edits_do_not_lose_each_other(tmp_path, monkeypatch):
     assert "BASE=0" in body
 
 
-def test_a_symlinked_lock_path_is_refused(tmp_path):
-    """The lock exists so two editors serialize. Followed, a link planted at
-    its path creates a file wherever it points and takes the lock on THAT
-    inode — two processes whose links differ then both believe they hold it
-    and serialize against nothing, which is the lost update the lock prevents.
-    Creating a file at an attacker-chosen path is the second consequence."""
-    _point_vault_at(tmp_path)
-    lock_path = config.Path(str(config.secrets_path()) + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    victim = tmp_path / "victim"
-    lock_path.symlink_to(victim)
+def test_a_settings_home_that_is_not_a_real_directory_is_refused(tmp_path):
+    """The lock domain is the settings DIRECTORY, so the object substituted at
+    that path is what must be refused. A link points the lock at an inode this
+    process does not own; a FIFO would block the open forever, hanging every
+    secret edit; a regular file is not a domain at all."""
+    victim = tmp_path / "elsewhere"
+    victim.mkdir()
+    for name, plant in (
+        ("link", lambda p: p.symlink_to(victim)),
+        ("fifo", lambda p: os.mkfifo(p)),
+        ("file", lambda p: p.write_text("not a directory", encoding="utf-8")),
+    ):
+        home = tmp_path / f"home-{name}"
+        config.CONFIG_DIR = home
+        plant(home)
+        started = time.monotonic()
+        with pytest.raises(OSError):
+            with config._secret_edit_guard():
+                pass
+        assert time.monotonic() - started < 5, f"{name}: the open blocked"
 
-    with pytest.raises(OSError) as exc:
-        with config._secret_edit_guard():
-            pass
 
-    assert exc.value.errno in (errno.ELOOP, errno.EMLINK), exc.value
-    assert not victim.exists(), "a file was created through the planted link"
+def test_a_settings_home_others_can_write_is_repaired_before_it_is_trusted(
+        tmp_path):
+    """A lock inside a directory somebody else may write is not a lock: they
+    can rename the object aside and put their own in its place. The engine
+    owns this directory, so it repairs the mode rather than refusing its own
+    settings home — but it does so BEFORE the domain is trusted, never after."""
+    home = tmp_path / "loose"
+    home.mkdir(mode=0o755)
+    config.CONFIG_DIR = home
+    os.chmod(home, 0o777)
+
+    with config._secret_edit_guard():
+        pass
+
+    assert oct(home.stat().st_mode & 0o777) == "0o700", (
+        "the domain was trusted while others could still write it")
 
 
 def test_the_secret_guard_is_reentrant(tmp_path):
@@ -883,32 +903,7 @@ def test_doctor_ignores_models_that_carry_no_key(tmp_path, monkeypatch):
     assert "⚠" not in "\n".join(printed)
 
 
-@pytest.mark.parametrize("kind", ["fifo", "directory", "symlink"])
-def test_a_lock_object_that_is_not_a_regular_file_is_refused(tmp_path, kind):
-    """Refusing to FOLLOW a link says nothing about WHAT was opened. Opening a
-    FIFO waits for a writer that never comes, so one planted here hangs every
-    secret edit in the process — a denial of service costing an attacker one
-    mkfifo. A lock on a directory or a device serializes nothing at all."""
-    import time
-
-    _point_vault_at(tmp_path)
-    lock_path = config.Path(str(config.secrets_path()) + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    if kind == "fifo":
-        os.mkfifo(lock_path)
-    elif kind == "directory":
-        lock_path.mkdir()
-    else:
-        lock_path.symlink_to(tmp_path / "elsewhere")
-
-    started = time.monotonic()
-    with pytest.raises(OSError):
-        with config._secret_edit_guard():
-            pass
-    assert time.monotonic() - started < 5, "the open blocked instead of refusing"
-
-
-def test_an_ordinary_lock_file_is_still_accepted(tmp_path):
+def test_an_ordinary_settings_home_is_still_accepted(tmp_path):
     """The guard must keep working for the only shape it is meant to use."""
     _point_vault_at(tmp_path)
 
@@ -949,3 +944,63 @@ def test_two_processes_still_serialize_through_the_validated_lock(tmp_path):
     for tag in ("a", "b"):
         for i in range(20):
             assert f"K_{tag}_{i}={i}" in text, f"lost update K_{tag}_{i}"
+
+
+def test_replacing_the_public_lock_name_cannot_split_the_lock_domain(tmp_path):
+    """A lock addressed by PATHNAME is only as stable as the name. Whoever can
+    write the directory renames the lock file aside, puts another valid one in
+    its place, and a second process acquires it while the first still holds the
+    original — two good locks on different inodes, serializing against nothing.
+
+    The domain is the directory's inode, so there is no name left to replace:
+    the swap below changes nothing about who holds what."""
+    import subprocess
+    import sys
+
+    home = tmp_path / "cfg"
+    home.mkdir(mode=0o700)
+    config.CONFIG_DIR = home
+
+    holder = subprocess.Popen(
+        [sys.executable, "-c",
+         "import sys, time; sys.path.insert(0, 'src')\n"
+         "from modulatio import config\n"
+         f"config.CONFIG_DIR = config.Path({str(home)!r})\n"
+         "with config._secret_edit_guard():\n"
+         "    print('HELD', flush=True)\n"
+         "    time.sleep(6)\n"],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "HELD"
+
+        # The attack: replace whatever public name a pathname-addressed lock
+        # would have used, with another perfectly valid owned 0600 file.
+        stale = home / ".env.lock"
+        stale.unlink(missing_ok=True)
+        replacement = home / ".env.lock"
+        replacement.write_bytes(b"")
+        replacement.chmod(0o600)
+
+        # A second process must NOT be able to enter while the first holds it.
+        second = subprocess.run(
+            [sys.executable, "-c",
+             "import sys; sys.path.insert(0, 'src')\n"
+             "from modulatio import config\n"
+             f"config.CONFIG_DIR = config.Path({str(home)!r})\n"
+             "import fcntl, os\n"
+             "fd = os.open(str(config.CONFIG_DIR), os.O_RDONLY | os.O_DIRECTORY)\n"
+             "try:\n"
+             "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+             "    print('ENTERED')\n"
+             "except BlockingIOError:\n"
+             "    print('EXCLUDED')\n"],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            capture_output=True, text=True, timeout=60)
+
+        assert "EXCLUDED" in second.stdout, (
+            f"a second process entered while the first held the domain: "
+            f"{second.stdout}{second.stderr}")
+    finally:
+        holder.kill()
+        holder.wait(timeout=30)

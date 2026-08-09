@@ -2003,3 +2003,55 @@ def test_an_unreadable_target_treats_a_conditional_requirement_as_active(
     root = _project(tmp_path, 'nonesuch; python_version < "3.12"')
 
     assert cp._unsatisfiable_build_requirement(root, wh) is not None
+
+
+def test_a_target_probe_cannot_execute_the_working_directory(tmp_path, monkeypatch):
+    """``-c`` puts the INHERITED WORKING DIRECTORY on ``sys.path``, so a probe
+    launched from a deliverable's tree imports that deliverable's ``packaging``
+    or ``platform`` and runs it in the HOST process — outside every containment
+    these probes are meant to precede. Isolated mode drops the directory from
+    the path."""
+    sentinel = tmp_path / "EXECUTED"
+    for shadow in ("packaging", "platform", "json"):
+        (tmp_path / f"{shadow}.py").write_text(
+            f"import pathlib\n"
+            f"pathlib.Path({str(sentinel)!r}).write_text('ran')\n"
+            f"raise ImportError('stop')\n", encoding="utf-8")
+    (tmp_path / "packaging").mkdir()
+    (tmp_path / "packaging" / "__init__.py").write_text(
+        f"import pathlib\n"
+        f"pathlib.Path({str(sentinel)!r}).write_text('ran')\n"
+        f"raise ImportError('stop')\n", encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cp, "_TARGET_TAGS_CACHE", cp._UNSET)
+    monkeypatch.setattr(cp, "_PEP508_ENV_CACHE", None)
+
+    cp._target_wheel_tags()
+    cp._pep508_env()
+
+    assert not sentinel.exists(), (
+        "a working-directory module executed in the host process context")
+
+
+def test_the_target_probes_are_launched_isolated(tmp_path, monkeypatch):
+    """Asserted on the REAL argv rather than a patched return value: the
+    protection is the flag, so the flag is what must be pinned."""
+    seen: "list[list]" = []
+    real = cp.subprocess.run
+
+    def _record(argv, *args, **kwargs):
+        seen.append((list(argv), kwargs.get("cwd")))
+        return real(argv, *args, **kwargs)
+
+    monkeypatch.setattr(cp.subprocess, "run", _record)
+    monkeypatch.setattr(cp, "_TARGET_TAGS_CACHE", cp._UNSET)
+    monkeypatch.setattr(cp, "_PEP508_ENV_CACHE", None)
+
+    cp._target_wheel_tags()
+    cp._pep508_env()
+
+    assert seen, "no probe ran"
+    for argv, cwd in seen:
+        assert "-I" in argv, f"probe not isolated: {argv[:3]}"
+        assert cwd == cp._ENGINE_OWNED_CWD, f"probe ran from {cwd}"
