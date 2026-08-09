@@ -111,6 +111,21 @@ def test_seat_and_redo_phases_read_as_english_not_raw_tokens():
     assert cooldown != no_progress
 
 
+def test_a_handoff_verb_does_not_name_the_receiving_seat_by_its_role():
+    """Every other line in the feed names its seat from the roster, so a static
+    verb naming one by role word is the only place a named seat reads as
+    anonymous. The verb states the handoff; the review event that follows
+    carries the name."""
+    from modulatio.tui.widgets.stream_view import _PHASE
+
+    no_progress = _PHASE["redo_no_progress"][1]
+
+    assert "QC" not in no_progress
+    assert "review" in no_progress
+    # The verdict's TYPE is not a seat, so that verb keeps the role word.
+    assert "QC" in _PHASE["qc_verdict"][1]
+
+
 def test_leader_role_covers_leader_star_and_planner():
     for r in ("leader", "leader-decompose", "leader-reflect", "leader-iterate",
               "leader-chat", "planner"):

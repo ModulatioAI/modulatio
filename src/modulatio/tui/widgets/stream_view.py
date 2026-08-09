@@ -107,7 +107,11 @@ _PHASE: dict[str, tuple[str, str]] = {
     # The redo loop ended because the attempt came back byte-identical, not
     # because the seat is unhealthy — an unmapped phase would print the raw
     # token and invite that reading.
-    "redo_no_progress": ("!!", "repeated an identical attempt — handing to QC"),
+    # Naming the receiving seat by its role word is the one place this table
+    # could do it: the phase text is static, so it has no id to resolve. The
+    # handoff is stated without naming anyone, and the review event that follows
+    # carries the seat's own name.
+    "redo_no_progress": ("!!", "repeated an identical attempt — handing it off for review"),
 }
 
 
