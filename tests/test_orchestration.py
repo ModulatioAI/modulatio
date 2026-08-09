@@ -13,7 +13,8 @@ from pathlib import Path
 import pytest
 
 from modulatio import roster, standards, store, vault
-from modulatio.orchestration import Orchestrator, _format_standards_block, _strip_preamble, _strip_thinking
+from modulatio.orchestration import Orchestrator
+from modulatio.orchestration import TestEvidence as _TE, _format_standards_block, _strip_preamble, _strip_thinking
 from modulatio.types import (
     GoalStatus,
     Project,
@@ -514,15 +515,15 @@ def test_consume_mode_command_parses_strips_and_sets_mode(project: Project):
     assert orch._session_mode is RunMode.DEFAULT          # default
 
     matched, stripped = orch._consume_mode_command("/goal build a site")
-    assert matched is True and stripped == "build a site"  # command stripped
+    assert matched is _TE.ADVISORY_SUCCESS and stripped == "build a site"  # command stripped
     assert orch._session_mode is RunMode.GOAL
 
     matched, stripped = orch._consume_mode_command("/yolo")
-    assert matched is True and stripped == ""              # bare command
+    assert matched is _TE.ADVISORY_SUCCESS and stripped == ""              # bare command
     assert orch._session_mode is RunMode.YOLO
 
     matched, stripped = orch._consume_mode_command("hello there")
-    assert matched is False and stripped == "hello there"  # not a command
+    assert matched is _TE.HARD_FAILURE and stripped == "hello there"  # not a command
     assert orch._session_mode is RunMode.YOLO              # unchanged
 
     orch._consume_mode_command("/default")
@@ -8006,7 +8007,7 @@ def test_qc_fix_forward_disabled_falls_through(project, monkeypatch):
     handled = orch._attempt_qc_fix_forward(
         task, draft, (_rejected_verdict(), "fix the section"), summary
     )
-    assert handled is False
+    assert handled is _TE.HARD_FAILURE
     assert task.qc_authored_fix is False
 
 
@@ -8026,7 +8027,7 @@ def test_qc_fix_forward_builds_when_draft_empty(project, monkeypatch):
     summary = RunSummary(project=project)
 
     handled = orch._attempt_qc_fix_forward(task, draft, None, summary)
-    assert handled is True
+    assert handled is _TE.ADVISORY_SUCCESS
     assert task.status == TaskStatus.COMPLETED
     assert task.qc_authored_fix is True
     assert draft.read_text().strip()  # QC authored a real body
@@ -8045,7 +8046,7 @@ def test_qc_fix_forward_builds_when_draft_missing(project, monkeypatch):
     summary = RunSummary(project=project)
 
     handled = orch._attempt_qc_fix_forward(task, draft, None, summary)
-    assert handled is True
+    assert handled is _TE.ADVISORY_SUCCESS
     assert task.status == TaskStatus.COMPLETED
     assert draft.exists() and draft.read_text().strip()
 
@@ -8096,7 +8097,7 @@ def test_qc_fix_forward_completes_on_qc_patch(project, monkeypatch):
         task, draft, (_rejected_verdict(), "fix the section"), summary,
         defect_type="substantive",
     )
-    assert handled is True
+    assert handled is _TE.ADVISORY_SUCCESS
     assert task.status == TaskStatus.COMPLETED
     assert task.qc_authored_fix is True
     assert any(
@@ -11630,7 +11631,7 @@ def test_qc_fix_forward_rescues_single_file_code_draft(project, monkeypatch):
         task, draft, (_rejected_verdict(), "strip everything before <?xml"),
         summary,
     )
-    assert handled is True
+    assert handled is _TE.ADVISORY_SUCCESS
     assert task.status == TaskStatus.COMPLETED
     assert task.qc_authored_fix is True
 
@@ -11655,7 +11656,7 @@ def test_qc_fix_forward_still_declines_a_real_multifile_bundle(project, monkeypa
     handled = orch._attempt_qc_fix_forward(
         task, draft, (_rejected_verdict(), "fix it"), summary,
     )
-    assert handled is False
+    assert handled is _TE.HARD_FAILURE
     assert task.qc_authored_fix is False
 
 
@@ -13059,7 +13060,7 @@ def test_qc_fix_forward_refuses_multifile_draft(project: Project, monkeypatch):
     rescued = orch._attempt_qc_fix_forward(
         task, draft, (verdict, "fix util.py"), RunSummary(project=project),
     )
-    assert rescued is False, "a multi-file draft must not be single-file rescued"
+    assert rescued is _TE.HARD_FAILURE, "a multi-file draft must not be single-file rescued"
     assert not patched_called, "the single-file patch must not run"
     assert task.status != TaskStatus.COMPLETED
 
@@ -13854,18 +13855,18 @@ def test_engine_evidence_is_recorded_beside_the_verifier_account():
     Recording the reading beside the account removes the need to agree."""
     from modulatio.orchestration import _format_engine_evidence as fmt
 
-    passed = fmt((True, "build: ok\ntest: ok\n52 passed"))
+    passed = fmt((_TE.ADVISORY_SUCCESS, "build: ok\ntest: ok\n52 passed"))
     # Not "PASSED": what the engine holds is the run's own report, which is a
     # different thing from a finding of its own and has to look like one.
     assert "producer-authored" in passed and "52 passed" in passed
     assert "not by the verifier" in passed
 
-    failed = fmt((False, "wheel: product_failed"))
+    failed = fmt((_TE.HARD_FAILURE, "wheel: product_failed"))
     assert "FAILED" in failed and "wheel: product_failed" in failed
 
     # Unavailable is stated, never silently absent — a code goal that was not
     # measured must not read the same as one that passed.
-    unknown = fmt((None, "sandbox not enforceable"))
+    unknown = fmt((_TE.UNAVAILABLE, "sandbox not enforceable"))
     assert "NOT MEASURED" in unknown and "sandbox not enforceable" in unknown
 
     # A goal with no code deliverable has no reading to report.
@@ -13880,13 +13881,13 @@ def test_an_unmeasured_goal_says_the_verdict_above_it_is_unverified():
     not a failing one."""
     from modulatio.orchestration import _format_engine_evidence as fmt
 
-    unknown = fmt((None, "sandbox not enforceable"))
+    unknown = fmt((_TE.UNAVAILABLE, "sandbox not enforceable"))
     assert "unverified" in unknown
     assert "verdict stands as written" in unknown
 
     # A measurement that was actually taken needs no such caveat.
-    assert "unverified" not in fmt((True, "52 passed"))
-    assert "unverified" not in fmt((False, "1 failed"))
+    assert "unverified" not in fmt((_TE.ADVISORY_SUCCESS, "52 passed"))
+    assert "unverified" not in fmt((_TE.HARD_FAILURE, "1 failed"))
 
 
 def test_captured_output_cannot_break_out_of_the_evidence_block():
@@ -13894,7 +13895,7 @@ def test_captured_output_cannot_break_out_of_the_evidence_block():
     quoted inside and let the rest render as document."""
     from modulatio.orchestration import _format_engine_evidence as fmt
 
-    out = fmt((True, "before ``` after"))
+    out = fmt((_TE.ADVISORY_SUCCESS, "before ``` after"))
     assert out.count("```") == 2, "the fence must open and close exactly once"
     assert "'''" in out
 

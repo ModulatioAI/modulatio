@@ -16,6 +16,7 @@ from __future__ import annotations
 import collections
 import contextvars
 import hashlib
+import enum
 import json
 import logging
 import os
@@ -1099,6 +1100,27 @@ def _format_kickoff_attachments(attachments: list) -> str:
     return "\n".join(parts)
 
 
+class TestEvidence(enum.Enum):
+    """What a code goal's test run established, as a fact the engine routes on.
+
+    A single boolean could only say green or not, and "green" is precisely the
+    claim the engine cannot make: the suite belongs to the deliverable and runs
+    in one interpreter with the code it judges, so a reported success is what
+    the run said rather than something the engine established. Naming the
+    states keeps that distinction in the value every caller receives, not only
+    in the prose beside it.
+    """
+
+    #: A failure the engine RECOVERED — an outcome it can act on. Nothing is
+    #: gained by reporting a failure falsely, so this one binds and clamps.
+    HARD_FAILURE = "hard_failure"
+    #: The run reported no failures. Producer-authored, completion not
+    #: attested: evidence, never an attestation.
+    ADVISORY_SUCCESS = "advisory_success"
+    #: No measurement was taken, so nothing about the suite is known.
+    UNAVAILABLE = "unavailable"
+
+
 def _format_engine_evidence(gate: "tuple[bool | None, str] | None") -> str:
     """The engine's own build-and-test reading, for the end of a goal report.
 
@@ -1116,16 +1138,18 @@ def _format_engine_evidence(gate: "tuple[bool | None, str] | None") -> str:
     """
     if gate is None:
         return ""
-    green, body = gate
+    state, body = gate
     headline = {
-        None: "NOT MEASURED — no evidence was gathered for this code goal",
+        TestEvidence.UNAVAILABLE:
+            "NOT MEASURED — no evidence was gathered for this code goal",
         # Not "PASSED". The suite belongs to the deliverable and runs in one
         # interpreter with the code it judges, so a reported success is what
         # the run SAID, not something the engine established. A failure is
         # different: nothing is gained by reporting one falsely, so it binds.
-        True: "NO FAILURES REPORTED — producer-authored, completion not attested",
-        False: "FAILED",
-    }[green]
+        TestEvidence.ADVISORY_SUCCESS:
+            "NO FAILURES REPORTED — producer-authored, completion not attested",
+        TestEvidence.HARD_FAILURE: "FAILED",
+    }[state]
     # A failure is bound elsewhere; a reported success is worth what it says
     # above. An ABSENT measurement is the state a report can be written over
     # without contradicting anything on the page. Saying so is the engine's to
@@ -1136,7 +1160,7 @@ def _format_engine_evidence(gate: "tuple[bool | None, str] | None") -> str:
         "measure, so any claim of a passing suite above is unverified. The "
         "verdict stands as written: an absent measurement is not a failing "
         "one.\n"
-        if green is None else ""
+        if state is TestEvidence.UNAVAILABLE else ""
     )
     return (
         "\n\n---\n\n"
@@ -13345,14 +13369,16 @@ class Orchestrator:
         """#43: engine-run test-suite evidence for CODE goals. Four states:
 
         - ``None`` — not applicable (no code deliverable in the goal).
-        - ``(None, reason)`` — gate UNAVAILABLE (sandbox not enforceable,
-          pytest missing, tool refusal). Surfaced in the verify evidence so
-          a code goal never SILENTLY ships without test evidence; no clamp.
-        - ``(False, report)`` — RED, including "no suite root discovered"
-          and "no tests collected": a code deliverable without a runnable
-          green suite has no evidence to show. Joins ``goal_spec_issues`` →
-          the verdict CLAMP binds it as a measured HARD violation.
-        - ``(True, report)`` — GREEN; rides into the verify prompt.
+        - ``UNAVAILABLE`` (sandbox not enforceable, pytest missing, tool
+          refusal). Surfaced in the verify evidence so a code goal never
+          SILENTLY ships without test evidence; no clamp.
+        - ``HARD_FAILURE``, including "no suite root discovered" and "no tests
+          collected": a code deliverable with no runnable suite has nothing to
+          show. Joins ``goal_spec_issues`` → the verdict CLAMP binds it.
+        - ``ADVISORY_SUCCESS`` — the run reported no failures. Not a claim the
+          engine makes: the suite is the deliverable's and shares an
+          interpreter with the code it judges, so this rides into the verify
+          prompt as evidence and never as an attestation.
 
         Two DIFFERENT facts come back from the engine's wrapper, and only one
         of them is advisory.
@@ -13411,10 +13437,10 @@ class Orchestrator:
                 "run unsandboxed, so no test evidence was gathered"
             )
             _logger.warning("pytest gate unavailable: %s", reason)
-            return None, reason
+            return TestEvidence.UNAVAILABLE, reason
         roots = self._pytest_repo_roots(tasks)
         if not roots:
-            return False, (
+            return TestEvidence.HARD_FAILURE, (
                 "no runnable test suite discovered under the deliverable "
                 "(no pyproject.toml / pytest.ini / setup.cfg / tox.ini / "
                 "tests/ at or above the declared code paths) — a code goal "
@@ -13434,7 +13460,7 @@ class Orchestrator:
                 project_code=self.project.code,
             ).get("run_shell")
         if run_shell is None:
-            return None, "run_shell tool unavailable (no artifacts root bound)"
+            return TestEvidence.UNAVAILABLE, "run_shell tool unavailable (no artifacts root bound)"
 
         # The runner comes from the engine's approved bundle, not from PATH.
         # PATH answers with the host's system interpreter, which carries a
@@ -13459,7 +13485,7 @@ class Orchestrator:
             env, provisioned = _probes.provision_runner_env(gate_home)
             if provisioned.status is not _probes.ProbeStatus.OK:
                 _sh.rmtree(gate_home, ignore_errors=True)
-                return None, (
+                return TestEvidence.UNAVAILABLE, (
                     f"engine test runner could not be provisioned: "
                     f"{provisioned.reason}"
                 )
@@ -13472,7 +13498,7 @@ class Orchestrator:
             ).get("run_shell")
             if run_shell is None:
                 _sh.rmtree(gate_home, ignore_errors=True)
-                return None, "run_shell tool unavailable (no artifacts root bound)"
+                return TestEvidence.UNAVAILABLE, "run_shell tool unavailable (no artifacts root bound)"
 
         try:
             def _read_observation(path: "Path") -> "tuple[bool, set]":
@@ -13664,7 +13690,7 @@ class Orchestrator:
                 code, res, finalised, hookfree_seen = _run_pytest(
                     repo_root, rel, noconftest=True)
                 if code is None:
-                    return None, res  # UNAVAILABLE (tool refusal / no pytest)
+                    return TestEvidence.UNAVAILABLE, res  # UNAVAILABLE (tool refusal / no pytest)
                 if code == 0 and not finalised:
                     # Exit zero WITHOUT a finalised record is not a pytest
                     # outcome: the wrapper writes only after ``pytest.main()``
@@ -13672,7 +13698,7 @@ class Orchestrator:
                     # ``os._exit``, a crash, a killed interpreter) and nothing
                     # ran to completion. Reading exit status as green here is a
                     # false GREEN straight through the hard gate.
-                    return False, _unfinalised_report(repo_root, res)
+                    return TestEvidence.HARD_FAILURE, _unfinalised_report(repo_root, res)
                 if code == 0:
                     # This invocation's green is the one being reported, so its
                     # observation is the evidence for this root.
@@ -13680,11 +13706,11 @@ class Orchestrator:
                     reports.append(
                         f"engine-run pytest (hook-free, cwd: {repo_root}) — "
                         + _snip(res))
-                    continue  # authoritative GREEN for this root
+                    continue  # this root reported no failures
                 if _has_real_failure(res):
                     # A real test failed with hooks stripped — authoritative RED,
                     # even if a conftest would have hidden it.
-                    return False, (
+                    return TestEvidence.HARD_FAILURE, (
                         f"engine-run pytest (hook-free, cwd: {repo_root}) is RED "
                         "— a test the engine discovered fails when producer "
                         f"collection hooks are stripped:\n\n{_snip(res)}")
@@ -13694,7 +13720,7 @@ class Orchestrator:
                     # failure whose summary was truncated from a genuine
                     # conftest-dependency. Fail closed — never infer
                     # conftest-dependent (→ advisory green) from missing tail text.
-                    return None, (
+                    return TestEvidence.UNAVAILABLE, (
                         f"hook-free pytest output under {repo_root} was truncated; "
                         "the failure kind cannot be certified safely"
                     )
@@ -13710,12 +13736,12 @@ class Orchestrator:
                 code_cf, res_cf, finalised_cf, advisory_seen = _run_pytest(
                     repo_root, rel, noconftest=False)
                 if code_cf is None:
-                    return None, res_cf
+                    return TestEvidence.UNAVAILABLE, res_cf
                 if code_cf == 0 and not finalised_cf:
                     # Same false-GREEN shape on the fallback lane: a zero exit
                     # with no wrapper result is an absence of evidence, and this
                     # is the invocation whose green would be REPORTED.
-                    return False, _unfinalised_report(repo_root, res_cf)
+                    return TestEvidence.HARD_FAILURE, _unfinalised_report(repo_root, res_cf)
                 observed_imports |= advisory_seen
                 advisory = True
                 all_green = all_green and code_cf == 0
@@ -13733,10 +13759,10 @@ class Orchestrator:
             if smoke is not None:
                 smoke_state, smoke_report = smoke
                 if smoke_state is None:
-                    return None, smoke_report
+                    return TestEvidence.UNAVAILABLE, smoke_report
                 reports.append(smoke_report)
                 if not smoke_state:
-                    return False, "\n\n".join(reports)
+                    return TestEvidence.HARD_FAILURE, "\n\n".join(reports)
 
             # HARD STATES RESOLVE FIRST. Everything below this point describes a
             # genuinely green suite, so no RED path may reach the import advisory:
@@ -13746,10 +13772,10 @@ class Orchestrator:
             if not any_tests:
                 # Suite roots existed but not one engine-discoverable test file —
                 # no green evidence to show, same as no suite at all (RED).
-                return False, "\n\n".join(reports)
+                return TestEvidence.HARD_FAILURE, "\n\n".join(reports)
             if not all_green:
                 # A reported failure on the conftest-enabled fallback lane.
-                return False, "\n\n".join(reports)
+                return TestEvidence.HARD_FAILURE, "\n\n".join(reports)
 
             # A green suite that never reaches the shipped component proves the
             # suite runs, not that the product works. Whether it reached the
@@ -13794,7 +13820,7 @@ class Orchestrator:
                     "the tests ran and are reported, but the engine cannot certify "
                     "that producer code did not influence the result. Treat it as "
                     "evidence, not a tamper-proof attestation.")
-            return True, "\n\n".join(reports)  # every RED path returned above
+            return TestEvidence.ADVISORY_SUCCESS, "\n\n".join(reports)  # every RED path returned above
         finally:
             # The runner does not outlive the measurement it was built
             # for: every exit releases it, so a refused, failed, or
@@ -14347,10 +14373,10 @@ class Orchestrator:
                         + self._operation_bar_directive(t)
                     )
 
-        # #43: engine-run test-suite evidence for CODE goals. GREEN rides into
-        # the verify prompt as evidence; RED joins goal_spec_issues so the
-        # verdict clamp binds it as a measured HARD violation — a code goal
-        # cannot be waved through without a recorded green pytest run. Hard RED
+        # Engine-run test-suite evidence for CODE goals. A reported success
+        # rides into the verify prompt as evidence; a HARD_FAILURE joins
+        # goal_spec_issues so the verdict clamp binds it — a code goal cannot
+        # be waved through without a test run behind it. A hard failure
         # comes only from an actual pytest failure, an absent suite/tests, or
         # the independent convention smoke; the in-process import-binding
         # observation rides in the report as ADVISORY diagnostic and never
@@ -14359,9 +14385,9 @@ class Orchestrator:
         # untrusted; its fences are defused before it rides into any prompt.
         pytest_gate = self._goal_pytest_gate(tasks)
         if pytest_gate is not None:
-            gate_green, gate_report = pytest_gate
+            gate_state, gate_report = pytest_gate
             safe_report = gate_report.replace("```", "'''")
-            if gate_green is None:
+            if gate_state is TestEvidence.UNAVAILABLE:
                 artifact_blocks.append(
                     "### Test-suite evidence — GATE UNAVAILABLE (engine)\n\n"
                     f"```\n{safe_report}\n```\n\n"
@@ -14392,7 +14418,7 @@ class Orchestrator:
                     "and collection are the engine's; the tests and their "
                     f"outcomes are the deliverable's)\n\n```\n{safe_report}\n```"
                 )
-                if not gate_green:
+                if gate_state is TestEvidence.HARD_FAILURE:
                     goal_spec_issues.append(
                         "test-suite: engine-run pytest is RED — the goal's "
                         "code deliverable has no green test evidence (see "

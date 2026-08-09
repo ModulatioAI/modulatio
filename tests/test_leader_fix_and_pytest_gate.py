@@ -26,6 +26,7 @@ from modulatio import orchestration as _orch_mod
 from modulatio import runners as mod_runners
 from modulatio import config, sandbox, store, tools, vault
 from modulatio.orchestration import Orchestrator
+from modulatio.orchestration import TestEvidence as _TE
 from modulatio.types import Goal, GoalStatus, Project, Task
 
 from tests.test_orchestration import (
@@ -108,13 +109,13 @@ def test_pytest_gate_states_non_code_unavailable_and_no_suite(
     # Suite-wide sandbox bypass (the conftest default) → UNAVAILABLE, never
     # silent: model-authored tests must not run unsandboxed (H1).
     unavailable = orch._goal_pytest_gate([_code_task()])
-    assert unavailable is not None and unavailable[0] is None
+    assert unavailable is not None and unavailable[0] is _TE.UNAVAILABLE
     assert "sandbox" in unavailable[1]
     # Enforceable sandbox but no suite anywhere → RED, not a silent skip
     # (Mycroft MED-1): a code goal with no suite has no green evidence.
     _enforceable_sandbox(monkeypatch)
     no_suite = orch._goal_pytest_gate([_code_task()])
-    assert no_suite is not None and no_suite[0] is False
+    assert no_suite is not None and no_suite[0] is _TE.HARD_FAILURE
     assert "no runnable test suite" in no_suite[1]
 
 
@@ -130,7 +131,7 @@ def test_pytest_gate_green_red_and_empty_suite(project_with_run, monkeypatch):
 
     # Marker present but NO tests collected → RED ("no green evidence").
     empty = orch._goal_pytest_gate([_code_task()])
-    assert empty is not None and empty[0] is False
+    assert empty is not None and empty[0] is _TE.HARD_FAILURE
 
     tests_dir = root / "tests"
     tests_dir.mkdir()
@@ -138,14 +139,14 @@ def test_pytest_gate_green_red_and_empty_suite(project_with_run, monkeypatch):
         "def test_ok():\n    assert True\n", encoding="utf-8")
     green = orch._goal_pytest_gate([_code_task()])
     assert green is not None
-    assert green[0] is True
+    assert green[0] is _TE.ADVISORY_SUCCESS
     assert "engine-run pytest" in green[1]
 
     (tests_dir / "test_bad.py").write_text(
         "def test_bad():\n    assert False\n", encoding="utf-8")
     red = orch._goal_pytest_gate([_code_task()])
     assert red is not None
-    assert red[0] is False
+    assert red[0] is _TE.HARD_FAILURE
     assert "test_bad" in red[1]
 
 
@@ -156,7 +157,7 @@ def test_red_pytest_clamps_satisfied_verdict(project, monkeypatch):
     monkeypatch.setenv("MODULATIO_GOAL_MAX_RETRIES", "0")
     monkeypatch.setattr(
         Orchestrator, "_goal_pytest_gate",
-        lambda self, tasks: (False, "engine-run pytest — exit 1\n1 failed"),
+        lambda self, tasks: (_TE.HARD_FAILURE, "engine-run pytest — exit 1\n1 failed"),
     )
 
     def _leader_satisfied(prompt: str) -> str:
@@ -203,7 +204,7 @@ def test_unfinalised_observation_clamps_satisfied_verdict(project, monkeypatch):
     )
     monkeypatch.setattr(
         Orchestrator, "_goal_pytest_gate",
-        lambda self, tasks: (False, unfinalised_report),
+        lambda self, tasks: (_TE.HARD_FAILURE, unfinalised_report),
     )
 
     def _leader_satisfied(prompt: str) -> str:
@@ -250,7 +251,7 @@ def test_advisory_import_binding_does_not_clamp_a_satisfied_verdict(
     )
     monkeypatch.setattr(
         Orchestrator, "_goal_pytest_gate",
-        lambda self, tasks: (True, advisory_report),
+        lambda self, tasks: (_TE.ADVISORY_SUCCESS, advisory_report),
     )
 
     def _leader_satisfied(prompt: str) -> str:
@@ -505,7 +506,7 @@ def test_green_over_tampered_suite_clamps_to_disappointed(project, monkeypatch):
     monkeypatch.setenv("MODULATIO_GOAL_MAX_RETRIES", "0")
     monkeypatch.setattr(
         Orchestrator, "_goal_pytest_gate",
-        lambda self, tasks: (True, "engine-run pytest — exit 0\n3 passed"),
+        lambda self, tasks: (_TE.ADVISORY_SUCCESS, "engine-run pytest — exit 0\n3 passed"),
     )
     # The leader fix left a snapshotted suite file modified/deleted.
     monkeypatch.setattr(
@@ -560,7 +561,7 @@ def test_gate_unavailable_never_runs_collection_code(project_with_run, monkeypat
     monkeypatch.setattr(sandbox, "current_profile", lambda: "standard")
 
     state, reason = orch._goal_pytest_gate([_code_task()])
-    assert state is None and "sandbox" in reason      # unavailable, surfaced
+    assert state is _TE.UNAVAILABLE and "sandbox" in reason  # surfaced, not silent
     assert not marker.exists()                          # collection never ran
 
 
@@ -655,7 +656,7 @@ def test_decoy_testpaths_cannot_hide_a_red_suite(project_with_run, monkeypatch):
         '[tool.pytest.ini_options]\ntestpaths = ["decoy"]\n', encoding="utf-8")
 
     state, report = orch._goal_pytest_gate([_code_task()])
-    assert state is False and "test_real" in report
+    assert state is _TE.HARD_FAILURE and "test_real" in report
 
 
 def test_repo_roots_derive_from_declared_output_paths(project_with_run):
@@ -738,7 +739,7 @@ def test_gate_neutralizes_hostile_addopts(project_with_run, monkeypatch):
         'norecursedirs = ["real_tests"]\n', encoding="utf-8")
 
     state, report = orch._goal_pytest_gate([_code_task()])
-    assert state is False and "test_real" in report
+    assert state is _TE.HARD_FAILURE and "test_real" in report
 
 
 def test_added_config_file_is_tamper(project_with_run):
@@ -838,7 +839,7 @@ def test_conftest_hook_cannot_greenwash_gate(project_with_run, monkeypatch):
         encoding="utf-8")
 
     state, report = orch._goal_pytest_gate([_code_task()])
-    assert state is False
+    assert state is _TE.HARD_FAILURE
     assert "test_real" in report and "hook-free" in report
 
 
@@ -886,7 +887,7 @@ def test_conftest_hook_cannot_drop_a_single_param(project_with_run, monkeypatch)
         encoding="utf-8")
 
     state, report = orch._goal_pytest_gate([_code_task()])
-    assert state is False
+    assert state is _TE.HARD_FAILURE
     assert "test_value" in report and "hook-free" in report
 
 
@@ -919,7 +920,7 @@ def test_conftest_hook_that_forges_and_xfails_cannot_greenwash(
         encoding="utf-8")
 
     state, report = orch._goal_pytest_gate([_code_task()])
-    assert state is False and "hook-free" in report
+    assert state is _TE.HARD_FAILURE and "hook-free" in report
 
 
 @pytest.mark.skipif(not sandbox.is_sandbox_available(),
@@ -943,7 +944,7 @@ def test_conftest_required_suite_is_advisory_green(project_with_run, monkeypatch
         "        metafunc.parametrize('value', [1, 2])\n", encoding="utf-8")
 
     state, report = orch._goal_pytest_gate([_code_task()])
-    assert state is True         # ran green with conftest
+    assert state is _TE.ADVISORY_SUCCESS         # ran green with conftest
     assert "ADVISORY" in report  # disclosed, not silently authoritative
 
 
@@ -966,7 +967,7 @@ def test_conftest_required_suite_that_fails_is_red(project_with_run, monkeypatch
         "        metafunc.parametrize('value', [1, 2])\n", encoding="utf-8")
 
     state, _ = orch._goal_pytest_gate([_code_task()])
-    assert state is False
+    assert state is _TE.HARD_FAILURE
 
 
 # --------------------------------------------- cadre R5 (R6 round) closure
@@ -994,7 +995,7 @@ def test_conftest_hook_cannot_hide_special_char_test_path(
         encoding="utf-8")
 
     state, report = orch._goal_pytest_gate([_code_task()])
-    assert state is False
+    assert state is _TE.HARD_FAILURE
     assert "test_red+case.py" in report and "hook-free" in report
 
 
@@ -1026,7 +1027,7 @@ def test_noisy_hook_free_failure_is_red_not_advisory(project_with_run, monkeypat
         encoding="utf-8")
 
     state, report = orch._goal_pytest_gate([_code_task()])
-    assert state is False           # authoritative RED, never advisory green
+    assert state is _TE.HARD_FAILURE           # authoritative RED, never advisory green
     assert "ADVISORY" not in report
 
 
@@ -1516,7 +1517,7 @@ def test_absent_test_runner_is_unavailable_not_red(project_with_run, monkeypatch
     verdict = orch._goal_pytest_gate([_code_task()])
 
     assert verdict is not None
-    assert verdict[0] is None, "an absent runner must not be scored as a red suite"
+    assert verdict[0] is _TE.UNAVAILABLE, "an absent runner must not be scored as a red suite"
     assert "not installed" in verdict[1]
 
 
@@ -1546,7 +1547,7 @@ def test_a_real_failure_is_still_red(project_with_run, monkeypatch):
     verdict = orch._goal_pytest_gate([_code_task()])
 
     assert verdict is not None
-    assert verdict[0] is False, "a suite that ran and failed is still red"
+    assert verdict[0] is _TE.HARD_FAILURE, "a suite that ran and failed is still red"
 
 
 def test_orientation_cannot_spend_the_repair_budget(project, monkeypatch):
@@ -1699,7 +1700,7 @@ def test_unmeasured_suite_is_disclosed_to_the_operator_without_clamping(
     monkeypatch.setenv("MODULATIO_GOAL_MAX_RETRIES", "0")
     monkeypatch.setattr(
         Orchestrator, "_goal_pytest_gate",
-        lambda self, tasks: (None, "sandbox not enforceable on this host"),
+        lambda self, tasks: (_TE.UNAVAILABLE, "sandbox not enforceable on this host"),
     )
 
     def _leader_claims_green(prompt: str) -> str:
@@ -1821,7 +1822,7 @@ def test_a_green_suite_is_reported_as_evidence_not_as_an_attestation(
 
     state, report = orch._goal_pytest_gate([_code_task()])
 
-    assert state is True, report
+    assert state is _TE.ADVISORY_SUCCESS, report
     assert "PRODUCER-AUTHORED" in report
     assert "never an attestation" in report
     # The asymmetry is the point: a failure still binds.
@@ -1846,7 +1847,7 @@ def test_an_absent_completion_record_still_fails_the_gate_closed(
 
     state, report = orch._goal_pytest_gate([_code_task()])
 
-    assert state is False, report
+    assert state is _TE.HARD_FAILURE, report
 
 
 def test_no_shipped_surface_claims_a_producer_suite_was_attested():
@@ -1867,6 +1868,11 @@ def test_no_shipped_surface_claims_a_producer_suite_was_attested():
         "engine-run pytest, deterministic",
         "hard *completion*",
         "hard completion evidence",
+        # The contract vocabulary itself, not only the marketing: a status
+        # named green is a claim wherever a caller reads it.
+        "``(True, report)`` — GREEN",
+        "recorded green pytest run",
+        "authoritative GREEN",
     )
     for path in surfaces:
         if not path.exists():
@@ -1881,10 +1887,10 @@ def test_the_evidence_block_does_not_render_a_reported_success_as_passed():
     own report, which is a different thing and has to look like one."""
     from modulatio.orchestration import _format_engine_evidence as fmt
 
-    reported = fmt((True, "52 passed"))
+    reported = fmt((_TE.ADVISORY_SUCCESS, "52 passed"))
     assert "PASSED" not in reported
     assert "producer-authored" in reported
     assert "completion not attested" in reported
     # A failure still speaks plainly: nothing is gained by reporting one
     # falsely, so it binds.
-    assert "FAILED" in fmt((False, "1 failed"))
+    assert "FAILED" in fmt((_TE.HARD_FAILURE, "1 failed"))

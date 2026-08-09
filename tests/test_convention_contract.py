@@ -19,6 +19,7 @@ import pytest
 from modulatio import config as _config_mod
 from modulatio import conventions
 from modulatio import orchestration as orch_mod
+from modulatio.orchestration import TestEvidence as _TE
 from modulatio.orchestration import _OBSERVATION_MAX_BYTES, Orchestrator
 from modulatio.types import Task
 
@@ -657,7 +658,7 @@ def _kickoff_orchestrator(
     # witness under test; stub it so kickoff needs no sandbox/pytest.
     monkeypatch.setattr(
         Orchestrator, "_goal_pytest_gate",
-        lambda self, tasks: (True, "gate stubbed"), raising=True)
+        lambda self, tasks: (_TE.ADVISORY_SUCCESS, "gate stubbed"), raising=True)
     return orch
 
 
@@ -963,7 +964,7 @@ def test_import_smoke_green_for_declared_layout(project, monkeypatch):
     orch._pytest_gate_run_shell = _DeterministicRunShell()  # …execution seam
     monkeypatch.setattr(Orchestrator, "_goal_pytest_gate", _REAL_PYTEST_GATE)
     state, report = orch._goal_pytest_gate(tasks)
-    assert state is True
+    assert state is _TE.ADVISORY_SUCCESS
     assert "import webapp" in report
 
 
@@ -990,7 +991,7 @@ def test_naming_the_component_is_not_counted_as_a_load(
 
     state, report = orch._goal_pytest_gate(tasks)
 
-    assert state is True, report
+    assert state is _TE.ADVISORY_SUCCESS, report
     assert _reports_unloaded(report, "webapp")
 
 
@@ -1010,7 +1011,7 @@ def test_every_real_import_form_is_observed(project, monkeypatch, shape):
 
     state, report = orch._goal_pytest_gate(tasks)
 
-    assert state is True, report
+    assert state is _TE.ADVISORY_SUCCESS, report
 
 
 @pytest.mark.parametrize("shape", ["forge-real-file", "forge-no-file",
@@ -1062,7 +1063,7 @@ def test_state_a_test_can_manufacture_is_not_counted_as_a_load(
 
     state, report = orch._goal_pytest_gate(tasks)
 
-    assert state is True, report
+    assert state is _TE.ADVISORY_SUCCESS, report
     assert _reports_unloaded(report, "webapp")
 
 
@@ -1094,7 +1095,7 @@ def test_a_repository_local_pytest_cannot_replace_the_engine_runner(
 
     state, report = orch._goal_pytest_gate(tasks)
 
-    assert state is False, report
+    assert state is _TE.HARD_FAILURE, report
 
 
 def test_import_smoke_red_when_package_name_diverges(project, monkeypatch):
@@ -1118,7 +1119,7 @@ def test_import_smoke_red_when_package_name_diverges(project, monkeypatch):
     orch._pytest_gate_run_shell = _DeterministicRunShell()  # …execution seam
     monkeypatch.setattr(Orchestrator, "_goal_pytest_gate", _REAL_PYTEST_GATE)
     state, report = orch._goal_pytest_gate(tasks)
-    assert state is False
+    assert state is _TE.HARD_FAILURE
     assert "import" in report and "webapp" in report
 
 
@@ -1187,7 +1188,7 @@ def test_the_observer_command_runs_through_the_shipping_runner(
 
     state, report = _run_gate(orch, tasks, monkeypatch)   # no double
 
-    assert state is True, report
+    assert state is _TE.ADVISORY_SUCCESS, report
     observer = [c for c in issued if " -c " in c]
     assert observer, f"the gate issued no observer command: {issued}"
     assert any("-c" in argv for argv in confined), (
@@ -1243,7 +1244,7 @@ def test_the_observed_set_is_not_exposed_through_main(project, monkeypatch):
 
     state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
 
-    assert state is True, report
+    assert state is _TE.ADVISORY_SUCCESS, report
     assert _reports_unloaded(report, "webapp")
 
 
@@ -1273,7 +1274,7 @@ def test_a_load_that_raises_is_not_counted_as_a_load(project, monkeypatch):
 
     state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
 
-    assert state is True, report
+    assert state is _TE.ADVISORY_SUCCESS, report
     assert _reports_unloaded(report, "webapp")
 
 
@@ -1300,7 +1301,7 @@ def test_a_run_that_never_finishes_leaves_no_observation(project, monkeypatch):
     # Exit zero with no finalised record is NOT the "green suite, unobserved
     # component" advisory case — there is no pytest outcome at all. Accepting
     # it as green is a trivial false-GREEN straight through the hard gate.
-    assert state is False, report
+    assert state is _TE.HARD_FAILURE, report
     assert _reports_unfinalised(report), report
     assert not _claims_green(report), report
     assert stale.exists(), "a file the engine never wrote was consumed"
@@ -1480,7 +1481,7 @@ def test_binding_comes_from_the_run_whose_result_is_reported(
     # did not import the component; the discarded hook-free observation must
     # not bind, so the component is still reported as not loaded.
     assert "conftest" in report
-    assert state is True, report
+    assert state is _TE.ADVISORY_SUCCESS, report
     assert _reports_unloaded(report, "webapp")
 
 
@@ -1504,7 +1505,7 @@ def test_a_namespace_package_is_observed_through_its_submodule(
 
     state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
 
-    assert state is True, report
+    assert state is _TE.ADVISORY_SUCCESS, report
 
 
 @pytest.mark.parametrize("paths, expected", [
@@ -1591,7 +1592,7 @@ def test_advisory_binding_does_not_clamp_a_green_gate(project, monkeypatch):
 
     state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
 
-    assert state is True, report
+    assert state is _TE.ADVISORY_SUCCESS, report
     assert _reports_unloaded(report, "webapp")
 
 
@@ -1611,7 +1612,7 @@ def test_a_real_test_failure_still_clamps(project, monkeypatch):
 
     state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
 
-    assert state is False, report
+    assert state is _TE.HARD_FAILURE, report
 
 
 def test_a_failed_convention_smoke_still_clamps(project, monkeypatch):
@@ -1629,7 +1630,7 @@ def test_a_failed_convention_smoke_still_clamps(project, monkeypatch):
 
     state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
 
-    assert state is False, report
+    assert state is _TE.HARD_FAILURE, report
 
 
 def test_a_forged_token_cannot_upgrade_a_failing_gate(project, monkeypatch):
@@ -1664,7 +1665,7 @@ def test_a_forged_token_cannot_upgrade_a_failing_gate(project, monkeypatch):
 
     state, report = _run_gate(orch, tasks, monkeypatch, _FailButForge())
 
-    assert state is False, report
+    assert state is _TE.HARD_FAILURE, report
 
 
 @pytest.mark.parametrize("payload_a, credited_a", [
@@ -1753,7 +1754,7 @@ def test_a_root_without_discoverable_tests_is_red_and_claims_no_green(
 
     state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
 
-    assert state is False, report
+    assert state is _TE.HARD_FAILURE, report
     assert not _claims_green(report), report
 
 
@@ -1783,7 +1784,7 @@ def test_a_failing_conftest_fallback_is_red_and_claims_no_green(
 
     state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
 
-    assert state is False, report
+    assert state is _TE.HARD_FAILURE, report
     assert not _claims_green(report), report
 
 
@@ -1842,7 +1843,7 @@ def test_a_goal_with_no_component_origin_still_requires_finalisation(
 
     state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
 
-    assert state is False, report
+    assert state is _TE.HARD_FAILURE, report
     assert _reports_unfinalised(report), report
     assert not _claims_green(report), report
 
@@ -1865,7 +1866,7 @@ def test_a_no_origin_goal_runs_pytest_through_the_engine_wrapper(
 
     state, report = _run_gate(orch, tasks, monkeypatch, runner)
 
-    assert state is True, report
+    assert state is _TE.ADVISORY_SUCCESS, report
     pytest_cmds = [c for c in runner.cmds if "pytest" in c]
     assert pytest_cmds, runner.cmds
     for cmd in pytest_cmds:
@@ -1890,7 +1891,7 @@ def test_a_no_origin_goal_is_green_without_an_import_advisory(
 
     state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
 
-    assert state is True, report
+    assert state is _TE.ADVISORY_SUCCESS, report
     assert "did not report loading" not in report, report
     assert not _reports_unfinalised(report), report
 
@@ -1911,7 +1912,7 @@ def test_a_no_origin_goal_with_a_failing_test_stays_red(project, monkeypatch):
 
     state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
 
-    assert state is False, report
+    assert state is _TE.HARD_FAILURE, report
     assert not _claims_green(report), report
 
 
@@ -1938,7 +1939,7 @@ def test_a_no_origin_conftest_fallback_also_requires_finalisation(
 
     state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
 
-    assert state is False, report
+    assert state is _TE.HARD_FAILURE, report
     assert _reports_unfinalised(report), report
     assert not _claims_green(report), report
 
