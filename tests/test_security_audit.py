@@ -255,6 +255,7 @@ def test_run_shell_fails_closed_when_sandbox_required_but_unavailable(
     monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: False)
     monkeypatch.setattr(sandbox, "current_profile", lambda: "standard")
     monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: False)
+    monkeypatch.setattr(sandbox, "can_confine", lambda: False)
     monkeypatch.setattr(sandbox, "is_sandbox_required", lambda: True)
     rs = tools.make_run_shell(art)
     with pytest.raises(RuntimeError, match="refused"):
@@ -269,6 +270,7 @@ def test_run_shell_soft_falls_when_sandbox_not_required(tmp_path, monkeypatch):
     monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: False)
     monkeypatch.setattr(sandbox, "current_profile", lambda: "standard")
     monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: False)
+    monkeypatch.setattr(sandbox, "can_confine", lambda: False)
     monkeypatch.setattr(sandbox, "is_sandbox_required", lambda: False)
     rs = tools.make_run_shell(art)
     out = rs(cmd="python3 demo.py", profile="full", timeout=5)
