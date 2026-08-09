@@ -2508,10 +2508,17 @@ _OBSERVATION_MAX_BYTES = 64 * 1024
 #:   elsewhere in the tree belongs to no contract. Submodules count too,
 #:   which is how a namespace package (no ``__init__``) is observed at all.
 #:
-#: The file is written only after the run finishes: an absent file means the
+#: The file is written only after the run finishes, so an absent file means the
 #: wrapper never finalised and supplies no observation, whatever the exit code.
-#: A producer-unforgeable binding needs an observer the test interpreter cannot
-#: inspect or write — an out-of-process trust boundary, not this bootstrap.
+#: That direction is the only one worth trusting: a missing record fails the
+#: gate closed, and a deliverable gains nothing by withholding its own evidence.
+#: The presence of a record proves nothing in the other direction. Arbitrary
+#: code sharing this interpreter can find the path — through the argument list,
+#: an inherited descriptor, or a live frame — write a well-formed record, and
+#: exit before the runner returns. No same-process arrangement closes that;
+#: hiding the path only changes which lookup finds it. A hard completion claim
+#: needs an observer the test interpreter cannot inspect or write, which is an
+#: out-of-process trust boundary rather than this bootstrap.
 _IMPORT_OBSERVER_BOOTSTRAP = """
 import json, os, sys
 
@@ -13701,6 +13708,27 @@ class Orchestrator:
                 declared_origins, observed_imports)
             if unbound:
                 reports.append(unbound)
+
+            # Every green here rests on a suite the DELIVERABLE wrote, running
+            # in the same interpreter as the code it judges. Nothing in that
+            # arrangement can prove the run finished honestly: a test can write
+            # the engine's completion record and leave before the runner
+            # returns, and arbitrary code in one process can reach any
+            # argument, descriptor or frame used to hide that record from it. A
+            # MISSING record still fails closed -- withholding its own evidence
+            # costs the deliverable its verdict -- so the absence is worth
+            # trusting and the presence is not. This says what the green is
+            # worth instead of claiming more.
+            reports.append(
+                "[ADVISORY] This test evidence is PRODUCER-AUTHORED. The "
+                "engine selects the targets, strips collection hooks, and runs "
+                "the suite under containment, but the tests are the "
+                "deliverable's own and execute in one interpreter with the "
+                "code they judge — so a green result is evidence, never an "
+                "attestation that the run completed honestly. A FAILURE "
+                "remains binding; only success is advisory. A hard claim would "
+                "need an observer outside that interpreter."
+            )
 
             if advisory:
                 reports.append(

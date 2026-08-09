@@ -1800,3 +1800,50 @@ def test_a_runner_location_reached_through_a_link_is_refused(tmp_path):
     _, res = cp.provision_runner_env(link)
     assert res.status is cp.ProbeStatus.ENGINE_UNAVAILABLE
     assert "link" in res.reason
+
+
+def test_a_green_suite_is_reported_as_evidence_not_as_an_attestation(
+        project_with_run, monkeypatch):
+    """The tests are the deliverable's own and run in one interpreter with the
+    code they judge, so nothing in that arrangement can prove the run finished
+    honestly — a test can write the engine's completion record and leave before
+    the runner returns. The report says what the green is worth rather than
+    claiming more."""
+    _enforceable_sandbox(monkeypatch)
+    orch = _orch(project_with_run)
+    root = orch._shared_artifacts_root()
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "app"\nversion = "0.0.1"\n', encoding="utf-8")
+    (root / "tests").mkdir(exist_ok=True)
+    (root / "tests" / "test_ok.py").write_text(
+        "def test_ok():\n    assert True\n", encoding="utf-8")
+
+    state, report = orch._goal_pytest_gate([_code_task()])
+
+    assert state is True, report
+    assert "PRODUCER-AUTHORED" in report
+    assert "never an attestation" in report
+    # The asymmetry is the point: a failure still binds.
+    assert "FAILURE remains binding" in report
+
+
+def test_an_absent_completion_record_still_fails_the_gate_closed(
+        project_with_run, monkeypatch):
+    """Only one direction of that record is worth trusting. Its ABSENCE is
+    hard, because a deliverable gains nothing by withholding its own evidence;
+    its presence proves nothing, because the same interpreter can write it."""
+    _enforceable_sandbox(monkeypatch)
+    orch = _orch(project_with_run)
+    root = orch._shared_artifacts_root()
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "app"\nversion = "0.0.1"\n', encoding="utf-8")
+    (root / "tests").mkdir(exist_ok=True)
+    # Leaves before the runner returns, so no record is ever written.
+    (root / "tests" / "test_exit.py").write_text(
+        "import os\n\n\ndef test_leaves():\n    os._exit(0)\n", encoding="utf-8")
+
+    state, report = orch._goal_pytest_gate([_code_task()])
+
+    assert state is False, report
