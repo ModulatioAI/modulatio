@@ -28,7 +28,6 @@ text is far past most context windows — and overridable via
 """
 from __future__ import annotations
 
-import errno
 import hashlib
 import os
 import stat
@@ -169,9 +168,16 @@ def _stage(
     somewhere else by the second open, and the file dispatched is not the file
     that was measured.
 
-    Opened WITHOUT following symlinks and verified regular on the DESCRIPTOR
-    rather than the path, since a check against a name answers for whatever it
-    pointed at a moment ago.
+    Verified regular on the DESCRIPTOR rather than the path, since a check
+    against a name answers for whatever it pointed at a moment ago. A symlink
+    is followed: whatever the one open resolves to IS what gets checked,
+    capped, digested and staged, so there is no second look for a repointed
+    name to diverge from — and the staged copy makes any later repointing
+    irrelevant.
+
+    Opened NON-BLOCKING because a plain read-open of a FIFO waits for a writer
+    that never comes — the descriptor check that would refuse it can only run
+    if the open returns. A regular file ignores the flag entirely.
 
     The cap binds WHILE COPYING, not against a size read beforehand: a file
     that grows between the two is bounded by the copy that is actually
@@ -184,13 +190,8 @@ def _stage(
     the path again.
     """
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     except OSError as exc:
-        if exc.errno in (errno.ELOOP, errno.EMLINK):
-            raise ValueError(
-                f"attachment {path.name!r} is a symbolic link; load the file "
-                f"it points at, so what is read cannot be repointed"
-            ) from exc
         raise ValueError(
             f"attachment {path.name!r} could not be opened: {exc.strerror}"
         ) from exc

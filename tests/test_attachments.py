@@ -143,25 +143,48 @@ def test_replacing_the_source_after_loading_changes_nothing(tmp_path, monkeypatc
     assert att.staged_path.read_text() == "original bytes\n"
 
 
-def test_a_symlink_is_refused_rather_than_loaded_through(tmp_path, monkeypatch):
-    """A name that points elsewhere can point somewhere else by the next open,
-    so what was loaded is not what was checked. The refusal names the remedy
-    rather than loading the target silently."""
+def test_a_symlink_loads_its_target_through_the_one_open(tmp_path, monkeypatch):
+    """Following the link is safe under one-open semantics: whatever the open
+    resolves to IS what gets checked, capped, digested and staged — there is
+    no second look for a repointed name to diverge from, and the staged copy
+    makes any later repointing irrelevant."""
+    from modulatio import attachments, config
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    target = tmp_path / "real.md"
+    target.write_text("the target body\n")
+    link = tmp_path / "link.md"
+    link.symlink_to(target)
+
+    item = attachments.build_attachment(link, kind="document")
+    assert item.content == "the target body\n"
+
+    # Repointing the name afterwards changes nothing already loaded.
+    target2 = tmp_path / "other.md"
+    target2.write_text("different\n")
+    link.unlink()
+    link.symlink_to(target2)
+    assert item.staged_path.read_text() == "the target body\n"
+
+
+def test_a_fifo_is_refused_without_blocking_on_it(tmp_path, monkeypatch):
+    """A plain read-open of a FIFO waits forever for a writer, so the refusal
+    must come from a descriptor the open actually returned — non-blocking
+    open, then the regular-file check."""
+    import os as _os
+
     import pytest
 
     from modulatio import attachments, config
 
+    if not hasattr(_os, "mkfifo"):
+        pytest.skip("mkfifo unavailable")
     monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
-    target = tmp_path / "secret.txt"
-    target.write_text("secret\n")
-    link = tmp_path / "link.md"
-    link.symlink_to(target)
+    fifo = tmp_path / "pipe.md"
+    _os.mkfifo(fifo)
 
-    with pytest.raises(ValueError) as caught:
-        attachments.build_attachment(link, kind="document")
-    assert "symbolic link" in str(caught.value)
-    # The refusal names the link, never the target's bytes or where it led.
-    assert "secret" not in str(caught.value)
+    with pytest.raises(ValueError, match="not a regular file"):
+        attachments.build_attachment(fifo, kind="document")
 
 
 def test_the_text_comes_from_the_snapshot_not_a_second_read_of_the_path(
