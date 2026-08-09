@@ -612,40 +612,44 @@ def declared_build_requires(root: Path) -> "list[str]":
     return [str(r) for r in reqs if isinstance(r, str)]
 
 
-_TARGET_TAGS_CACHE: "frozenset | None" = None
+#: Distinct from None, which means "asked and unavailable — apply no filter".
+_UNSET = object()
+_TARGET_TAGS_CACHE: object = _UNSET
 
 
 def _target_wheel_tags() -> "frozenset | None":
-    """Wheel tags the TARGET interpreter can install, or ``None`` when they
-    cannot be established.
+    """Wheel tags the TARGET interpreter reports it can install, or ``None``
+    when it cannot be asked.
 
     A wheel's name records the interpreter, ABI and platform it was built for,
-    and one built for another of any of those cannot be installed here — so
-    counting it as satisfying a requirement reports a build that will fail as
-    ready to run, and blames the failure on the deliverable.
+    and one built for another of those cannot be installed — so counting it as
+    satisfying a requirement reports a build that will fail as ready to run.
 
-    The target runs on this machine, so its platform tags are this process's;
-    only the interpreter version can differ, and that is compared before the
-    engine's own tag set is used for it. When the versions differ, or the
-    target environment cannot be read, ``None`` is returned and callers apply
-    no tag filter — refusing a wheel on a guess would fail builds that work.
+    The tags come from the target interpreter ITSELF. Substituting this
+    process's because the Python version and machine agree assumes the rest of
+    a tag set follows from those two, and it does not: implementation, ABI
+    flags, libc and platform policy all vary independently, so the guess can
+    both admit an unusable wheel and reject a usable one. When the target
+    cannot answer, ``None`` says so and callers apply no filter — refusing a
+    wheel on a guess would fail builds that work.
     """
     global _TARGET_TAGS_CACHE
-    if _TARGET_TAGS_CACHE is None:
-        _TARGET_TAGS_CACHE = frozenset()
-        env = _pep508_env()
-        if env:
-            import platform as _platform
-            try:
-                from packaging import tags as _packaging_tags
-            except ImportError:
-                return None
-            here_version = ".".join(_platform.python_version_tuple()[:2])
-            if (env.get("python_version") == here_version
-                    and env.get("platform_machine") == _platform.machine()):
-                _TARGET_TAGS_CACHE = frozenset(
-                    str(tag) for tag in _packaging_tags.sys_tags())
-    return _TARGET_TAGS_CACHE or None
+    if _TARGET_TAGS_CACHE is _UNSET:
+        _TARGET_TAGS_CACHE = None
+        prog = ("import json\n"
+                "from packaging import tags\n"
+                "print(json.dumps([str(t) for t in tags.sys_tags()]))\n")
+        try:
+            out = subprocess.run([_SANDBOX_PYTHON, "-c", prog],
+                                 capture_output=True, text=True, timeout=30)
+            if out.returncode == 0:
+                import json as _json
+                reported = _json.loads(out.stdout)
+                if isinstance(reported, list) and reported:
+                    _TARGET_TAGS_CACHE = frozenset(str(t) for t in reported)
+        except Exception:  # noqa: BLE001 — unavailable probe = no filter
+            _TARGET_TAGS_CACHE = None
+    return _TARGET_TAGS_CACHE if isinstance(_TARGET_TAGS_CACHE, frozenset) else None
 
 
 def _unsatisfiable_build_requirement(
@@ -689,10 +693,22 @@ def _unsatisfiable_build_requirement(
             req = Requirement(raw)
         except InvalidRequirement as exc:
             raise _MalformedRequirement(f"{raw!r}: {exc}") from exc
-        # A requirement whose marker excludes this interpreter is not one the
-        # engine has to supply.
-        if req.marker is not None and not req.marker.evaluate():
-            continue
+        # A marker decides whether the TARGET needs this requirement, so it
+        # is evaluated against the target's environment. Using this process's
+        # answers a different question: a requirement guarded by
+        # python_version < "3.12" is needed by a 3.11 target and excluded by a
+        # 3.12 engine, and the shortfall would go unreported. When the target
+        # cannot be read the requirement is treated as ACTIVE, since claiming
+        # a build is satisfied is the error that ships.
+        if req.marker is not None:
+            target_env = _pep508_env()
+            try:
+                applies = (req.marker.evaluate(environment=target_env)
+                           if target_env else True)
+            except Exception:  # noqa: BLE001 — unevaluable marker = active
+                applies = True
+            if not applies:
+                continue
         versions = available.get(req.name.replace("_", "-").lower(), [])
         if not any(v in req.specifier for v in versions):
             return raw

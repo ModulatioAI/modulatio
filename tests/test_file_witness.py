@@ -97,7 +97,7 @@ def test_a_cached_bytecode_file_hides_the_source_open(tmp_path):
         "a planted bytecode cache must hide the source open — if this passes "
         "the cache is not being used and the test proves nothing")
 
-    assert strip_bytecode_cache(tmp_path) >= 1
+    assert strip_bytecode_cache(tmp_path).removed >= 1
     assert not (tmp_path / "__pycache__").exists()
 
     with FileAccessWitness([module]) as restored:
@@ -114,26 +114,29 @@ def test_stripping_the_cache_reports_what_it_removed(tmp_path):
     py_compile.compile(str(_write_module(tmp_path, "top.py")), doraise=True)
     py_compile.compile(str(_write_module(nested, "low.py")), doraise=True)
 
-    removed = strip_bytecode_cache(tmp_path)
+    result = strip_bytecode_cache(tmp_path)
 
-    assert removed >= 2
+    assert result.complete, result.reason
+    assert result.removed >= 2
     assert not list(tmp_path.rglob("__pycache__"))
     assert not list(tmp_path.rglob("*.pyc"))
 
 
-def test_an_unmeasured_account_is_not_read_as_silence(tmp_path):
-    """``never_opened`` is only meaningful when the run was measured. A caller
-    that skips the check convicts an honest run of touching nothing whenever
-    the kernel could not be asked."""
+def test_an_unmeasured_account_reports_no_accusations(tmp_path):
+    """No account at all is not an account saying nothing was opened, and the
+    difference decides whether an honest run is convicted by its own silence.
+
+    Enforced by the API rather than left to each caller to remember: handing
+    back the whole watched set here would give a future caller a full slate of
+    accusations drawn from a measurement that never happened."""
     module = _write_module(tmp_path, "a.py")
 
     witness = FileAccessWitness([module])
     witness.unmeasured = "inotify unavailable"
 
     assert witness.opened == set()
-    # The distinction the caller must honour: no account at all is NOT an
-    # account saying nothing was opened.
-    assert witness.never_opened() == {module}
+    assert witness.never_opened() == set(), (
+        "an unmeasured run must accuse nothing")
     assert witness.unmeasured
 
 
@@ -173,7 +176,7 @@ def test_a_compiled_file_beside_its_source_is_left_alone(tmp_path):
     product = tmp_path / "shipped.pyc"
     product.write_bytes(next((tmp_path / "__pycache__").glob("*.pyc")).read_bytes())
 
-    assert strip_bytecode_cache(tmp_path) >= 1
+    assert strip_bytecode_cache(tmp_path).removed >= 1
 
     assert product.is_file(), "the engine deleted a compiled file it did not own"
     assert not (tmp_path / "__pycache__").exists()
@@ -186,3 +189,101 @@ def test_a_compiled_file_beside_its_source_is_left_alone(tmp_path):
             capture_output=True, timeout=60, check=False)
     assert witness.opened == {module}, (
         "a compiled sibling must not shadow the source while the source exists")
+
+
+def test_a_symlinked_cache_directory_is_never_entered(tmp_path):
+    """A name is a promise about a location, not proof of one. Emptying a
+    `__pycache__` that is a LINK deletes files in whatever directory it points
+    at — the engine destroying data it was never asked to touch. The link is
+    removed as a link; its target is not entered."""
+    tree, outside = tmp_path / "tree", tmp_path / "outside"
+    (outside / "sub").mkdir(parents=True)
+    tree.mkdir()
+    sentinel = outside / "precious.txt"
+    sentinel.write_text("the operator's file", encoding="utf-8")
+    nested = outside / "sub" / "keep.txt"
+    nested.write_text("also theirs", encoding="utf-8")
+    (tree / "__pycache__").symlink_to(outside)
+
+    result = strip_bytecode_cache(tree)
+
+    assert sentinel.read_text(encoding="utf-8") == "the operator's file"
+    assert nested.is_file()
+    assert list(outside.iterdir()), "the target directory was emptied"
+    assert not (tree / "__pycache__").exists(), "the link itself must go"
+    assert result.complete, result.reason
+
+
+def test_a_symlinked_child_inside_a_cache_is_not_followed(tmp_path):
+    """The same rule one level down: a link inside the cache is unlinked, and
+    the file it names survives."""
+    cache = tmp_path / "__pycache__"
+    cache.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me", encoding="utf-8")
+    (cache / "m.cpython-312.pyc").write_bytes(b"\x00")
+    (cache / "link.pyc").symlink_to(victim)
+
+    result = strip_bytecode_cache(tmp_path)
+
+    assert victim.read_text(encoding="utf-8") == "keep me"
+    assert result.complete, result.reason
+    assert not cache.exists()
+
+
+def test_a_cache_that_cannot_be_emptied_reports_incomplete(tmp_path):
+    """Silence only means something when no cache could have served the
+    import. A cache that survives makes the run's quiet meaningless, so the
+    strip says so rather than letting a caller refute an honest run."""
+    import py_compile
+
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    py_compile.compile(str(_write_module(pkg, "m.py")), doraise=True)
+    cache = pkg / "__pycache__"
+    assert list(cache.glob("*.pyc"))
+    cache.chmod(0o500)                      # populated and unwritable
+    try:
+        result = strip_bytecode_cache(tmp_path)
+    finally:
+        cache.chmod(0o700)
+
+    assert not result.complete
+    assert "may survive" in (result.reason or "")
+    assert list(cache.glob("*.pyc")), "the cache is still there to serve imports"
+
+
+def test_a_non_regular_child_in_a_cache_is_not_forced(tmp_path):
+    """A directory inside a cache is not something to force, and it may hide
+    bytecode this cannot reach — so it makes the account incomplete rather
+    than being skipped in silence."""
+    cache = tmp_path / "__pycache__"
+    (cache / "unexpected").mkdir(parents=True)
+
+    result = strip_bytecode_cache(tmp_path)
+
+    assert not result.complete
+    assert "not a regular file" in (result.reason or "")
+
+
+def test_a_reader_that_dies_reports_no_account_rather_than_silence(tmp_path):
+    """A reader that stopped early leaves an EMPTY set of opens, which is
+    indistinguishable from a run that opened nothing. Every way it can stop
+    goes through one door so the caller hears about it."""
+    import select as _select
+
+    module = _write_module(tmp_path, "a.py")
+    real = _select.select
+
+    def _boom(*args, **kwargs):
+        raise OSError("injected reader failure")
+
+    _select.select = _boom
+    try:
+        with FileAccessWitness([module]) as witness:
+            module.read_text(encoding="utf-8")
+    finally:
+        _select.select = real
+
+    assert witness.unmeasured is not None
+    assert witness.never_opened() == set(), "an unmeasured run accuses nothing"

@@ -2608,16 +2608,22 @@ sys.exit(_run())
 """
 
 
-def _witness_paths(declared_origins: dict, root: "Path") -> "dict[str, Path]":
-    """Contract id → the source file an import of its component must open.
+def _witness_paths(declared_origins: dict, root: "Path") -> "dict[str, set]":
+    """Contract id → every source file whose opening would show the component
+    was reached.
 
-    A component is either a module beside the root or a package directory, and
-    only one of the two exists for any given name — a package is entered
-    through its ``__init__``, so that is the file an import opens. Names whose
-    source is not under this root belong to another root and are left out
-    rather than watched at a path that will never be opened.
+    A regular package is entered through its ``__init__``, so that one file
+    answers for it. A NAMESPACE package has no ``__init__`` — it is reached
+    through any module beneath its root, and asking only for an ``__init__``
+    that cannot exist yields nothing to watch. A token with nothing to watch is
+    never refuted, so treating it as resolved would leave a forged credit
+    standing while the report described every credit as kernel-checked.
+
+    A component is therefore refutable only if NONE of its sources was opened,
+    and a contract that resolves to no source at all comes back as an EMPTY
+    set for the caller to disclose rather than silently keep.
     """
-    paths: "dict[str, Path]" = {}
+    paths: "dict[str, set]" = {}
     for token, origin in (declared_origins or {}).items():
         try:
             name, origin_root = origin
@@ -2628,21 +2634,39 @@ def _witness_paths(declared_origins: dict, root: "Path") -> "dict[str, Path]":
             continue
         try:
             base = Path(origin_root).resolve()
-            if base != root.resolve() and root.resolve() not in base.parents:
+            root_real = root.resolve()
+            if base != root_real and root_real not in base.parents:
                 continue
         except (OSError, ValueError):
             continue
-        # The recorded root is either the component directory itself or a
-        # directory holding it, and the component is either a package or a
-        # single module — so the file an import opens is one of these. The
-        # first that exists is the one, since a name resolves to exactly one
-        # source.
-        for candidate in (base / "__init__.py",
-                          base / f"{top}.py",
-                          base / top / "__init__.py"):
-            if candidate.is_file():
-                paths[token] = candidate.resolve()
-                break
+        found: "set" = set()
+        # The component directory itself, or one holding it.
+        for package_dir in (base, base / top):
+            init = package_dir / "__init__.py"
+            try:
+                if init.is_file():
+                    found.add(init.resolve())
+                    break
+            except OSError:
+                continue
+        if not found:
+            module = base / f"{top}.py"
+            try:
+                if module.is_file():
+                    found.add(module.resolve())
+            except OSError:
+                pass
+        if not found:
+            # Namespace shape: no init and no same-name module, so the
+            # component is reached through the sources beneath its root.
+            container = base if base.name == top else base / top
+            try:
+                for source in container.rglob("*.py"):
+                    if source.is_file() and "__pycache__" not in source.parts:
+                        found.add(source.resolve())
+            except OSError:
+                pass
+        paths[token] = found
     return paths
 
 
@@ -13646,18 +13670,41 @@ class Orchestrator:
                 # nothing, so the cache is removed first — the deliverable
                 # can otherwise supply the cache that blinds the account.
                 watched = _witness_paths(declared_origins, root)
-                _file_witness.strip_bytecode_cache(root)
+                stripped = _file_witness.strip_bytecode_cache(root)
                 try:
-                    with _file_witness.FileAccessWitness(watched.values()) as seen_open:
+                    every_source = {p for paths in watched.values() for p in paths}
+                    with _file_witness.FileAccessWitness(every_source) as seen_open:
                         result = run_shell.call(
                             cmd=cmd,
                             profile="full", cwd=str(root),
                             timeout=_PYTEST_GATE_TIMEOUT_S,
                         )
+                    # Refutation rests on silence MEANING something. It
+                    # means nothing when a cache may still serve an import
+                    # (the source is never opened) or when the account itself
+                    # could not be taken — either way an honest run would be
+                    # convicted by its own quiet. Both conditions are proven
+                    # before a single credit is withdrawn, and the report says
+                    # so rather than describing a check that did not run.
                     refuted = set()
-                    if seen_open.unmeasured is None:
-                        never = seen_open.never_opened()
-                        refuted = {tok for tok, path in watched.items() if path in never}
+                    # A token with no source to watch cannot be refuted, so it
+                    # must be disclosed rather than counted as checked.
+                    blind = sorted(t for t, paths in watched.items() if not paths)
+                    if blind:
+                        kernel_unchecked.append(
+                            "no source file to observe for " + ", ".join(blind[:3]))
+                    if not stripped.complete:
+                        kernel_unchecked.append(
+                            stripped.reason or "cached bytecode may survive")
+                    elif seen_open.unmeasured is not None:
+                        kernel_unchecked.append(seen_open.unmeasured)
+                    else:
+                        opened = seen_open.opened
+                        # Opening ANY of a component's sources shows the run
+                        # reached it; only a component none of whose sources
+                        # was opened is refuted.
+                        refuted = {tok for tok, paths in watched.items()
+                                   if paths and not (paths & opened)}
                 except (RuntimeError, ValueError, OSError) as exc:
                     _logger.warning("pytest gate could not run: %s", exc)
                     if obs_path is not None:
@@ -13724,6 +13771,9 @@ class Orchestrator:
             any_tests = False
             declared_origins = self._declared_component_origins(tasks)
             observed_imports: set = set()
+            #: Reasons the kernel could not cross-check a run's import credits.
+            #: Non-empty means the green report must not claim it did.
+            kernel_unchecked: "list[str]" = []
             for repo_root in roots:
                 # Engine-selected explicit test files + neutralized addopts
                 #: the suite cannot steer collection via
@@ -13868,12 +13918,23 @@ class Orchestrator:
                 "deliverable's own and execute in one interpreter with the "
                 "code they judge — so a green result is evidence, never an "
                 "attestation that the run completed honestly. A FAILURE "
-                "remains binding; only success is advisory. One fact here is "
-                "NOT producer-authored: a component the kernel never saw its "
-                "source file opened was not loaded, whatever the run reported, "
-                "and such a credit has been withdrawn. That refutes a false "
-                "load; it cannot establish that a loaded file's contents ran."
+                "remains binding; only success is advisory."
             )
+            if kernel_unchecked:
+                # Saying the kernel checked when it did not is the same lie as
+                # reporting an authorization the gate never made.
+                reports.append(
+                    "[ADVISORY] The kernel could not cross-check this run's "
+                    "import credits, so NO credit was withdrawn and every one "
+                    "of them is producer-authored: "
+                    + "; ".join(sorted(set(kernel_unchecked))[:3]))
+            else:
+                reports.append(
+                    "[ADVISORY] One fact here is NOT producer-authored: a "
+                    "component the kernel never saw its source file opened was "
+                    "not loaded, whatever the run reported, and such a credit "
+                    "has been withdrawn. That refutes a false load; it cannot "
+                    "establish that a loaded file's contents ran.")
 
             if advisory:
                 reports.append(

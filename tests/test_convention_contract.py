@@ -2849,3 +2849,60 @@ def test_a_forged_import_credit_is_withdrawn_by_the_kernel(project, monkeypatch)
 
     assert "did not report loading" in report, (
         f"the forged credit stood — state={state}\n{report}")
+
+
+def test_a_namespace_component_resolves_to_its_source_modules(tmp_path):
+    """A package with no ``__init__.py`` is reached through any module beneath
+    it. Asking only for an ``__init__`` that cannot exist yields nothing to
+    watch — and a token with nothing to watch is never refuted, so a forged
+    credit for it would stand while the report called every credit
+    kernel-checked."""
+    from modulatio.orchestration import _witness_paths
+
+    root = tmp_path / "artifacts"
+    component = root / "webapp"
+    component.mkdir(parents=True)
+    server = component / "server.py"
+    server.write_text("VALUE = 1\n", encoding="utf-8")
+    deep = component / "inner"
+    deep.mkdir()
+    helper = deep / "helper.py"
+    helper.write_text("VALUE = 2\n", encoding="utf-8")
+
+    resolved = _witness_paths({"cvc-x": ("webapp", str(component))}, root)
+
+    assert resolved["cvc-x"] == {server.resolve(), helper.resolve()}, (
+        "a namespace component must resolve to the sources that reach it")
+
+
+def test_a_regular_package_resolves_to_its_init_alone(tmp_path):
+    """A package WITH an ``__init__`` is entered through it, so that one file
+    answers for the component and its submodules need not be watched."""
+    from modulatio.orchestration import _witness_paths
+
+    root = tmp_path / "artifacts"
+    component = root / "webapp"
+    component.mkdir(parents=True)
+    init = component / "__init__.py"
+    init.write_text("", encoding="utf-8")
+    (component / "server.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    resolved = _witness_paths({"cvc-x": ("webapp", str(component))}, root)
+
+    assert resolved["cvc-x"] == {init.resolve()}
+
+
+def test_a_component_with_no_source_resolves_to_nothing_to_watch(tmp_path):
+    """An empty resolution must come back EMPTY so the caller can disclose it.
+    Dropping the token instead would leave its credit silently unchecked while
+    the report described the run as kernel-backed."""
+    from modulatio.orchestration import _witness_paths
+
+    root = tmp_path / "artifacts"
+    component = root / "webapp"
+    component.mkdir(parents=True)
+    (component / "README.md").write_text("no python here\n", encoding="utf-8")
+
+    resolved = _witness_paths({"cvc-x": ("webapp", str(component))}, root)
+
+    assert resolved["cvc-x"] == set()

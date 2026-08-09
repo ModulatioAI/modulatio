@@ -1917,48 +1917,89 @@ def test_a_wheel_built_for_another_platform_supplies_nothing(tmp_path, monkeypat
     assert cp._unsatisfiable_build_requirement(root, wh) is None
 
 
-def test_no_tag_filter_is_applied_when_the_target_cannot_be_read(
-        tmp_path, monkeypatch):
-    """Refusing a wheel on a guess would fail builds that work. When the
-    target environment cannot be read, every wheel counts as it did before —
-    the check adds evidence and never removes a working build."""
-    monkeypatch.setattr(cp, "_TARGET_TAGS_CACHE", None)
-    monkeypatch.setattr(cp, "_pep508_env", lambda: None)
-
-    assert cp._target_wheel_tags() is None
-
+def _wheelhouse(tmp_path, *names):
     wh = tmp_path / "wh"
-    wh.mkdir()
-    (wh / "hatchling-1.0.0-cp27-cp27m-win32.whl").write_bytes(b"x")
-    root = tmp_path / "proj"
-    root.mkdir()
-    (root / "pyproject.toml").write_text(
-        "[build-system]\nrequires = ['hatchling>=1.0']\n")
+    wh.mkdir(exist_ok=True)
+    for n in names:
+        (wh / n).write_bytes(b"x")
+    return wh
 
+
+def _project(tmp_path, requires):
+    root = tmp_path / "proj"
+    root.mkdir(exist_ok=True)
+    (root / "pyproject.toml").write_text(
+        f"[build-system]\nrequires = ['{requires}']\n")
+    return root
+
+
+def test_the_tags_come_from_the_target_not_this_process(tmp_path, monkeypatch):
+    """Equal Python version and machine do not imply an equal tag set —
+    implementation, ABI flags and platform policy vary independently — so tags
+    borrowed from this process can both admit a wheel the target cannot
+    install and reject one it can. The target is asked for its own."""
+    monkeypatch.setattr(cp, "_TARGET_TAGS_CACHE", cp._UNSET)
+    monkeypatch.setattr(cp.subprocess, "run", lambda *a, **k: type(
+        "R", (), {"returncode": 0, "stdout": '["cp99-cp99-linux_x86_64"]'})())
+
+    assert cp._target_wheel_tags() == frozenset({"cp99-cp99-linux_x86_64"})
+
+    wh = _wheelhouse(tmp_path, "hatchling-1.0.0-py3-none-any.whl")
+    root = _project(tmp_path, "hatchling>=1.0")
+    assert cp._unsatisfiable_build_requirement(root, wh) == "hatchling>=1.0", (
+        "a wheel the target never reported it can install was counted")
+
+    (wh / "hatchling-1.0.0-cp99-cp99-linux_x86_64.whl").write_bytes(b"x")
     assert cp._unsatisfiable_build_requirement(root, wh) is None
 
 
-def test_no_tag_filter_is_applied_when_the_target_runs_another_python(
+def test_no_tag_filter_is_applied_when_the_target_cannot_be_asked(
         tmp_path, monkeypatch):
-    """The engine's own tag set describes the engine's interpreter. It stands
-    in for the target's only while the two agree; on a target running another
-    Python it would refuse wheels that interpreter installs perfectly well."""
-    import platform
+    """Refusing a wheel on a guess would fail builds that work, so an
+    unanswerable probe disables the filter rather than inventing an answer."""
+    monkeypatch.setattr(cp, "_TARGET_TAGS_CACHE", cp._UNSET)
 
+    def _fails(*a, **k):
+        raise OSError("no such interpreter")
+
+    monkeypatch.setattr(cp.subprocess, "run", _fails)
+
+    assert cp._target_wheel_tags() is None
+
+    wh = _wheelhouse(tmp_path, "hatchling-1.0.0-cp27-cp27m-win32.whl")
+    root = _project(tmp_path, "hatchling>=1.0")
+    assert cp._unsatisfiable_build_requirement(root, wh) is None
+
+
+def test_a_marker_is_evaluated_against_the_target_interpreter(
+        tmp_path, monkeypatch):
+    """A marker decides whether the TARGET needs a requirement. Evaluated
+    against the engine, one guarded by ``python_version < "3.12"`` is NEEDED by
+    a 3.11 target and EXCLUDED by a 3.12 engine, so the shortfall goes
+    unreported and the build fails later for a reason the check covered."""
     monkeypatch.setattr(cp, "_TARGET_TAGS_CACHE", None)
     monkeypatch.setattr(cp, "_pep508_env", lambda: {
-        "python_version": "2.7",                      # not this process's
-        "platform_machine": platform.machine(),
+        "python_version": "3.11", "python_full_version": "3.11.9",
+        "os_name": "posix", "sys_platform": "linux",
+        "platform_machine": "x86_64", "platform_system": "Linux",
+        "platform_release": "", "platform_version": "",
+        "implementation_name": "cpython", "implementation_version": "3.11.9",
+        "platform_python_implementation": "CPython",
     })
+    wh = _wheelhouse(tmp_path)
+    root = _project(tmp_path, 'nonesuch; python_version < "3.12"')
 
-    assert cp._target_wheel_tags() is None
+    assert cp._unsatisfiable_build_requirement(root, wh) is not None, (
+        "a requirement the TARGET needs was excluded by the engine's version")
 
-    wh = tmp_path / "wh"
-    wh.mkdir()
-    (wh / "hatchling-1.0.0-cp27-cp27m-win32.whl").write_bytes(b"x")
-    root = tmp_path / "proj"
-    root.mkdir()
-    (root / "pyproject.toml").write_text(
-        "[build-system]\nrequires = ['hatchling>=1.0']\n")
 
-    assert cp._unsatisfiable_build_requirement(root, wh) is None
+def test_an_unreadable_target_treats_a_conditional_requirement_as_active(
+        tmp_path, monkeypatch):
+    """Claiming a build is satisfied is the error that ships, so a marker that
+    cannot be evaluated counts as applying."""
+    monkeypatch.setattr(cp, "_TARGET_TAGS_CACHE", None)
+    monkeypatch.setattr(cp, "_pep508_env", lambda: None)
+    wh = _wheelhouse(tmp_path)
+    root = _project(tmp_path, 'nonesuch; python_version < "3.12"')
+
+    assert cp._unsatisfiable_build_requirement(root, wh) is not None

@@ -41,6 +41,7 @@ import fcntl
 import json
 import logging
 import os
+import stat
 import tempfile
 import threading
 from pathlib import Path
@@ -345,7 +346,26 @@ def _secret_edit_guard():
         # Two processes whose links differ would then both hold "the" lock and
         # serialize against nothing, which is exactly the lost update this
         # exists to prevent.
-        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        # O_NONBLOCK as well as O_NOFOLLOW: refusing to FOLLOW a link says
+        # nothing about WHAT was opened, and opening a FIFO waits forever for a
+        # writer — one planted here would hang every secret edit in the
+        # process, a denial of service that costs an attacker one mkfifo.
+        # The object is then checked to BE a regular file owned by this user
+        # before any lock is taken, since a lock on a device or a directory
+        # serializes nothing.
+        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW
+                     | os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise OSError(
+                    f"refusing to lock {lock_path}: not a regular file")
+            if info.st_uid != os.getuid():
+                raise OSError(
+                    f"refusing to lock {lock_path}: owned by uid {info.st_uid}")
+        except OSError:
+            os.close(fd)
+            raise
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             _SECRET_EDIT_DEPTH += 1

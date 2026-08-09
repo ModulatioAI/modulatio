@@ -10,6 +10,7 @@ import errno
 import json
 import os
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -880,3 +881,71 @@ def test_doctor_ignores_models_that_carry_no_key(tmp_path, monkeypatch):
     cli._key_collision_doctor_check()
 
     assert "⚠" not in "\n".join(printed)
+
+
+@pytest.mark.parametrize("kind", ["fifo", "directory", "symlink"])
+def test_a_lock_object_that_is_not_a_regular_file_is_refused(tmp_path, kind):
+    """Refusing to FOLLOW a link says nothing about WHAT was opened. Opening a
+    FIFO waits for a writer that never comes, so one planted here hangs every
+    secret edit in the process — a denial of service costing an attacker one
+    mkfifo. A lock on a directory or a device serializes nothing at all."""
+    import time
+
+    _point_vault_at(tmp_path)
+    lock_path = config.Path(str(config.secrets_path()) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "fifo":
+        os.mkfifo(lock_path)
+    elif kind == "directory":
+        lock_path.mkdir()
+    else:
+        lock_path.symlink_to(tmp_path / "elsewhere")
+
+    started = time.monotonic()
+    with pytest.raises(OSError):
+        with config._secret_edit_guard():
+            pass
+    assert time.monotonic() - started < 5, "the open blocked instead of refusing"
+
+
+def test_an_ordinary_lock_file_is_still_accepted(tmp_path):
+    """The guard must keep working for the only shape it is meant to use."""
+    _point_vault_at(tmp_path)
+
+    with config._secret_edit_guard():
+        config.set_env_secret("A_KEY", "a-value")
+
+    assert "A_KEY=a-value" in config.secrets_path().read_text().splitlines()
+    assert config._SECRET_EDIT_DEPTH == 0
+
+
+def test_two_processes_still_serialize_through_the_validated_lock(tmp_path):
+    """Validating the object must not cost the lock its whole purpose: two
+    real processes performing read-modify-write must not lose an update."""
+    import subprocess
+    import sys
+
+    _point_vault_at(tmp_path)
+    config.secrets_path().parent.mkdir(parents=True, exist_ok=True)
+    config.secrets_path().write_text("", encoding="utf-8")
+
+    # The child must use the SAME settings home as the parent, or the two
+    # serialize on different files and the test proves nothing.
+    prog = (
+        "import sys; sys.path.insert(0, 'src')\n"
+        "from modulatio import config\n"
+        f"config.CONFIG_DIR = config.Path({str(config.CONFIG_DIR)!r})\n"
+        "for i in range(20):\n"
+        "    config.set_env_secret('K_%s_%d' % (sys.argv[1], i), str(i))\n"
+    )
+    procs = [subprocess.Popen([sys.executable, "-c", prog, tag],
+                              cwd=str(Path(__file__).resolve().parents[1]),
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+             for tag in ("a", "b")]
+    for proc in procs:
+        proc.wait(timeout=120)
+
+    text = config.secrets_path().read_text(encoding="utf-8")
+    for tag in ("a", "b"):
+        for i in range(20):
+            assert f"K_{tag}_{i}={i}" in text, f"lost update K_{tag}_{i}"

@@ -36,9 +36,11 @@ import errno
 import logging
 import os
 import select
+import stat
 import struct
 import threading
 from pathlib import Path
+from typing import NamedTuple
 
 logger = logging.getLogger("modulatio.file_witness")
 
@@ -48,6 +50,9 @@ _IN_OPEN = 0x00000020
 _IN_ACCESS = 0x00000001
 #: The kernel dropped events. The account is incomplete from here on.
 _IN_Q_OVERFLOW = 0x00004000
+#: A watch was removed (unmounted, deleted, or dropped): opens under it stop
+#: arriving, so the quiet that follows is not evidence.
+_IN_IGNORED = 0x00008000
 #: ``struct inotify_event`` header: wd, mask, cookie, len.
 _HEADER = struct.Struct("iIII")
 _HEADER_SIZE = _HEADER.size
@@ -69,6 +74,8 @@ class FileAccessWitness:
         self._wake_r = self._wake_w = -1
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        self._state_lock = threading.Lock()
+        self._drained_normally = False
         #: Why the account is not usable, or None while it is.
         self.unmeasured: str | None = None
 
@@ -80,9 +87,16 @@ class FileAccessWitness:
     def never_opened(self) -> "set[Path]":
         """Watched files the kernel never reported an open for.
 
-        Meaningless when :attr:`unmeasured` is set — an unmeasured run has no
-        account at all, which is not the same as an account of silence.
+        EMPTY when :attr:`unmeasured` is set. An unmeasured run has no account
+        at all, which is not the same as an account saying nothing was opened
+        — and the difference decides whether an honest run is convicted by its
+        own silence. Returning the watched set there would hand every caller a
+        full slate of accusations drawn from a measurement that never
+        happened, so the distinction is enforced here rather than left as a
+        rule each caller must remember.
         """
+        if self.unmeasured is not None:
+            return set()
         return set(self._wanted) - self._opened
 
     def __enter__(self) -> "FileAccessWitness":
@@ -125,10 +139,26 @@ class FileAccessWitness:
             except OSError:
                 pass
             self._thread.join(timeout=5)
+            if self._thread.is_alive():
+                self.mark_unmeasured("the event reader did not stop")
+            elif not self._drained_normally:
+                self.mark_unmeasured("the event reader ended early")
         if self._fd >= 0:
             self._read_available()      # whatever landed after the last poll
         self._teardown()
         return False
+
+    def mark_unmeasured(self, reason: str) -> None:
+        """Record that no usable account exists, keeping the FIRST reason.
+
+        Every way the reader can stop early comes through here. A reader that
+        died quietly leaves an EMPTY set of opens, which is indistinguishable
+        from a run that opened nothing — so a caller would refute every credit
+        on the strength of a failure it never heard about.
+        """
+        with self._state_lock:
+            if self.unmeasured is None:
+                self.unmeasured = reason
 
     def _drain_until_stopped(self) -> None:
         """Keep the kernel's queue short for the whole run.
@@ -139,18 +169,21 @@ class FileAccessWitness:
         while not self._stop.is_set():
             try:
                 ready, _, _ = select.select([self._fd, self._wake_r], [], [], 0.25)
-            except (OSError, ValueError):
+            except (OSError, ValueError) as exc:
+                self.mark_unmeasured(f"the event reader stopped early: {exc}")
                 return
             if self._fd in ready:
                 self._read_available()
+        self._drained_normally = True
 
     def _read_available(self) -> None:
         while True:
             try:
                 buf = os.read(self._fd, 65536)
             except BlockingIOError:
-                return
-            except (OSError, ValueError):
+                return                        # the expected empty queue
+            except (OSError, ValueError) as exc:
+                self.mark_unmeasured(f"the event reader failed: {exc}")
                 return
             if not buf:
                 return
@@ -166,8 +199,15 @@ class FileAccessWitness:
             raw = buf[offset:offset + length]
             offset += length
             if mask & _IN_Q_OVERFLOW:
-                self.unmeasured = ("the kernel dropped events (queue overflow) — "
-                                   "the account of this run is incomplete")
+                self.mark_unmeasured(
+                    "the kernel dropped events (queue overflow) — the account "
+                    "of this run is incomplete")
+                continue
+            if mask & _IN_IGNORED:
+                # The watch is gone, so opens under it stop arriving and the
+                # silence that follows means nothing.
+                self.mark_unmeasured(
+                    f"a watch was removed mid-run ({self._dirs.get(wd, '?')})")
                 continue
             name = raw.split(b"\0", 1)[0]
             if not name:
@@ -207,9 +247,22 @@ def _libc():
         return None
 
 
-def strip_bytecode_cache(root: Path) -> int:
-    """Remove the cached-bytecode directories beneath ``root``, returning how
-    many files were removed.
+class CacheStripResult(NamedTuple):
+    """Whether the tree is provably free of usable cached bytecode.
+
+    ``complete`` false means a cache may still serve an import, so the account
+    that follows cannot be read as silence: a file the interpreter loaded from
+    a surviving cache is never opened, and refuting on that silence convicts an
+    honest run. The caller must treat an incomplete strip as unmeasured.
+    """
+
+    complete: bool
+    removed: int
+    reason: "str | None" = None
+
+
+def strip_bytecode_cache(root: Path) -> CacheStripResult:
+    """Empty the cached-bytecode directories beneath ``root``.
 
     An import satisfied from cached bytecode never opens the source, so a tree
     carrying a cache is a tree whose reads are invisible. Since the cache can
@@ -223,17 +276,123 @@ def strip_bytecode_cache(root: Path) -> int:
     thing being examined. Nothing is lost by the narrower rule: while the
     source is present the interpreter reads it and consults only
     ``__pycache__``, and a source that is absent is not watched at all.
+
+    NOTHING IS FOLLOWED. A name is a promise about a location, not proof of
+    one: a ``__pycache__`` that is a SYMLINK points at a directory this
+    function was never asked to touch, and emptying it through the name would
+    delete files outside the tree entirely. The link is removed as a link and
+    its target is never entered. Each directory is opened
+    ``O_DIRECTORY | O_NOFOLLOW`` and its children unlinked relative to that
+    descriptor, so a name swapped between the check and the delete cannot
+    redirect the delete — the descriptor already names the object.
+
+    A child that is not a regular file is left alone and makes the result
+    incomplete rather than being forced.
     """
     removed = 0
-    for path in sorted(root.rglob("__pycache__"),
-                       key=lambda p: len(p.parts), reverse=True):
+    failures: "list[str]" = []
+
+    def _walk(directory_fd: int, path: Path) -> None:
+        """Descend without following any link, closing each descriptor."""
+        nonlocal removed
         try:
-            if not path.is_dir():
+            names = os.listdir(directory_fd)
+        except OSError as exc:
+            failures.append(f"{path}: {exc.strerror}")
+            return
+        for name in names:
+            try:
+                info = os.lstat(name, dir_fd=directory_fd)
+            except OSError as exc:
+                failures.append(f"{path / name}: {exc.strerror}")
                 continue
-            for child in path.iterdir():
-                child.unlink(missing_ok=True)
-                removed += 1
-            path.rmdir()
+            if name == "__pycache__" and stat.S_ISLNK(info.st_mode):
+                # A cache reached through a link still serves imports, so
+                # leaving it would blind the account while reporting success.
+                # The LINK is removed; whatever it points at is never entered
+                # and never touched.
+                try:
+                    os.unlink(name, dir_fd=directory_fd)
+                    removed += 1
+                except OSError as exc:
+                    failures.append(f"{path / name}: {exc.strerror}")
+                continue
+            if not stat.S_ISDIR(info.st_mode):
+                continue                      # links and files are not descended
+            if name == "__pycache__":
+                _empty(directory_fd, name, path / name)
+                continue
+            try:
+                child_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY
+                                   | os.O_NOFOLLOW, dir_fd=directory_fd)
+            except OSError as exc:
+                failures.append(f"{path / name}: {exc.strerror}")
+                continue
+            try:
+                _walk(child_fd, path / name)
+            finally:
+                os.close(child_fd)
+
+    def _empty(parent_fd: int, name: str, path: Path) -> None:
+        nonlocal removed
+        try:
+            cache_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY
+                               | os.O_NOFOLLOW, dir_fd=parent_fd)
+        except OSError as exc:
+            failures.append(f"{path}: {exc.strerror}")
+            return
+        try:
+            for entry in os.listdir(cache_fd):
+                try:
+                    info = os.lstat(entry, dir_fd=cache_fd)
+                except OSError as exc:
+                    failures.append(f"{path / entry}: {exc.strerror}")
+                    continue
+                if stat.S_ISLNK(info.st_mode):
+                    # Removed as a LINK; whatever it points at is untouched.
+                    try:
+                        os.unlink(entry, dir_fd=cache_fd)
+                        removed += 1
+                    except OSError as exc:
+                        failures.append(f"{path / entry}: {exc.strerror}")
+                    continue
+                if not stat.S_ISREG(info.st_mode):
+                    # A directory or device inside a cache is not something to
+                    # force; it may also hide bytecode this cannot reach.
+                    failures.append(f"{path / entry}: not a regular file")
+                    continue
+                try:
+                    os.unlink(entry, dir_fd=cache_fd)
+                    removed += 1
+                except OSError as exc:
+                    failures.append(f"{path / entry}: {exc.strerror}")
+        except OSError as exc:
+            failures.append(f"{path}: {exc.strerror}")
+        finally:
+            os.close(cache_fd)
+        try:
+            os.rmdir(name, dir_fd=parent_fd)
         except OSError:
-            continue
-    return removed
+            pass          # a cache emptied but not removed still serves nothing
+
+    try:
+        root_info = os.lstat(root)
+    except OSError as exc:
+        return CacheStripResult(False, 0, f"{root}: {exc.strerror}")
+    if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
+        return CacheStripResult(False, 0, f"{root} is not a directory")
+    try:
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        return CacheStripResult(False, 0, f"{root}: {exc.strerror}")
+    try:
+        # A cache directly at the root is emptied like any other.
+        _walk(root_fd, Path(root))
+    finally:
+        os.close(root_fd)
+
+    if failures:
+        return CacheStripResult(
+            False, removed,
+            "cached bytecode may survive: " + "; ".join(failures[:3]))
+    return CacheStripResult(True, removed)
