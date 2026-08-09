@@ -111,6 +111,19 @@ def test_seat_and_redo_phases_read_as_english_not_raw_tokens():
     assert cooldown != no_progress
 
 
+def test_an_acronym_role_is_capitalized_as_itself_not_title_cased():
+    """A run with no reviewer seat configured emits the role word where an id
+    belongs, and title-casing spells that acronym as a word — a name nobody
+    chose, on every line the seat appears in."""
+    from modulatio.tui.widgets.stream_view import _humanize
+
+    assert _humanize("qc") == "QC"
+    assert _humanize("QC") == "QC"
+    # Ordinary tokens are unaffected.
+    assert _humanize("prod-kimi") == "Prod Kimi"
+    assert _humanize("leader") == "Leader"
+
+
 def test_a_handoff_verb_does_not_name_the_receiving_seat_by_its_role():
     """Every other line in the feed names its seat from the roster, so a static
     verb naming one by role word is the only place a named seat reads as

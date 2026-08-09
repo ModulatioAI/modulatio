@@ -543,3 +543,26 @@ def test_doctor_version_line_reports_skew_and_clean(monkeypatch):
         modulatio, "installed_version", lambda: modulatio.__version__)
     line = cli._doctor_version_line()
     assert "skew" not in line and "reinstall" not in line
+
+
+def test_the_console_capitalizes_an_acronym_role_as_itself():
+    """The console falls back to a humanized token when the roster carries no
+    name for a seat, and a run with no reviewer configured emits the role word
+    where an id belongs. Capitalizing each word spells that acronym as a word.
+
+    Source-level pin, matching the notice test above: the repo carries no JS
+    harness, and standing one up to drive one branch would cost more than it
+    pins."""
+    from pathlib import Path
+
+    import modulatio.web as web
+
+    js = (Path(web.__file__).parent / "static/js/pages/console.js").read_text()
+    start = js.index("function humanize(")
+    body = "\n".join(
+        ln for ln in js[start:start + 600].splitlines()
+        if not ln.lstrip().startswith("//")
+    )
+    end = body.index("\n}")
+
+    assert 'return "QC"' in body[:end]

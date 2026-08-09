@@ -117,7 +117,13 @@ _PHASE: dict[str, tuple[str, str]] = {
 
 def _humanize(token: str) -> str:
     """Last-resort display label when no roster name is found — never a bare
-    id or number. Turns ``prod-kimi`` → ``Prod Kimi``, ``leader`` → ``Leader``."""
+    id or number. Turns ``prod-kimi`` → ``Prod Kimi``, ``leader`` → ``Leader``.
+
+    Title-casing spells an acronym as a word, so the review seat — the one role
+    token that is an acronym — is capitalized as itself. A run with no reviewer
+    configured emits the role in place of an id, which is where this shows."""
+    if token.strip().lower() == "qc":
+        return "QC"
     return token.replace("-", " ").replace("_", " ").strip().title() or token
 
 

@@ -66,6 +66,10 @@ const TOOL = {
 };
 
 function humanize(token) {
+  // Capitalizing each word spells an acronym as a word, so the review seat --
+  // the one role token that is an acronym -- is capitalized as itself. A run
+  // with no reviewer configured emits the role in place of an id.
+  if ((token ?? "").trim().toLowerCase() === "qc") return "QC";
   const t = (token ?? "").replaceAll("-", " ").replaceAll("_", " ").trim();
   return t ? t.replace(/\b\w/g, (c) => c.toUpperCase()) : token;
 }
