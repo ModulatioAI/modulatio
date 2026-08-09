@@ -1847,3 +1847,44 @@ def test_an_absent_completion_record_still_fails_the_gate_closed(
     state, report = orch._goal_pytest_gate([_code_task()])
 
     assert state is False, report
+
+
+def test_no_shipped_surface_claims_a_producer_suite_was_attested():
+    """The suite is the deliverable's own and runs in one interpreter with the
+    code it judges, so a reported success is evidence and not an attestation.
+    A paragraph saying so inside a report is undone by a heading, a docstring
+    or a public promise that certifies the same result — the reader believes
+    the certification."""
+    from pathlib import Path
+
+    import modulatio
+
+    pkg = Path(modulatio.__file__).parent
+    surfaces = [pkg / "orchestration.py", pkg / "_docs" / "01-overview.md",
+                pkg.parent.parent / "README.md"]
+    withdrawn = (
+        "unable to claim a success it did not earn",
+        "engine-run pytest, deterministic",
+        "hard *completion*",
+        "hard completion evidence",
+    )
+    for path in surfaces:
+        if not path.exists():
+            continue
+        body = path.read_text(encoding="utf-8", errors="replace")
+        for claim in withdrawn:
+            assert claim not in body, f"{path.name} still claims: {claim}"
+
+
+def test_the_evidence_block_does_not_render_a_reported_success_as_passed():
+    """PASSED reads as the engine's finding. What the engine has is the run's
+    own report, which is a different thing and has to look like one."""
+    from modulatio.orchestration import _format_engine_evidence as fmt
+
+    reported = fmt((True, "52 passed"))
+    assert "PASSED" not in reported
+    assert "producer-authored" in reported
+    assert "completion not attested" in reported
+    # A failure still speaks plainly: nothing is gained by reporting one
+    # falsely, so it binds.
+    assert "FAILED" in fmt((False, "1 failed"))

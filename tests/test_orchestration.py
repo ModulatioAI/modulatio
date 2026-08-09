@@ -13855,7 +13855,9 @@ def test_engine_evidence_is_recorded_beside_the_verifier_account():
     from modulatio.orchestration import _format_engine_evidence as fmt
 
     passed = fmt((True, "build: ok\ntest: ok\n52 passed"))
-    assert "PASSED" in passed and "52 passed" in passed
+    # Not "PASSED": what the engine holds is the run's own report, which is a
+    # different thing from a finding of its own and has to look like one.
+    assert "producer-authored" in passed and "52 passed" in passed
     assert "not by the verifier" in passed
 
     failed = fmt((False, "wheel: product_failed"))

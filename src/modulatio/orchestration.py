@@ -1119,11 +1119,15 @@ def _format_engine_evidence(gate: "tuple[bool | None, str] | None") -> str:
     green, body = gate
     headline = {
         None: "NOT MEASURED — no evidence was gathered for this code goal",
-        True: "PASSED",
+        # Not "PASSED". The suite belongs to the deliverable and runs in one
+        # interpreter with the code it judges, so a reported success is what
+        # the run SAID, not something the engine established. A failure is
+        # different: nothing is gained by reporting one falsely, so it binds.
+        True: "NO FAILURES REPORTED — producer-authored, completion not attested",
         False: "FAILED",
     }[green]
-    # A measured failure is bound elsewhere and a measured pass speaks for
-    # itself; an ABSENT measurement is the state a report can be written over
+    # A failure is bound elsewhere; a reported success is worth what it says
+    # above. An ABSENT measurement is the state a report can be written over
     # without contradicting anything on the page. Saying so is the engine's to
     # do, because the sentence asking the verifier not to claim what it cannot
     # see is carried in a prompt, and nothing checks whether it was followed.
@@ -1136,7 +1140,7 @@ def _format_engine_evidence(gate: "tuple[bool | None, str] | None") -> str:
     )
     return (
         "\n\n---\n\n"
-        "## Engine-measured build and test\n\n"
+        "## Build and test — what the engine ran and what it can vouch for\n\n"
         f"**{headline}.** Recorded by the engine, not by the verifier above.\n"
         f"{caveat}"
         f"\n```\n{body.replace('```', chr(39) * 3).strip()}\n```\n"
@@ -13365,7 +13369,13 @@ class Orchestrator:
         Two DIFFERENT facts come back from the engine's wrapper, and only one
         of them is advisory.
 
-        COMPLETION is hard. Every gate-run pytest goes through the wrapper,
+        COMPLETION IS NOT ATTESTED, and the wrapper record does not make it
+        so. Its ABSENCE is hard -- a deliverable gains nothing by withholding
+        its own evidence, so a missing record fails the gate closed. Its
+        presence proves nothing: code sharing the interpreter can find the
+        record's path and write one before leaving. What the engine can vouch
+        for is target selection, hook stripping, containment, and a RECOVERED
+        failure. Every gate-run pytest goes through the wrapper,
         which writes its record only after ``pytest.main()`` returns, so a run
         that reports exit 0 without a recoverable record produced no pytest
         outcome at all — hard RED, whatever the exit status said, and required
@@ -14390,8 +14400,9 @@ class Orchestrator:
                 })
             else:
                 artifact_blocks.append(
-                    "### Test-suite evidence (engine-run pytest, "
-                    f"deterministic)\n\n```\n{safe_report}\n```"
+                    "### Test-suite evidence (engine-run pytest — targets "
+                    "and collection are the engine's; the tests and their "
+                    f"outcomes are the deliverable's)\n\n```\n{safe_report}\n```"
                 )
                 if not gate_green:
                     goal_spec_issues.append(
