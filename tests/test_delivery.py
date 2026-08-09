@@ -854,3 +854,36 @@ def test_name_keeps_a_title_that_merely_contains_rule_characters():
     assert delivery.human_name_from_markdown(
         "Task Report\n===========\n\nbody", fallback="fb"
     ) == "Task Report"
+
+
+def test_a_product_is_named_for_the_work_not_the_task():
+    """A task id names nothing a reader recognises. The delivery FOLDER is
+    already named from the job or the objective; a file falling back to an
+    identifier is the same product named two different ways."""
+    from modulatio import delivery
+
+    # A usable title always wins.
+    assert delivery.human_name_from_markdown(
+        "# Quarterly Report\n\nbody", fallback="apppkg") == "Quarterly Report"
+    # With no usable title, the work's own name carries it.
+    assert delivery.human_name_from_markdown(
+        "---\n\nbody", fallback="apppkg") == "apppkg"
+
+
+def test_a_brief_used_as_a_name_is_bounded_like_a_folder_name():
+    """A brief is a paragraph. Sanitizing one whole produces a filename cut
+    mid-word that names nothing, so a fallback is bounded the way the delivery
+    folder's name is bounded."""
+    from modulatio import delivery
+
+    brief = (
+        "Build apppkg, an installable Python package that reports on a TODO "
+        "list stored as JSON. Package layout: three modules under apppkg/, "
+        "each with its own responsibility and no circular dependencies."
+    )
+    named = delivery.human_name_from_markdown("---\n\nbody", fallback=brief)
+    assert len(named) <= 64, named
+    assert named.startswith("Build apppkg")
+    # Cut at a word edge: the last word of the name is a whole word of the
+    # brief, not a fragment of one.
+    assert named.split()[-1] in brief.split()

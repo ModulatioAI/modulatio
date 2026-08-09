@@ -100,7 +100,13 @@ def _job_slug(raw: str | None) -> str:
     s = _UNICODE_CONTROL_CHARS.sub("", s)    # strips BIDI overrides / NEL (ls-display safety)
     s = re.sub(r"\s+", " ", s).strip(" .")   # collapse whitespace; strip leading/trailing dots+spaces
     if len(s) > _MAX_JOB_SLUG_LEN:
-        s = s[:_MAX_JOB_SLUG_LEN].rstrip(" .")
+        # Back off to the last word edge so the cut does not land inside a
+        # word: a name ending "reports on a TO" reads as damage rather than
+        # as a shortened name. A single word longer than the cap is kept as
+        # the hard cut, there being no earlier edge to find.
+        cut = s[:_MAX_JOB_SLUG_LEN]
+        edge = cut.rfind(" ")
+        s = (cut[:edge] if edge > 0 else cut).rstrip(" .,;:-")
     return s
 
 
@@ -248,7 +254,11 @@ def human_name_from_markdown(text: str, *, fallback: str) -> str:
     # case fall back to the supplied name (the Leader's document title) before
     # sanitizing, so the file is named for WHAT it is, not the producer's process.
     if not raw.strip(_RULE_CHARS) or _looks_like_narration(raw):
-        raw = fallback
+        # Bound the fallback the way the delivery FOLDER's name is bounded: a
+        # brief is a paragraph, and sanitizing one whole produces a filename cut
+        # mid-word that names nothing. Falling back means naming the product
+        # after the work, so it should read like a name.
+        raw = _job_slug(fallback) or fallback
     return _sanitize_filename(raw)
 
 

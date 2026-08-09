@@ -17275,7 +17275,14 @@ class Orchestrator:
                     _delivery.deliver_finished_products(
                         grounded, project_code=self.project.code,
                         pinned_names=set(summary.pinned_files),
-                        dest_override=job_out, job_name=summary.job_slug,
+                        dest_override=job_out,
+                        # The same name the delivery FOLDER is given, so a
+                        # product is called after the work rather than after
+                        # the task that happened to write it. Without it the
+                        # last resort is a task id, which names nothing a
+                        # reader recognises.
+                        job_name=(summary.job_slug or self.project.name
+                                  or self.project.objective or None),
                     )
                 )
             # Surface any graceful-degradation notes (e.g. pandoc absent → shipped
