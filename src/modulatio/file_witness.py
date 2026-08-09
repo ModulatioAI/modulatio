@@ -208,25 +208,32 @@ def _libc():
 
 
 def strip_bytecode_cache(root: Path) -> int:
-    """Remove every compiled-bytecode artefact beneath ``root``, returning how
-    many were removed.
+    """Remove the cached-bytecode directories beneath ``root``, returning how
+    many files were removed.
 
     An import satisfied from cached bytecode never opens the source, so a tree
     carrying a cache is a tree whose reads are invisible. Since the cache can
     arrive with the material being examined, removing it is what makes the
     kernel's account complete rather than merely tidy.
+
+    Only ``__pycache__`` is emptied, never a compiled file elsewhere in the
+    tree. That directory is a cache by definition and nothing can legitimately
+    ship a product inside it, while a compiled file beside its source may be
+    the deliverable's own output — and removing it would destroy the very
+    thing being examined. Nothing is lost by the narrower rule: while the
+    source is present the interpreter reads it and consults only
+    ``__pycache__``, and a source that is absent is not watched at all.
     """
     removed = 0
-    for path in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+    for path in sorted(root.rglob("__pycache__"),
+                       key=lambda p: len(p.parts), reverse=True):
         try:
-            if path.is_dir() and path.name == "__pycache__":
-                for child in path.iterdir():
-                    child.unlink(missing_ok=True)
-                    removed += 1
-                path.rmdir()
-            elif path.is_file() and path.suffix in (".pyc", ".pyo"):
-                path.unlink(missing_ok=True)
+            if not path.is_dir():
+                continue
+            for child in path.iterdir():
+                child.unlink(missing_ok=True)
                 removed += 1
+            path.rmdir()
         except OSError:
             continue
     return removed

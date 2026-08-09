@@ -157,3 +157,32 @@ def test_a_suite_that_never_imports_the_shipped_module_is_caught(tmp_path):
     assert witness.unmeasured is None
     assert witness.never_opened() == {module}, (
         "a green suite that never opened the shipped module must be visible")
+
+
+def test_a_compiled_file_beside_its_source_is_left_alone(tmp_path):
+    """A compiled file outside the cache directory may be the deliverable's
+    own output, and the engine must not destroy what it was asked to examine.
+    Nothing is lost by leaving it: while the source is present the interpreter
+    reads the source and consults only the cache directory."""
+    import py_compile
+    import subprocess
+    import sys
+
+    module = _write_module(tmp_path, "shipped.py")
+    py_compile.compile(str(module), doraise=True)
+    product = tmp_path / "shipped.pyc"
+    product.write_bytes(next((tmp_path / "__pycache__").glob("*.pyc")).read_bytes())
+
+    assert strip_bytecode_cache(tmp_path) >= 1
+
+    assert product.is_file(), "the engine deleted a compiled file it did not own"
+    assert not (tmp_path / "__pycache__").exists()
+
+    # And the narrower rule still leaves the source the only readable copy.
+    with FileAccessWitness([module]) as witness:
+        subprocess.run(
+            [sys.executable, "-B", "-c",
+             f"import sys; sys.path.insert(0, {str(tmp_path)!r}); import shipped"],
+            capture_output=True, timeout=60, check=False)
+    assert witness.opened == {module}, (
+        "a compiled sibling must not shadow the source while the source exists")
