@@ -16,6 +16,7 @@ from uuid import uuid4
 
 import pytest
 
+from modulatio import config as _config_mod
 from modulatio import conventions
 from modulatio import orchestration as orch_mod
 from modulatio.orchestration import _OBSERVATION_MAX_BYTES, Orchestrator
@@ -843,11 +844,23 @@ def test_unbound_task_renders_no_block(project, monkeypatch):
 # test can attest for it ─────────────────────────────────────────────────────
 
 
+#: Read at import, before the suite swaps CONFIG_DIR for a tmp path: a gate
+#: that actually EXECUTES provisions its runner from the engine's approved
+#: local bundle, and the isolated CONFIG_DIR hides the installed one.
+_RUNNER_BUNDLE = Path(_config_mod.CONFIG_DIR) / "wheelhouse"
+
+
 def _enforceable_sandbox(monkeypatch):
+    """Make the gate both permitted to run and able to: sandbox predicates
+    plus the runner bundle. A host without a bundle skips rather than failing
+    for a reason no test here measures."""
     from modulatio import sandbox
     monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: False)
     monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: True)
     monkeypatch.setattr(sandbox, "current_profile", lambda: "standard")
+    if not any(_RUNNER_BUNDLE.glob("pytest-*.whl")):
+        pytest.skip(f"no runner bundle at {_RUNNER_BUNDLE}")
+    monkeypatch.setenv("MODULATIO_WHEELHOUSE", str(_RUNNER_BUNDLE))
 
 
 class _DeterministicRunShell:
@@ -1179,16 +1192,27 @@ def test_the_observer_command_runs_through_the_shipping_runner(
     assert observer, f"the gate issued no observer command: {issued}"
     assert any("-c" in argv for argv in confined), (
         "the observer command did not go through the confining wrapper")
-    # The refused form, proven refused by the same registry that just ran the
-    # accepted one — so this is a property of the validator, not of the host.
+    # The NAME=value-prefixed form is refused wherever the argv allowlist is
+    # the boundary: to ``exec`` the prefix is the binary's name. Where the
+    # sandbox is proven sealed the command runs as ordinary shell instead and
+    # the prefix is a legal assignment — so the refusal is pinned with the
+    # allowlist FORCED to be the boundary, or a sealed host would accept the
+    # form and this assertion would test the host, not the validator.
+    from unittest.mock import patch as _patch
+
+    from modulatio import sandbox as _sb
     registry = build(
         artifacts_root=orch._shared_artifacts_root(),
         tool_calls_dir=orch._shared_artifacts_root() / "tool_calls",
         project_code=PROJECT_CODE)
-    with pytest.raises(ValueError):
-        registry["run_shell"].call(
-            cmd="OBSERVE_ORIGINS={} " + observer[0],
-            profile="full", cwd=str(orch._shared_artifacts_root()), timeout=30)
+    with _patch.object(
+            _sb, "enforcement_state",
+            lambda: _sb.EnforcementState.DEGRADED_ALLOWLIST):
+        with pytest.raises(ValueError):
+            registry["run_shell"].call(
+                cmd="OBSERVE_ORIGINS={} " + observer[0],
+                profile="full", cwd=str(orch._shared_artifacts_root()),
+                timeout=30)
 
 
 def test_the_observed_set_is_not_exposed_through_main(project, monkeypatch):
