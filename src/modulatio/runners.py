@@ -31,6 +31,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 from uuid import uuid4
@@ -2135,7 +2136,13 @@ def _render_transcript(messages: "list[dict]") -> str:
             continue
         content = m.get("content") or ""
         if role == "tool":
-            out.append(f"[result of {m.get('tool_call_id') or 'a tool call'}]\n{content}")
+            # A result is DATA. It can carry anything a fetched page or a read
+            # file contains, including the protocol's own fence, so the fence
+            # is defused before the text is replayed: content that arrives from
+            # a tool must not be able to look like a request to run one.
+            safe = str(content).replace(
+                f"```{claude_cli.TOOL_FENCE}", f"``` {claude_cli.TOOL_FENCE}")
+            out.append(f"[result of {m.get('tool_call_id') or 'a tool call'}]\n{safe}")
         elif role == "assistant":
             requested = ""
             for c in m.get("tool_calls") or ():
@@ -2223,9 +2230,15 @@ def _build_claude_cli_chat_runner(
             disallowed_tools=claude_cli._DISALLOWED_TOOLS,
         )
         prose, requested = claude_cli.parse_tool_protocol(text)
+        # Ids are unique across the whole conversation, not per invocation.
+        # Restarting the numbering each turn makes the second turn's first
+        # call share an id with the first turn's, so a result can be paired
+        # with the wrong request — and a large one can displace the evidence
+        # of an earlier turn that is still being reasoned about.
         calls = tuple(
-            ToolCall(id=f"clay-{i}", name=c["name"], args=c["args"])
-            for i, c in enumerate(requested)
+            ToolCall(id=f"clay-{uuid.uuid4().hex[:12]}",
+                     name=c["name"], args=c["args"])
+            for c in requested
         )
         return ChatResponse(content=prose, tool_calls=calls)
 

@@ -279,3 +279,20 @@ def test_ordinary_fenced_code_in_a_reply_is_not_a_tool_request():
         'here is config\n```json\n{"name": "run_shell"}\n```')
     assert calls == []
     assert "run_shell" in prose
+
+
+def test_a_seat_that_is_not_resuming_writes_no_session_file():
+    """The engine replays the whole conversation into every invocation, so a
+    persisted session adds nothing to read back — and leaves a transcript of
+    the operator's work in a place the engine does not manage and a wipe does
+    not reach."""
+    from modulatio.claude_cli import build_claude_argv
+
+    argv = build_claude_argv(claude_bin="/x/claude", model="m", prompt="hi")
+    assert "--no-session-persistence" in argv
+
+    # A seat deliberately resuming or pinning a conversation still may.
+    assert "--no-session-persistence" not in build_claude_argv(
+        claude_bin="/x/claude", model="m", prompt="hi", resume="abc")
+    assert "--no-session-persistence" not in build_claude_argv(
+        claude_bin="/x/claude", model="m", prompt="hi", session_id="abc")

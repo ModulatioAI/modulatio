@@ -164,6 +164,13 @@ def build_claude_argv(
         argv += ["--resume", resume]
     elif session_id:
         argv += ["--session-id", session_id]
+    else:
+        # A seat that is not resuming or pinning a conversation writes no
+        # session file. The engine already replays the whole conversation into
+        # every invocation, so persisted state adds nothing to read back and
+        # leaves a transcript of the operator's work in a place the engine
+        # does not manage and a wipe does not reach.
+        argv.append("--no-session-persistence")
     argv.append(prompt)
     return argv
 
@@ -265,8 +272,12 @@ def parse_tool_protocol(text: str) -> "tuple[str, list[dict]]":
         name = payload.get("name")
         if not isinstance(name, str) or not name:
             continue
-        args = payload.get("arguments")
-        calls.append({"name": name, "args": args if isinstance(args, dict) else {}})
+        if "arguments" in payload and not isinstance(payload["arguments"], dict):
+            # A request whose arguments are not an object is not a request the
+            # engine can check against a grant. Treating it as an empty call
+            # would invent an invocation nobody asked for.
+            continue
+        calls.append({"name": name, "args": payload.get("arguments") or {}})
     return "".join(out).strip(), calls
 
 
