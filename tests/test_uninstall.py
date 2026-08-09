@@ -775,3 +775,73 @@ def test_the_fallback_stops_entry_points_without_killing_mentions(tmp_path):
     finally:
         decoy.kill()
         decoy.wait(timeout=10)
+
+
+def test_a_process_that_cannot_be_signalled_stops_the_uninstall(tmp_path):
+    """A signal failing for any reason other than "no such process" leaves the
+    process running and the uninstaller unable to stop it. Treating that as an
+    exit is fail-open: files come off disk while a server still serves them.
+    A probe cannot tell the two apart, so the error itself is read."""
+    fake_ps = tmp_path / "ps"
+    fake_ps.write_text(
+        "#!/bin/sh\n"
+        "# One exact entry-point row the fallback must try to stop, on a pid\n"
+        "# no ordinary user may signal.\n"
+        'case "$*" in *args*) echo "    1 /usr/local/bin/modulatio-api" ;;\n'
+        '                 *) echo \"    1\" ;; esac\n',
+        encoding="utf-8")
+    fake_ps.chmod(0o755)
+
+    cache = tmp_path / ".cache" / "modulatio"
+    cache.mkdir(parents=True)
+    env = _fake_home_env(tmp_path)
+    env["MODULATIO_UNINSTALL_STANDALONE"] = "1"
+    env["MODULATIO_SYSTEMD_ROOTS"] = str(tmp_path / "no-units")
+    env["PATH"] = f"{tmp_path}:{env.get('PATH', '/usr/bin:/bin')}"
+
+    r = subprocess.run(
+        ["bash", str(UNINSTALL_SH), "--keep-package", "--yes"],
+        env=env, stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, timeout=60,
+    )
+
+    assert r.returncode == 1, r.stdout
+    assert "cannot stop Modulatio process" in r.stderr
+    assert cache.exists(), "it deleted while a process it could not stop was live"
+
+
+def test_the_archive_cannot_be_redirected_after_it_is_created(tmp_path):
+    """Creating the name exclusively and then handing the NAME to tar reopens
+    it. The interval between is enough to replace it with a link, and tar
+    follows the link, overwrites what it points at, and a verification that
+    reads the name back accepts the victim as the archive."""
+    victim = tmp_path / "victim"
+    victim.write_text("PRECIOUS\n")
+
+    # tar is replaced so the swap lands exactly at the write boundary.
+    fake_tar = tmp_path / "tar"
+    fake_tar.write_text(
+        "#!/bin/sh\n"
+        f'if [ -n "$MODULATIO_TEST_SWAP" ] && [ -e "$MODULATIO_TEST_SWAP" ]; then\n'
+        f'  rm -f "$MODULATIO_TEST_SWAP"\n'
+        f'  ln -s "{victim}" "$MODULATIO_TEST_SWAP"\n'
+        "fi\n"
+        'exec /usr/bin/tar "$@"\n',
+        encoding="utf-8")
+    fake_tar.chmod(0o755)
+
+    settings = tmp_path / ".config" / "modulatio"
+    settings.mkdir(parents=True)
+    (settings / ".env").write_text("KEY=secret\n")
+    env = _fake_home_env(tmp_path)
+    env["MODULATIO_UNINSTALL_STANDALONE"] = "1"
+    env["MODULATIO_SYSTEMD_ROOTS"] = str(tmp_path / "no-units")
+    env["PATH"] = f"{tmp_path}:{env.get('PATH', '/usr/bin:/bin')}"
+
+    subprocess.run(
+        ["bash", str(UNINSTALL_SH), "--remove-settings", "--keep-package", "--yes"],
+        env=env, stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, timeout=60,
+    )
+
+    assert victim.read_text() == "PRECIOUS\n", "the archive was written over an outside file"

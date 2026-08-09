@@ -83,31 +83,30 @@ backup_userdata() {
   local dest="$HOME/modulatio-uninstall-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
   # The archive holds everything about to be destroyed, secrets included, so
   # it is created owner-only rather than at whatever the ambient umask allows.
-  # A pre-existing name is refused instead of overwritten.
-  # Created exclusively, owner-only, refusing to follow a link — so the name
-  # cannot be replaced between a check and the write and aimed at a file the
-  # archive would overwrite. Checking first and writing second leaves exactly
-  # that window.
-  if ! (umask 077 && set -o noclobber && : > "$dest") 2>/dev/null; then
+  # ONE descriptor from creation through writing and verification. Creating
+  # the name exclusively and then handing the NAME to tar reopens it: the
+  # interval between is enough to replace it with a link, and tar follows the
+  # link, overwrites whatever it points at, and the verification that reads
+  # the name back accepts the victim as the archive. Holding the descriptor
+  # means the bytes go to the inode that was created and nowhere else.
+  if ! (umask 077 && set -o noclobber && exec 3> "$dest") 2>/dev/null; then
     echo "  ! backup destination could not be created safely: $dest" >&2
     return 1
   fi
-  if [ -L "$dest" ]; then
-    echo "  ! backup destination is a link: $dest" >&2
-    rm -f "$dest"
-    return 1
-  fi
-  if ! (umask 077 && tar -czf "$dest" "${items[@]}" 2>/dev/null); then
+  exec 3> "$dest" || { echo "  ! backup destination unusable: $dest" >&2; return 1; }
+  if ! (umask 077 && tar -cz "${items[@]}" 2>/dev/null >&3); then
+    exec 3>&-
     echo "  ! backup FAILED — refusing to remove anything" >&2
     return 1
   fi
-  # The removal that follows is irreversible and this file is its only safety
-  # net, so an unreadable or empty archive stops the uninstall rather than
-  # letting it proceed against a net with no rope in it.
-  if ! tar -tzf "$dest" >/dev/null 2>&1 || [ ! -s "$dest" ]; then
+  # Verified through the SAME descriptor, so a name replaced after the write
+  # cannot present a different file as the archive.
+  if ! tar -tzf "/proc/self/fd/3" >/dev/null 2>&1; then
+    exec 3>&-
     echo "  ! backup did not verify — refusing to remove anything" >&2
     return 1
   fi
+  exec 3>&-
   echo "Backed up your data -> $dest"
 }
 
@@ -311,15 +310,31 @@ main() {
       python*) case "$n1" in modulatio*) ;; *) continue ;; esac ;;
       *) continue ;;
     esac
-    kill "$pid" 2>/dev/null || true
+    # A signal that fails for any reason other than "no such process" leaves
+    # the process running and us unable to stop it. Treating that as success
+    # is the fail-open this refuses: the error is read, not discarded.
+    local err
+    if ! err="$(kill "$pid" 2>&1)"; then
+      case "$err" in
+        *"No such process"*) ;;
+        *) echo "Refusing to uninstall — cannot stop Modulatio process $pid: $err" >&2
+           exit 1 ;;
+      esac
+    fi
     leftover="$leftover$pid "
   done < <(ps -eo pid=,args= 2>/dev/null)
   # A process that will not stop must not be followed by deletion: removing
-  # files from under a live server is the state this refuses to create.
+  # files from under a live server is the state this refuses to create. The
+  # process table is re-read rather than probed with a signal, because a probe
+  # fails identically for a process that is gone and one we may not touch.
   sleep 1
   local still=""
+  local live
+  live="$(ps -eo pid= 2>/dev/null)"
   for pid in $leftover; do
-    kill -0 "$pid" 2>/dev/null && still="$still$pid "
+    case " $(echo $live) " in
+      *" $pid "*) still="$still$pid " ;;
+    esac
   done
   if [ -n "$still" ]; then
     echo "Refusing to uninstall — these Modulatio processes did not stop: $still" >&2

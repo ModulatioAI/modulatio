@@ -379,3 +379,62 @@ def test_bytes_must_come_from_inside_the_folder_that_authorized_them(
     assert attachments.build_attachment(
         granted / "note.txt", kind="document",
         beneath=granted).content == "AUTHORIZED\n"
+
+
+def test_a_grant_bound_load_never_opens_the_source_pathname(
+        tmp_path, monkeypatch):
+    """Any look at the source before staging is a read of whatever the name
+    points at NOW. Refusing later cannot undo a read that already happened, so
+    the only opens permitted under a grant are the walk's own."""
+    import os as _os
+
+    from modulatio import attachments, config
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    granted = tmp_path / "granted"
+    granted.mkdir()
+    (granted / "note.txt").write_text("under the grant\n")
+
+    raw_opens: list = []
+    real_open = _os.open
+
+    def _watch(path, *a, **k):
+        # An open with no dir_fd is a lookup by NAME. The walk always carries
+        # one after the root, and the root itself is the single exception.
+        if "dir_fd" not in k and str(path) != str(granted):
+            raw_opens.append(str(path))
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(_os, "open", _watch)
+    attachments.build_attachment(granted / "note.txt", beneath=granted)
+    monkeypatch.setattr(_os, "open", real_open)
+
+    leaked = [p for p in raw_opens if str(granted) in p]
+    assert not leaked, f"the source pathname was opened by name: {leaked}"
+
+
+def test_the_ceiling_comes_from_the_bytes_that_were_stored(tmp_path, monkeypatch):
+    """Choosing the ceiling from a look beforehand lets a file swapped after
+    that look be stored under the other kind's allowance — an image ceiling
+    admitting a document far past its own."""
+    import pytest
+
+    from modulatio import attachments, config
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    granted = tmp_path / "granted"
+    granted.mkdir()
+    # Text one byte past the document ceiling. Under an image ceiling it would
+    # be stored happily; classified from its own bytes it is a document.
+    big = granted / "whatever.png"
+    big.write_text("x" * (attachments.DEFAULT_MAX_DOCUMENT_BYTES + 1))
+
+    with pytest.raises(ValueError, match="exceeds the document cap"):
+        attachments.build_attachment(big, beneath=granted)
+
+    # A real image of the same size is still fine — the ceiling follows what
+    # the bytes actually are.
+    shot = granted / "shot.txt"
+    shot.write_bytes(b"\x89PNG\r\n\x1a\n"
+                     + b"\x00" * attachments.DEFAULT_MAX_DOCUMENT_BYTES)
+    assert attachments.build_attachment(shot, beneath=granted).kind == "image"

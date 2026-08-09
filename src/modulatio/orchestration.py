@@ -7218,7 +7218,7 @@ class Orchestrator:
             the secret floor below each; the gate prompts for an outside
             folder like any other read."""
             from modulatio import leader_gate as _lg
-            from modulatio.attachments import build_attachment, looks_like_image
+            from modulatio.attachments import build_attachment
             queue = getattr(self._tls, "loaded_items", None)
             if queue is None:
                 return ("Loading rides a conversation turn, and this call is "
@@ -7259,25 +7259,13 @@ class Orchestrator:
                 return (f"Can't load {path!r}: it is not inside any folder "
                         "this seat may read.")
             try:
-                # Modality comes from the bytes that were STAGED, so a file
-                # swapped after a pre-load sniff cannot arrive labelled as
-                # something the engine never looked at.
-                import dataclasses as _dc
-                # Staged first as bytes, then classified from the bytes that
-                # were actually stored: a file swapped after a pre-load sniff
-                # cannot arrive labelled as something the engine never saw.
-                if looks_like_image(target):
-                    item = build_attachment(
-                        target, kind="image", beneath=authorized)
-                    if not looks_like_image(item.staged_path):
-                        item = _dc.replace(item, kind="document",
-                                           content=item.staged_path.read_text(
-                                               encoding="utf-8"))
-                else:
-                    item = build_attachment(
-                        target, kind="document", beneath=authorized)
-                    if looks_like_image(item.staged_path):
-                        item = _dc.replace(item, kind="image", content=None)
+                # The source pathname is never inspected again. The
+                # constructor walks down from the authorized directory and
+                # decides kind, ceiling, digest and content from the bytes it
+                # stored — a look at the path beforehand reads whatever the
+                # name points at NOW, and picks the ceiling those stored bytes
+                # are then measured against.
+                item = build_attachment(target, beneath=authorized)
             except UnicodeDecodeError:
                 return (f"Can't load {path!r}: a binary document with no "
                         "extractor (DOCX/ODT/…) — convert it to text or PDF "

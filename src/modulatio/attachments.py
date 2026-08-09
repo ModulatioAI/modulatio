@@ -136,7 +136,8 @@ def _open_beneath(root: Path, rel: "Path | str") -> int:
 
 
 def build_attachment(
-    path: Path, *, kind: AttachmentKind, beneath: "Path | None" = None,
+    path: Path, *, kind: "AttachmentKind | None" = None,
+    beneath: "Path | None" = None,
 ) -> Attachment:
     """Construct an ``Attachment`` from a filesystem path.
 
@@ -159,17 +160,34 @@ def build_attachment(
         UnicodeDecodeError: when ``kind='document'`` but the file isn't
             valid utf-8 (PDF, DOCX, etc.).
     """
-    if not path.exists():
+    if beneath is None and not path.exists():
+        # Only where no root authorized this: under a grant, asking the
+        # pathname anything at all is a read of whatever the name points at
+        # NOW, which is the question the walk below exists to avoid.
         raise FileNotFoundError(f"attachment not found: {path}")
 
-    cap = _resolve_cap(
-        DEFAULT_MAX_DOCUMENT_BYTES if kind == "document"
-        else DEFAULT_MAX_IMAGE_BYTES
-    )
+    # Staged FIRST and kind-neutral, under the widest ceiling either kind
+    # allows. Choosing the ceiling from a look at the source beforehand lets a
+    # file swapped after that look be stored under the other kind's allowance
+    # — an image ceiling admitting an oversized document. The kind, and with
+    # it the real ceiling, come from the bytes that were actually stored.
     sweep_orphan_snapshots()
-    staged, digest, size = _stage(path, cap=cap, kind=kind, beneath=beneath)
+    neutral_cap = max(_resolve_cap(DEFAULT_MAX_DOCUMENT_BYTES),
+                      _resolve_cap(DEFAULT_MAX_IMAGE_BYTES))
+    staged, digest, size = _stage(
+        path, cap=neutral_cap, kind=kind or "document", beneath=beneath)
     try:
-        return _finish_attachment(path, kind, staged, digest, size)
+        settled = kind or ("image" if looks_like_image(staged) else "document")
+        real_cap = _resolve_cap(
+            DEFAULT_MAX_IMAGE_BYTES if settled == "image"
+            else DEFAULT_MAX_DOCUMENT_BYTES)
+        if size > real_cap:
+            raise ValueError(
+                f"attachment {path.name!r} is {size} bytes; exceeds the "
+                f"{settled} cap of {real_cap} bytes "
+                f"(override via {_OVERRIDE_ENV})."
+            )
+        return _finish_attachment(path, settled, staged, digest, size)
     except BaseException:
         # Construction failed AFTER the copy was taken, so no caller ever
         # received the path and nobody is left to release it. A snapshot with
