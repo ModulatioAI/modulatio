@@ -771,6 +771,52 @@ def test_a_settings_home_that_is_not_a_real_directory_is_refused(tmp_path):
         assert time.monotonic() - started < 5, f"{name}: the open blocked"
 
 
+def test_a_symlinked_settings_home_leaves_its_target_untouched(tmp_path):
+    """Refusing the open is not enough if something was already changed to get
+    there. Hardening by PATHNAME resolves the link first, so the external
+    directory has its mode rewritten before the no-follow open can refuse it —
+    the engine altering a tree it was never asked to lock. Nothing may be
+    inspected or repaired until the descriptor says what is in scope."""
+    target = tmp_path / "outside"
+    target.mkdir(mode=0o755)
+    os.chmod(target, 0o755)
+    child = target / "child.txt"
+    child.write_text("theirs", encoding="utf-8")
+    before_mode = target.stat().st_mode & 0o777
+    before_children = sorted(p.name for p in target.iterdir())
+
+    home = tmp_path / "home"
+    home.symlink_to(target)
+    config.CONFIG_DIR = home
+
+    with pytest.raises(OSError):
+        with config._secret_edit_guard():
+            pass
+
+    assert target.stat().st_mode & 0o777 == before_mode, (
+        "the engine changed the mode of a directory outside its tree")
+    assert sorted(p.name for p in target.iterdir()) == before_children
+    assert child.read_text(encoding="utf-8") == "theirs"
+
+
+def test_the_repaired_directory_is_the_one_that_gets_locked(tmp_path):
+    """Repairing by path and locking by descriptor could act on two different
+    inodes if the name moved between them. Both happen on the descriptor, so
+    the object repaired is the object held."""
+    home = tmp_path / "cfg"
+    home.mkdir(mode=0o700)
+    os.chmod(home, 0o777)
+    config.CONFIG_DIR = home
+    before_inode = home.stat().st_ino
+
+    with config._secret_edit_guard():
+        pass
+
+    after = home.stat()
+    assert after.st_mode & 0o777 == 0o700
+    assert after.st_ino == before_inode
+
+
 def test_a_settings_home_others_can_write_is_repaired_before_it_is_trusted(
         tmp_path):
     """A lock inside a directory somebody else may write is not a lock: they

@@ -340,7 +340,9 @@ def _secret_edit_guard():
             finally:
                 _SECRET_EDIT_DEPTH -= 1
             return
-        lock_domain.mkdir(parents=True, exist_ok=True)
+        # Created owner-only from the start; a directory made permissive and
+        # narrowed afterwards is readable in the interval.
+        lock_domain.mkdir(parents=True, exist_ok=True, mode=0o700)
         # THE LOCK DOMAIN IS THE SETTINGS DIRECTORY, not a file inside it.
         # A lock addressed by PATHNAME is only as stable as the name: whoever
         # can write the directory can rename the lock file aside and put
@@ -357,7 +359,13 @@ def _secret_edit_guard():
         # not a lock. O_NOFOLLOW refuses a link put in its place; O_DIRECTORY
         # refuses anything that is not a directory, so no FIFO or device can
         # be substituted to block the open forever.
-        _harden_secret_dir(lock_domain)
+        # EVERY check and repair happens on the DESCRIPTOR, never on the
+        # pathname. Hardening by path resolves the name first, so a settings
+        # home that is a LINK has its target followed and its mode rewritten
+        # before the no-follow open ever gets to refuse it — the engine
+        # changing permissions on a directory outside the tree it was asked to
+        # lock. The open decides what is in scope; only then may anything be
+        # inspected or altered.
         fd = os.open(lock_domain, os.O_RDONLY | os.O_DIRECTORY
                      | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
@@ -370,9 +378,9 @@ def _secret_edit_guard():
                     f"refusing to lock {lock_domain}: owned by uid "
                     f"{info.st_uid}")
             if info.st_mode & 0o077:
-                raise OSError(
-                    f"refusing to lock {lock_domain}: reachable by others "
-                    f"(mode {info.st_mode & 0o777:o})")
+                # Repaired through the descriptor, so the object repaired is
+                # the object that will be locked.
+                os.fchmod(fd, 0o700)
         except OSError:
             os.close(fd)
             raise

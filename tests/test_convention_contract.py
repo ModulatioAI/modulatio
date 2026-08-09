@@ -3002,3 +3002,49 @@ def test_a_forged_credit_for_another_root_cannot_ride_out_on_this_run(
     assert "beta" in named, (
         f"a forged beta credit survived a run that could not measure it — "
         f"state={state}\nadvisory: {line!r}")
+
+
+def test_the_resolver_separates_an_unwatchable_token_from_a_watched_one(tmp_path):
+    """The resolver must distinguish three fates, because the caller decides
+    what is acceptable from them: watched (sources to observe), unwatchable
+    (present, empty, disclosed), and scoped out (absent, another root answers).
+
+    This pins the RESOLVER's states only. That the observation parser then
+    refuses the unwatchable token is asserted at the call site, not here — a
+    fixture with a sealed contract whose component ships no Python source is
+    not constructible through the real plan, so I have not pinned that half
+    behaviourally."""
+    from modulatio.orchestration import _witness_paths
+
+    root = tmp_path / "artifacts"
+    empty = root / "webapp"
+    empty.mkdir(parents=True)
+    (empty / "README.md").write_text("no python\n", encoding="utf-8")
+    real = root / "other"
+    real.mkdir()
+    (real / "__init__.py").write_text("", encoding="utf-8")
+
+    watched = _witness_paths(
+        {"cvc-empty": ("webapp", str(empty)), "cvc-real": ("other", str(real))},
+        root)
+
+    acceptable = {t for t, srcs in watched.items() if srcs}
+    assert acceptable == {"cvc-real"}, (
+        "a token with no source to watch was treated as observable")
+    # It is still PRESENT, so the caller can disclose it as unchecked.
+    assert "cvc-empty" in watched and watched["cvc-empty"] == set()
+
+
+def test_an_unresolvable_origin_is_disclosed_not_dropped(tmp_path):
+    """A dropped key lets the run take the fully-checked branch for a token
+    that never had a watch target. Belonging to another root and failing to
+    resolve are different facts and must not share a representation."""
+    from modulatio.orchestration import _witness_paths
+
+    root = tmp_path / "artifacts"
+    root.mkdir(parents=True)
+
+    watched = _witness_paths({"cvc-bad": ("webapp", "\x00not-a-path")}, root)
+
+    assert "cvc-bad" in watched, "an unresolvable origin vanished silently"
+    assert watched["cvc-bad"] == set()

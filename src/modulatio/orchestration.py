@@ -2635,9 +2635,16 @@ def _witness_paths(declared_origins: dict, root: "Path") -> "dict[str, set]":
         try:
             base = Path(origin_root).resolve()
             root_real = root.resolve()
-            if base != root_real and root_real not in base.parents:
-                continue
         except (OSError, ValueError):
+            # Unresolvable is NOT the same as belonging elsewhere. Dropping the
+            # key would let the run take the fully-checked branch for a token
+            # that never had a watch target, so it is carried as observable-by
+            # -nothing and disclosed.
+            paths[token] = set()
+            continue
+        if base != root_real and root_real not in base.parents:
+            # SCOPED OUT: another root answers for this component, and this
+            # run must not credit or refute it. Absent by design.
             continue
         found: "set" = set()
         # The component directory itself, or one holding it.
@@ -13709,6 +13716,7 @@ class Orchestrator:
                         # was opened is refuted.
                         refuted = {tok for tok, paths in watched.items()
                                    if paths and not (paths & opened)}
+                        kernel_withdrew.extend(sorted(refuted))
                 except (RuntimeError, ValueError, OSError) as exc:
                     _logger.warning("pytest gate could not run: %s", exc)
                     if obs_path is not None:
@@ -13722,8 +13730,14 @@ class Orchestrator:
                     # could contradict — and the run that CAN measure it might
                     # never credit it at all. Its own root's run answers for
                     # it; the absence of a key is not a verdict.
+                    # Acceptable means OBSERVABLE, not merely declared here:
+                    # a token with no source to watch cannot be contradicted by
+                    # any measurement in this run, so accepting its credit
+                    # would put an unobservable claim into the same set as
+                    # checked ones. It stays disclosed through the unchecked
+                    # reasons below.
                     finalised, finally_seen = _read_observation(
-                        obs_path, set(watched))
+                        obs_path, {t for t, srcs in watched.items() if srcs})
                 finally:
                     obs_path.unlink(missing_ok=True)
                 head = result.split("\n", 1)[0]
@@ -13786,6 +13800,10 @@ class Orchestrator:
             #: Reasons the kernel could not cross-check a run's import credits.
             #: Non-empty means the green report must not claim it did.
             kernel_unchecked: "list[str]" = []
+            #: Whether ANY run actually cross-checked and withdrew. Measurement
+            #: is per invocation and per token, so a single global "checked" or
+            #: "unchecked" would misdescribe a goal whose roots differ.
+            kernel_withdrew: "list[str]" = []
             for repo_root in roots:
                 # Engine-selected explicit test files + neutralized addopts
                 #: the suite cannot steer collection via
@@ -13932,7 +13950,19 @@ class Orchestrator:
                 "attestation that the run completed honestly. A FAILURE "
                 "remains binding; only success is advisory."
             )
-            if kernel_unchecked:
+            if kernel_unchecked and kernel_withdrew:
+                # Measurement is per invocation and per token. Claiming either
+                # extreme misdescribes a goal whose roots differ: saying
+                # nothing was checked hides real withdrawals, and saying
+                # everything was checked speaks for tokens nothing observed.
+                reports.append(
+                    "[ADVISORY] The kernel cross-checked PART of this goal. It "
+                    "withdrew credits it contradicted ("
+                    + ", ".join(sorted(set(kernel_withdrew))[:3])
+                    + "), and could not check the rest, which stay "
+                    "producer-authored: "
+                    + "; ".join(sorted(set(kernel_unchecked))[:3]))
+            elif kernel_unchecked:
                 # Saying the kernel checked when it did not is the same lie as
                 # reporting an authorization the gate never made.
                 reports.append(
