@@ -24,7 +24,7 @@ import pytest
 
 from modulatio import orchestration as _orch_mod
 from modulatio import runners as mod_runners
-from modulatio import sandbox, store, tools, vault
+from modulatio import config, sandbox, store, tools, vault
 from modulatio.orchestration import Orchestrator
 from modulatio.types import Goal, GoalStatus, Project, Task
 
@@ -79,12 +79,25 @@ def _text_task() -> Task:
 
 # ---------------------------------------------------------------- pytest gate
 
+#: Read at import, before the suite swaps CONFIG_DIR for a tmp path: the gate
+#: takes its runner from the engine's approved local bundle rather than from
+#: PATH, and the isolated CONFIG_DIR hides the installed one.
+_RUNNER_BUNDLE = Path(config.CONFIG_DIR) / "wheelhouse"
+
+
 def _enforceable_sandbox(monkeypatch):
-    """Make the gate see an enforceable sandbox (the suite's autouse bypass
-    would otherwise make every gate call UNAVAILABLE — cadre R1 H1)."""
+    """Make the gate both permitted to run and able to.
+
+    The suite's autouse bypass would otherwise make every gate call
+    UNAVAILABLE, and without the runner bundle the gate can provision no
+    interpreter to execute a suite with — so a host lacking it says so, rather
+    than failing these tests for a reason none of them measure."""
     monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: False)
     monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: True)
     monkeypatch.setattr(sandbox, "current_profile", lambda: "standard")
+    if not any(_RUNNER_BUNDLE.glob("pytest-*.whl")):
+        pytest.skip(f"no runner bundle at {_RUNNER_BUNDLE}")
+    monkeypatch.setenv("MODULATIO_WHEELHOUSE", str(_RUNNER_BUNDLE))
 
 
 def test_pytest_gate_states_non_code_unavailable_and_no_suite(
@@ -629,9 +642,7 @@ def test_transcript_rejects_outside_symlink_swap(project_with_run, tmp_path):
 def test_decoy_testpaths_cannot_hide_a_red_suite(project_with_run, monkeypatch):
     """WB M1: an explicit engine-selected target defeats a producer-authored
     testpaths decoy — the real red test is collected and the gate is RED."""
-    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: False)
-    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: True)
-    monkeypatch.setattr(sandbox, "current_profile", lambda: "standard")
+    _enforceable_sandbox(monkeypatch)
     orch = _orch(project_with_run)
     root = orch._shared_artifacts_root()
     (root / "real_tests").mkdir(parents=True)

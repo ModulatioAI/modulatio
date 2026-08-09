@@ -1764,3 +1764,22 @@ def test_a_javascript_deliverable_builds_and_tests(tmp_path, enforceable):
     failed = cp.run_ecosystem_probes(units, root, scratch_root=tmp_path / "s2")
     assert failed["status"] == "product_failed"
     assert failed["phases"][-1]["origin"] == "deliverable"
+
+
+def test_runner_env_without_a_bundle_is_engine_unavailable(tmp_path, monkeypatch):
+    """A suite measured where it sits still needs an interpreter carrying the
+    runner. Taking one from PATH answers with the host's system python, which
+    holds a runner only by accident — so an engine installed into a virtual
+    environment of its own reports the runner missing and measures nothing.
+
+    Absent the approved local bundle the shortfall is named as the ENGINE's,
+    never as a fact about the deliverable, and never silently green."""
+    monkeypatch.delenv("MODULATIO_WHEELHOUSE", raising=False)
+    env, res = cp.provision_runner_env(tmp_path / "s")
+
+    assert res.status is cp.ProbeStatus.ENGINE_UNAVAILABLE
+    assert res.origin == "engine"
+    assert "no pytest wheel" in res.reason
+    # Never the environment the engine itself runs in.
+    assert "never falling back to the live venv" in res.reason
+    assert env.name == "runner"

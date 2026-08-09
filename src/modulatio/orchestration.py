@@ -13220,6 +13220,24 @@ class Orchestrator:
         if run_shell is None:
             return None, "run_shell tool unavailable (no artifacts root bound)"
 
+        # The runner comes from the engine's approved bundle, not from PATH.
+        # PATH answers with the host's system interpreter, which carries a
+        # test runner only by accident — so an engine installed into a virtual
+        # environment of its own, which is the ordinary case, would report the
+        # runner missing and every code goal would ship unmeasured. A tier
+        # supplying its own execution seam has already decided what runs.
+        gate_python = "python3"
+        if getattr(self, "_pytest_gate_run_shell", None) is None:
+            from modulatio import code_probes as _probes
+            env, provisioned = _probes.provision_runner_env(
+                artifacts_root / ".modulatio-gate")
+            if provisioned.status is not _probes.ProbeStatus.OK:
+                return None, (
+                    f"engine test runner could not be provisioned: "
+                    f"{provisioned.reason}"
+                )
+            gate_python = str(env / "bin" / "python")
+
         def _read_observation(path: "Path") -> "tuple[bool, set]":
             """``(finalised, credited_tokens)`` for one observation record.
 
@@ -13311,7 +13329,7 @@ class Orchestrator:
             # Engine arguments travel as ISOLATED argv, not environment
             # assignments: the runner execs argv directly, so a
             # ``NAME=value`` prefix would be taken for the binary.
-            cmd = (f"python3 -I -c "
+            cmd = (f"{_shlex.quote(gate_python)} -I -c "
                    f"{_shlex.quote(_IMPORT_OBSERVER_BOOTSTRAP)} "
                    f"{_shlex.quote(json.dumps(declared_origins))} "
                    f"{_shlex.quote(str(obs_path))} -- {args}")

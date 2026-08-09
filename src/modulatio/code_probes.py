@@ -1072,6 +1072,61 @@ def provision_test_env(
     return test_env, seed
 
 
+def provision_runner_env(
+    scratch: Path, *, timeout_s: int = DEFAULT_PHASE_TIMEOUT_S,
+) -> "tuple[Path, ProbePhaseResult]":
+    """A venv holding the engine's runner and nothing else, for a suite that
+    is measured where it sits rather than installed first.
+
+    A source tree that was never packaged has no product closure to judge and
+    no pristine environment to clone, but its suite still needs a runner to
+    execute it. Reaching for the interpreter on PATH answers that with the
+    host's system python, which carries the runner only by accident — so an
+    engine living in a virtual environment of its own, which is how it is
+    ordinarily installed, measures nothing and reports the runner missing.
+
+    It resolves from the same approved local bundle the packaged path uses,
+    and for the same reason: an environment that already holds the engine
+    would put the engine's own dependencies on the path of the tests being
+    judged, and a suite that passes by importing them has proved nothing
+    about the deliverable.
+
+    Returns (env, result); every failure here is ENGINE provisioning, never
+    evidence about the product.
+    """
+    env = Path(scratch) / "envs" / "runner"
+    wh = wheelhouse_path()
+    if wh is None or not any(wh.glob("pytest-*.whl")):
+        return env, ProbePhaseResult(
+            status=ProbeStatus.ENGINE_UNAVAILABLE, phase="runner_env",
+            origin="engine",
+            reason="engine runner bundle unavailable — no pytest wheel in the "
+                   "approved local source; never falling back to the live venv",
+        )
+    snap = _null_snapshot(Path(scratch))
+    made = run_probe_phase(
+        [_SANDBOX_PYTHON, "-m", "venv", "--without-pip", str(env)],
+        phase="runner_env", snapshot=snap, scratch=Path(scratch), timeout_s=120)
+    if made.status is not ProbeStatus.OK:
+        return env, ProbePhaseResult(
+            status=ProbeStatus.ENGINE_UNAVAILABLE, phase="runner_env",
+            origin="engine", reason="runner venv creation failed",
+            output_tail=made.output_tail)
+    seed = run_probe_phase(
+        [_SANDBOX_PYTHON, "-m", "pip", "--python", str(env / "bin" / "python"),
+         "install", "--no-index", "--no-cache-dir", "--no-compile",
+         "--find-links", str(wh), "pytest"],
+        phase="runner_env", snapshot=snap, scratch=Path(scratch),
+        timeout_s=timeout_s, allow_network=False,
+        env_extra=_HERMETIC_PIP_ENV, extra_ro=(wh,))
+    if seed.status is not ProbeStatus.OK:
+        return env, ProbePhaseResult(
+            status=ProbeStatus.ENGINE_UNAVAILABLE, phase="runner_env",
+            origin="engine", reason="runner seeding failed",
+            output_tail=seed.output_tail)
+    return env, seed
+
+
 def run_tests_phase(
     test_env: Path, *, snapshot: Snapshot, scratch: Path,
     timeout_s: int = DEFAULT_PHASE_TIMEOUT_S,
