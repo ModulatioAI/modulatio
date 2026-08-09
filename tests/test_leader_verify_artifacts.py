@@ -227,7 +227,7 @@ def test_leader_verify_falls_back_to_drafts_convention(project: Project, tmp_pat
 def test_leader_verify_registry_run_shell_bound_to_artifacts_read_widened(
     project: Project, tmp_path: Path, monkeypatch
 ):
-    """Cadre R1 H2: the Leader-verify registry splits READ from EXEC.
+    """The Leader-verify registry splits READ from EXEC.
     ``run_shell``'s primary (writable / cwd-eligible) root stays the shared
     ARTIFACTS tree — never the whole run dir — so a full-profile command
     cannot overwrite engine-owned run state (goals, tasks, reports). READ

@@ -260,7 +260,7 @@ def test_pending_approval_survives_run_started_and_clear_screen():
 
 
 def test_pending_approvals_survive_a_saturated_replay():
-    """WB R2-F3 pins: pending asks outrank telemetry and run history — a
+    """Pending asks outrank telemetry and run history — a
     replay at full depth must crowd out stale run frames, never a live ask;
     resolving one of two asks replays only the unresolved id."""
     from modulatio.web.events import _SUBSCRIBER_DEPTH, EventBus

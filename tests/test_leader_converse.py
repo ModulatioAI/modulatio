@@ -594,7 +594,7 @@ def test_mid_turn_grant_reaches_the_very_call_that_prompted(
 def test_no_block_belt_survives_broken_persist_and_activity(
     project: Project, monkeypatch
 ):
-    """WB F2 pin: the belt's own side effects (failure-turn persist, activity
+    """The belt's own side effects (failure-turn persist, activity
     emit) are best-effort — a disk fault in either must not resurrect the 500
     the belt exists to prevent."""
     orch = Orchestrator(

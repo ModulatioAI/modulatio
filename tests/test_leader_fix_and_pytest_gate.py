@@ -663,7 +663,7 @@ def test_transcript_rejects_outside_symlink_swap(project_with_run, tmp_path):
 @pytest.mark.skipif(not sandbox.is_sandbox_available(),
                     reason="bwrap required: the gate never runs unsandboxed")
 def test_decoy_testpaths_cannot_hide_a_red_suite(project_with_run, monkeypatch):
-    """WB M1: an explicit engine-selected target defeats a producer-authored
+    """An explicit engine-selected target defeats a producer-authored
     testpaths decoy — the real red test is collected and the gate is RED."""
     _enforceable_sandbox(monkeypatch)
     orch = _orch(project_with_run)
@@ -682,7 +682,7 @@ def test_decoy_testpaths_cannot_hide_a_red_suite(project_with_run, monkeypatch):
 
 
 def test_repo_roots_derive_from_declared_output_paths(project_with_run):
-    """WB M1: suite roots come from the code tasks' declared output_path, so
+    """Suite roots come from the code tasks' declared output_path, so
     a decoy marker outside the delivered tree is not selected."""
     orch = _orch(project_with_run)
     root = orch._shared_artifacts_root()
@@ -890,7 +890,7 @@ def test_seat_tool_sink_preplanted_symlink_not_chmodded(
 @pytest.mark.skipif(not sandbox.is_sandbox_available(),
                     reason="bwrap required: the gate never runs unsandboxed")
 def test_conftest_hook_cannot_drop_a_single_param(project_with_run, monkeypatch):
-    """WB R4 MED (Choice A): a hook that removes only the FAILING parameter is
+    """A hook that removes only the FAILING parameter is
     stripped in the hook-free pass, so test_value[0] runs and fails → RED."""
     _enforceable_sandbox(monkeypatch)
     orch = _orch(project_with_run)
@@ -917,7 +917,7 @@ def test_conftest_hook_cannot_drop_a_single_param(project_with_run, monkeypatch)
                     reason="bwrap required: the gate never runs unsandboxed")
 def test_conftest_hook_that_forges_and_xfails_cannot_greenwash(
         project_with_run, monkeypatch):
-    """WB R6 (Choice A): a conftest hook that both FORGES the collector stdout
+    """A conftest hook that both FORGES the collector stdout
     AND xfails/hides the failing test can't green the gate — the hook-free
     binding pass runs NO producer hook, so neither the forgery nor the xfail
     fires and the real failure surfaces → RED."""
@@ -998,7 +998,7 @@ def test_conftest_required_suite_that_fails_is_red(project_with_run, monkeypatch
                     reason="bwrap required: the gate never runs unsandboxed")
 def test_conftest_hook_cannot_hide_special_char_test_path(
         project_with_run, monkeypatch):
-    """WB R5 MED (Choice A): a failing test in a special-char file
+    """A failing test in a special-char file
     (test_red+case.py) that a hook tries to hide still runs and fails under
     the hook-free binding pass → RED (the file is passed explicitly, quoted)."""
     _enforceable_sandbox(monkeypatch)
@@ -1026,7 +1026,7 @@ def test_conftest_hook_cannot_hide_special_char_test_path(
 @pytest.mark.skipif(not sandbox.is_sandbox_available(),
                     reason="bwrap required: the gate never runs unsandboxed")
 def test_noisy_hook_free_failure_is_red_not_advisory(project_with_run, monkeypatch):
-    """WB R7 MED: a failing test that prints a lot (pushing pytest's summary
+    """A failing test that prints a lot (pushing pytest's summary
     past run_shell's 8 KB head) must still be RED, not misread as
     conftest-dependent → advisory green. The binding pass suppresses captured
     output so the summary stays in-window; the truncation guard is the

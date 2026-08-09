@@ -189,7 +189,7 @@ def test_redact_key_matrix():
         key,               # raw
         "a+b%2Fc%3Dd",     # quote_plus, upper hex
         "a%20b%2Fc%3Dd",   # quote, upper hex
-        "a%20b%2fc%3dd",   # quote, LOWER hex (WB's leak)
+        "a%20b%2fc%3dd",   # quote, LOWER hex
         "a+b%2fc%3Dd",     # MIXED hex
     )
     for form in forms:
