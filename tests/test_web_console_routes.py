@@ -355,7 +355,7 @@ def test_an_uploads_modality_is_read_from_its_bytes(tmp_path):
     """A browser's declared type is the client's claim about bytes the engine
     is already holding, and reading them answers the same question without
     trusting it."""
-    from modulatio.web.routes.console import _looks_like_image
+    from modulatio.attachments import looks_like_image as _looks_like_image
 
     png = tmp_path / "a.png"
     png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)

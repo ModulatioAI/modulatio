@@ -642,3 +642,113 @@ def test_converse_prompt_names_the_delivery_folder(project: Project):
     lowered = prompt.lower()
     assert "delivery folder" in lowered
     assert "workspace" in lowered
+
+
+def test_a_loaded_file_rides_one_same_turn_redispatch(project: Project, monkeypatch):
+    """``load_document`` stages bytes for the turn, and the turn ends with ONE
+    multimodal completion carrying them — the text loop cannot hold image
+    content blocks, so the look happens as the same single call an
+    operator-attached image turn uses. The loop's own reply rides along so the
+    model continues instead of starting over."""
+    orch = Orchestrator(
+        project, _runners(),
+        chat_runners={"leader": lambda **k: ChatResponse(content="x", tool_calls=())},
+        chat_runner_models={"leader": "mock-model"},
+    )
+    workspace = orch._leader_workspace()
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "shot.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+
+    def _loop_that_loads(**kwargs):
+        tool = orch._leader_converse_registry()["load_document"]
+        result = tool.call(path="shot.png")
+        assert "Loaded shot.png" in result, result
+        return "let me look at that"
+
+    seen = {}
+
+    def _mm(*, prompt, attachments, **kw):
+        seen["attachments"] = list(attachments)
+        seen["prompt"] = prompt
+        return "a red button on a grey dialog"
+
+    monkeypatch.setattr(orch, "_run_chat_loop", _loop_that_loads)
+    monkeypatch.setattr(orch, "_run_multimodal_leader", _mm)
+
+    reply = orch.converse("what's in ~/shot.png?")
+
+    assert reply == "a red button on a grey dialog"
+    assert [a.name for a in seen["attachments"]] == ["shot.png"]
+    assert seen["attachments"][0].kind == "image"
+    # The interim reply rides the redispatch prompt.
+    assert "let me look at that" in seen["prompt"]
+    # Nothing loaded survives the turn: queue cleared, staged bytes gone.
+    assert getattr(orch._tls, "loaded_items", None) is None
+    staged = seen["attachments"][0].staged_path
+    assert staged is not None and not staged.exists()
+
+
+def test_loaded_items_clear_even_when_the_loop_dies(project: Project, monkeypatch):
+    """The queue and its staged bytes clear on EVERY exit — a model error must
+    not leave this turn's bytes waiting to ride a future turn."""
+    orch = Orchestrator(
+        project, _runners(),
+        chat_runners={"leader": lambda **k: ChatResponse(content="x", tool_calls=())},
+        chat_runner_models={"leader": "mock-model"},
+    )
+    workspace = orch._leader_workspace()
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "notes.md").write_text("body\n")
+    staged_seen = {}
+
+    def _loop_loads_then_dies(**kwargs):
+        orch._leader_converse_registry()["load_document"].call(path="notes.md")
+        staged_seen["path"] = orch._tls.loaded_items[0].staged_path
+        raise RuntimeError("model fell over")
+
+    monkeypatch.setattr(orch, "_run_chat_loop", _loop_loads_then_dies)
+    reply = orch.converse("read my notes")
+
+    assert "failed" in reply  # the in-lane belt answered, not a raise
+    assert getattr(orch._tls, "loaded_items", None) is None
+    assert not staged_seen["path"].exists()
+
+
+def test_load_document_refuses_an_outside_path_and_names_the_remedy(
+        project: Project, monkeypatch):
+    """An ungranted absolute path is refused by the same fence read_file uses,
+    and the refusal says how to proceed — asking for the folder IS the flow."""
+    orch = Orchestrator(
+        project, _runners(),
+        chat_runners={"leader": lambda **k: ChatResponse(content="x", tool_calls=())},
+        chat_runner_models={"leader": "mock-model"},
+    )
+    replies = {}
+
+    def _loop(**kwargs):
+        tool = orch._leader_converse_registry()["load_document"]
+        replies["outside"] = tool.call(path="/etc/passwd")
+        replies["count"] = len(orch._tls.loaded_items)
+        return "done"
+
+    monkeypatch.setattr(orch, "_run_chat_loop", _loop)
+    orch.converse("load /etc/passwd")
+
+    assert "Can't load" in replies["outside"]
+    assert "grant" in replies["outside"]
+    assert replies["count"] == 0
+
+
+def test_load_document_is_gated_as_a_read(project: Project):
+    """The gate sees a load exactly as it sees a read: same class, same
+    action, so an outside folder prompts with the read wording and a grant
+    covers both tools alike."""
+    from modulatio import leader_gate as lg
+
+    reqs = lg.extract_tool_requests(
+        "load_document", {"path": "/outside/shot.png"},
+        root=vault.project_dir(PROJECT_CODE))
+    assert len(reqs) == 1
+    assert reqs[0].action == "read"
+    assert reqs[0].request_class == "path"
+    assert reqs[0].resource == "/outside/shot.png"

@@ -51,29 +51,6 @@ def _actor(request: Request, code: str):
     return get_actor(code, stub=bool(request.app.state.stub))
 
 
-#: Leading bytes that decide an upload's modality. The composer cannot say
-#: which it sent -- a browser's declared type is the client's claim about
-#: bytes the engine is holding, and reading the bytes answers the same
-#: question without trusting it.
-_IMAGE_SIGNATURES: "tuple[bytes, ...]" = (
-    b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"BM",
-)
-
-
-def _looks_like_image(path) -> bool:
-    """True when the staged bytes carry an image signature. RIFF containers
-    (WEBP) name their format after the size field, so they are checked at the
-    offset they actually appear at."""
-    try:
-        with open(path, "rb") as fh:
-            head = fh.read(16)
-    except OSError:
-        return False
-    if any(head.startswith(sig) for sig in _IMAGE_SIGNATURES):
-        return True
-    return head.startswith(b"RIFF") and head[8:12] == b"WEBP"
-
-
 class ConverseBody(BaseModel):
     text: str = ""
     #: Handles from ``converse/upload``, claimed once as this turn is sent.
@@ -154,7 +131,7 @@ async def converse_upload(project: str, request: Request) -> dict:
 @router.post("/{project}/converse")
 def converse(project: str, body: ConverseBody, request: Request) -> dict:
     from modulatio import uploads
-    from modulatio.attachments import build_attachment
+    from modulatio.attachments import build_attachment, looks_like_image
 
     code = valid_project(project)
     attachments = []
@@ -167,7 +144,7 @@ def converse(project: str, body: ConverseBody, request: Request) -> dict:
             # meets one policy rather than a second one written for it: the
             # byte cap, the digest, the regular-inode check, and the decode
             # that refuses a binary posing as a document.
-            kind = "image" if _looks_like_image(staged) else "document"
+            kind = "image" if looks_like_image(staged) else "document"
             item = build_attachment(staged, kind=kind)
             attachments.append(replace(item, name=shown))
     except uploads.UploadRefused as exc:

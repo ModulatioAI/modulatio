@@ -218,6 +218,28 @@ def _stage(
         os.close(fd)
 
 
+#: Leading bytes that identify an image. A name or a declared type is a claim
+#: about bytes that are already in hand, and reading them answers the same
+#: question without trusting it.
+_IMAGE_SIGNATURES: "tuple[bytes, ...]" = (
+    b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"BM",
+)
+
+
+def looks_like_image(path: Path) -> bool:
+    """True when the file's leading bytes carry an image signature. RIFF
+    containers (WEBP) name their format after the size field, so they are
+    checked at the offset it actually appears at."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(16)
+    except OSError:
+        return False
+    if any(head.startswith(sig) for sig in _IMAGE_SIGNATURES):
+        return True
+    return head.startswith(b"RIFF") and head[8:12] == b"WEBP"
+
+
 def _safe_stem(name: str) -> str:
     """A display name reduced to something safe to sit in a filename."""
     keep = "".join(c if c.isalnum() or c in "-._" else "-" for c in name)
@@ -230,4 +252,5 @@ __all__ = [
     "build_attachment",
     "DEFAULT_MAX_DOCUMENT_BYTES",
     "DEFAULT_MAX_IMAGE_BYTES",
+    "looks_like_image",
 ]

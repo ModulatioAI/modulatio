@@ -336,6 +336,11 @@ _GOAL_TERMINAL = (
 #: is present; the daily budget is the only wall).
 _CONVERSE_TASK_ID = CONVERSE_TASK_ID
 
+#: Files loadable into one conversation turn. Each becomes a content block on
+#: the turn's single redispatch, so the bound is on that one call's payload —
+#: per-file size is capped separately at the load itself.
+_LOADED_ITEMS_PER_TURN = 6
+
 #: QC's metered ceiling relative to the service's per-task cap. QC shares
 #: the producer's task-scoped spend counter, so on a cap-1 service the
 #: producer's own call starves QC (and QC-as-fixer, the shipping default)
@@ -811,7 +816,7 @@ _CODE_KIND_TOKENS = frozenset({
 LEADER_CONVERSE_TOOL_NAMES = (
     "list_job_templates", "create_job_template", "create_skill",
     "improve_skill", "decide_approval", "team_status", "read_deliverable",
-    "list_logs", "read_log",
+    "load_document", "list_logs", "read_log",
 )
 
 
@@ -7192,6 +7197,54 @@ class Orchestrator:
                 text = text[:cap] + f"\n\n... [truncated at {cap:,} chars]"
             return f"--- {path} ---\n{text}"
 
+        def load_document(path: str, **_: object) -> str:
+            """Stage a file for ONE same-turn multimodal look. The queue lives
+            on the turn (thread-local): the loop that finishes this reply
+            consumes it exactly once, and nothing loaded survives past the
+            turn. Confined by the same fence as ``read_file`` — workspace,
+            operator-granted roots, registered folders, harness roots — with
+            the secret floor below each; the gate prompts for an outside
+            folder like any other read."""
+            from modulatio import leader_gate as _lg
+            from modulatio.attachments import build_attachment, looks_like_image
+            queue = getattr(self._tls, "loaded_items", None)
+            if queue is None:
+                return ("Loading rides a conversation turn, and this call is "
+                        "not inside one — nothing to attach it to.")
+            if len(queue) >= _LOADED_ITEMS_PER_TURN:
+                return (f"{_LOADED_ITEMS_PER_TURN} files are already loaded "
+                        "for this turn — finish the reply and examine them; "
+                        "load the rest next turn.")
+            workspace = self._leader_workspace()
+            gate = self.leader_gate()
+            folder_rw, folder_read = self._folder_roots()
+            vault_root, shared_root, config_dir = self._harness_roots()
+            try:
+                target = tools._resolve_file_under_root(
+                    str(path), workspace,
+                    (*_lg.LiveGrantRoots(gate, "path", static=(
+                        *folder_rw, vault_root, shared_root, config_dir)),
+                     *folder_read))
+            except ValueError as exc:
+                return (f"Can't load {path!r}: {exc}. An outside folder needs "
+                        "the operator's grant — asking for it IS how you load "
+                        "from one.")
+            try:
+                item = build_attachment(
+                    target,
+                    kind="image" if looks_like_image(target) else "document")
+            except UnicodeDecodeError:
+                return (f"Can't load {path!r}: a binary document (PDF/DOCX/…) "
+                        "— extraction for those isn't wired into loading yet; "
+                        "read_file can pull a PDF's text layer.")
+            except (ValueError, OSError, FileNotFoundError) as exc:
+                return f"Can't load {path!r}: {exc}"
+            queue.append(item)
+            return (f"Loaded {item.name} ({item.size} bytes, {item.kind}). "
+                    "It rides THIS turn only: finish your reply and the turn "
+                    "re-runs once with everything loaded attached for you to "
+                    "examine.")
+
         def list_logs(**_: object) -> str:
             from modulatio import logstore
 
@@ -7430,6 +7483,24 @@ class Orchestrator:
                     "scoped to THIS run's outputs."
                 ),
                 call=read_deliverable,
+                params_schema={
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            ),
+            "load_document": tools.Tool(
+                name="load_document",
+                description=(
+                    "Load a file (a screenshot, an image, a text document) "
+                    "into THIS conversation turn so you can examine it. When "
+                    "you finish your reply, the turn re-runs ONCE with "
+                    "everything you loaded attached — images arrive as real "
+                    "content you can see. Use it when the operator names a "
+                    "file they want you to look at. Loading from a folder "
+                    "outside your reach prompts the operator for the grant."
+                ),
+                call=load_document,
                 params_schema={
                     "type": "object",
                     "properties": {"path": {"type": "string"}},
@@ -7769,6 +7840,11 @@ class Orchestrator:
                         str(_config.get_shared_resources_path()),
                         str(_config.CONFIG_DIR),
                     )
+                    # Per-turn load queue: ``load_document`` appends here, and
+                    # THIS turn consumes it exactly once below. Thread-local
+                    # like the registry override — the loop dispatches tools on
+                    # this thread.
+                    self._tls.loaded_items = []
                     try:
                         reply = self._run_chat_loop(
                             prompt=prompt,
@@ -7783,7 +7859,53 @@ class Orchestrator:
                             permission_callback=permission_callback,
                             permission_broker=permission_broker,
                         )
+                        loaded = list(self._tls.loaded_items)
+                        from modulatio import runners as _r
+                        if loaded and reply is not _r.INTERRUPTED_REPLY:
+                            # ONE redispatch for the turn, with everything
+                            # loaded attached. The text loop cannot carry
+                            # image content blocks, so the look happens as a
+                            # single multimodal completion — the same call an
+                            # operator-attached image turn uses. The loop's
+                            # own reply rides along as interim thinking, so
+                            # the model continues rather than starts over.
+                            mm_model = (self.project.agent_models.get("leader")
+                                        or self.project.leader_model)
+                            if not mm_model:
+                                names = ", ".join(a.name for a in loaded)
+                                reply = (
+                                    f"{reply or ''}\n\n({len(loaded)} loaded "
+                                    f"file(s) could not be examined: {names} — "
+                                    "no leader model is wired for multimodal "
+                                    "dispatch. Set the leader seat's model, "
+                                    "then load again.)"
+                                ).strip()
+                            else:
+                                redis = self._build_converse_prompt(
+                                    thread, message,
+                                    list(attachments) + loaded)
+                                if (reply or "").strip():
+                                    redis += (
+                                        "\n\nYou (Leader) replied, before the "
+                                        "loaded file(s) were attached: "
+                                        f"{reply}\n\nThey are attached now — "
+                                        "examine them and give the operator "
+                                        "your full reply."
+                                    )
+                                reply = self._run_multimodal_leader(
+                                    prompt=redis,
+                                    attachments=list(attachments) + loaded,
+                                    chat_completion=None,
+                                    budget_role="leader-chat",
+                                )
                     finally:
+                        # Nothing loaded survives the turn — queue and staged
+                        # bytes clear on EVERY exit (reply, refusal, model
+                        # error, interrupt), so the next turn starts empty.
+                        for _item in getattr(self._tls, "loaded_items", None) or ():
+                            if _item.staged_path is not None:
+                                Path(_item.staged_path).unlink(missing_ok=True)
+                        self._tls.loaded_items = None
                         self._tls.tool_registry_override = None
                         self._tls.seat_extra_grants = None
             except Exception as exc:

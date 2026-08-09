@@ -363,8 +363,13 @@ class LeaderPermissionGate:
 
 #: Only these tools are gated; others (search/skills/status/web) carry no
 #: out-of-workspace resource.
-_GATED_TOOLS = {"read_file", "edit_file", "write_artifact", "run_shell"}
-_PATH_ACTION_BY_TOOL = {"read_file": "read", "edit_file": "edit", "write_artifact": "write"}
+_GATED_TOOLS = {"read_file", "edit_file", "write_artifact", "run_shell", "load_document"}
+#: ``load_document`` is a READ: it snapshots bytes for one same-turn look. The
+#: grant it prompts for is the same folder-read a ``read_file`` would ask.
+_PATH_ACTION_BY_TOOL = {
+    "read_file": "read", "edit_file": "edit", "write_artifact": "write",
+    "load_document": "read",
+}
 
 
 def extract_tool_requests(tool_name: str, args: dict, *, root) -> list[SecurityRequest]:

@@ -312,6 +312,7 @@ TOOL_CONTRACT = {
     "decide_approval": "leader-only: resolves a pending approval ticket",
     "team_status": "leader-only: reads run/team state",
     "read_deliverable": "leader-only: reads a produced deliverable",
+    "load_document": "leader-only: path-gated read, stages one same-turn look",
     "list_logs": "leader-only: lists diagnostic logs",
     "read_log": "leader-only: reads a diagnostic log",
 }
