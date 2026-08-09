@@ -207,9 +207,12 @@ def vault_state_targets() -> list[Target]:
 
     out: list[Target] = []
     root = config.get_vault_root()
+    # Secrets live in the settings home, which a settings wipe removes whole.
+    # A vault-side file is the older location, left when a move could not
+    # finish; it is still removed so no copy outlives the wipe.
     env = root / ".env"
     if env.exists():
-        out.append(Target("Vault secrets (provider keys)", env, "projects",
+        out.append(Target("Vault secrets (older location)", env, "projects",
                           optional=True, user_data=True))
     for code in vault.list_projects():
         out.append(Target(f"Project state ({code})", vault.project_dir(code),

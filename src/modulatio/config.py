@@ -190,6 +190,66 @@ def write_secret_file(path: Path, content: str) -> None:
         raise
 
 
+def secrets_path() -> Path:
+    """THE file secrets and API keys live in.
+
+    One home, shared by every surface that sets or reads a key, and it is the
+    settings directory rather than the vault. Keys kept beside a user's work
+    inherit that folder's fate: a vault someone points at a notes directory
+    cannot be deleted on a wipe, and anything colocated with it survives by
+    accident of location. Settings are removable without touching work, so a
+    wipe can take the secrets and leave the documents.
+    """
+    return CONFIG_DIR / ".env"
+
+
+def migrate_vault_secrets() -> int:
+    """Move secrets out of an older vault-side ``.env`` into the settings home.
+
+    Returns the number of assignments moved. Values already present in the
+    settings home win — a key set since the move is newer than one left behind.
+    The source file is removed only once every assignment it held is readable
+    from the new home, so an interrupted move loses nothing and simply repeats.
+    """
+    try:
+        legacy = get_vault_root() / ".env"
+        if not legacy.is_file():
+            return 0
+        current = _parse_env_assignments(secrets_path())
+        legacy_pairs = _parse_env_assignments(legacy)
+        moved = 0
+        for name, value in legacy_pairs.items():
+            if name in current:
+                continue
+            set_env_secret(name, value)
+            moved += 1
+        if all(k in _parse_env_assignments(secrets_path()) for k in legacy_pairs):
+            legacy.unlink()
+        return moved
+    except OSError:
+        # A move that cannot complete leaves the source in place; the loader
+        # still reads it, so the keys keep working and the next start retries.
+        logger.warning("vault secret migration incomplete", exc_info=True)
+        return 0
+
+
+def _parse_env_assignments(path: Path) -> "dict[str, str]":
+    """``NAME=value`` pairs from an env file, ignoring comments and blanks.
+    Missing or unreadable file reads as empty."""
+    out: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        out[key.strip()] = value
+    return out
+
+
 def set_env_secret(name: str, value: str) -> Path:
     """Set/update a single secret (e.g. an API key) in the vault ``.env``,
     0600, and load it into ``os.environ`` so it's usable immediately.
@@ -210,7 +270,7 @@ def set_env_secret(name: str, value: str) -> Path:
         raise ValueError("env secret name/value must not contain newlines")
     if "=" in name or not name.strip():
         raise ValueError("env secret name must be non-empty and contain no '='")
-    env_path = get_vault_root() / ".env"
+    env_path = secrets_path()
     out_lines: list[str] = []
     replaced = False
     if env_path.exists():
@@ -236,7 +296,7 @@ def remove_env_secret(name: str) -> bool:
     """Remove a secret from the vault ``.env`` and ``os.environ``. Returns True
     if it was present. Backs the Configuration tab's "remove key"."""
     removed = False
-    env_path = get_vault_root() / ".env"
+    env_path = secrets_path()
     if env_path.exists():
         kept: list[str] = []
         for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -319,12 +379,22 @@ def load_modulatio_env() -> None:
     if project_env.exists():
         load_dotenv(project_env, override=False)
     try:
+        migrate_vault_secrets()
+    except Exception:
+        # A failed move must not stop the keys from loading below.
+        logger.warning("vault secret migration skipped", exc_info=True)
+    try:
+        secrets = secrets_path()
+        if secrets.exists():
+            load_dotenv(secrets, override=False)
+        # An older vault-side file is still read, AFTER the settings home so
+        # the newer value wins, for the case where the move could not finish.
         vault_env = get_vault_root() / ".env"
         if vault_env.exists():
             load_dotenv(vault_env, override=False)
     except Exception:
         # Never block startup on env-load failure — but leave a trace.
-        logger.warning("vault .env load failed; continuing without it",
+        logger.warning(".env load failed; continuing without it",
                        exc_info=True)
     _DOTENV_LOADED = True
     # SETTINGS-tab overrides layer AFTER the dotenv layers, same

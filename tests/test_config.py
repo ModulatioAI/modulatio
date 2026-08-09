@@ -345,7 +345,8 @@ def test_write_secret_file_concurrent_same_path_no_corruption(tmp_path):
 # preservation; newline/= injection) =====================================
 
 def _point_vault_at(tmp_path):
-    """Persist a vault_root so .env writes land in the test's tmp dir."""
+    """Persist a vault_root so vault-scoped writes land in the test's tmp dir.
+    Secrets themselves live in the settings home, which the suite isolates."""
     vault = tmp_path / "vault"
     vault.mkdir(parents=True, exist_ok=True)
     config.save_defaults({"vault_root": str(vault)})
@@ -353,17 +354,18 @@ def _point_vault_at(tmp_path):
 
 
 def test_set_env_secret_appends_when_absent(tmp_path):
-    vault = _point_vault_at(tmp_path)
+    _point_vault_at(tmp_path)
     p = config.set_env_secret("OPENAI_API_KEY", "sk-abc")
-    assert p == vault / ".env"
+    assert p == config.secrets_path()
     assert "OPENAI_API_KEY=sk-abc" in p.read_text().splitlines()
     assert config.os.environ["OPENAI_API_KEY"] == "sk-abc"
 
 
 def test_set_env_secret_preserves_comments_and_blank_lines(tmp_path):
     """0.9.0 LOW: rewrite must keep comment/blank lines, not just kv pairs."""
-    vault = _point_vault_at(tmp_path)
-    env = vault / ".env"
+    _point_vault_at(tmp_path)
+    env = config.secrets_path()
+    env.parent.mkdir(parents=True, exist_ok=True)
     env.write_text(
         "# Modulatio secrets\n"
         "\n"
@@ -382,8 +384,9 @@ def test_set_env_secret_preserves_comments_and_blank_lines(tmp_path):
 
 
 def test_set_env_secret_updates_in_place_preserving_position(tmp_path):
-    vault = _point_vault_at(tmp_path)
-    env = vault / ".env"
+    _point_vault_at(tmp_path)
+    env = config.secrets_path()
+    env.parent.mkdir(parents=True, exist_ok=True)
     env.write_text(
         "# header\n"
         "A_KEY=one\n"
@@ -397,8 +400,9 @@ def test_set_env_secret_updates_in_place_preserving_position(tmp_path):
 def test_set_env_secret_rejects_newline_in_value(tmp_path):
     """0.9.0 LOW: a newline in the value would inject a second KEY=... line.
     Reject fail-closed and leave the file untouched."""
-    vault = _point_vault_at(tmp_path)
-    env = vault / ".env"
+    _point_vault_at(tmp_path)
+    env = config.secrets_path()
+    env.parent.mkdir(parents=True, exist_ok=True)
     env.write_text("EXISTING=safe\n")
     with pytest.raises(ValueError, match="newline"):
         config.set_env_secret("EVIL", "sk-good\nINJECTED=pwned")
@@ -423,9 +427,10 @@ def test_set_env_secret_rejects_equals_in_name(tmp_path):
 def test_set_env_secret_allows_equals_in_value(tmp_path):
     """An '=' in the value is legitimate (base64 padding, query strings).
     Readers split on the FIRST '=', so it round-trips intact."""
-    vault = _point_vault_at(tmp_path)
+    _point_vault_at(tmp_path)
     config.set_env_secret("TOKEN", "abc==def=")
-    env = (vault / ".env")
+    env = config.secrets_path()
+    env.parent.mkdir(parents=True, exist_ok=True)
     # Re-reading via set_env_secret's own parse must preserve the value.
     config.set_env_secret("OTHER", "x")
     body = env.read_text()
@@ -433,10 +438,10 @@ def test_set_env_secret_allows_equals_in_value(tmp_path):
 
 
 def test_set_env_secret_no_duplicate_keys_on_repeated_set(tmp_path):
-    vault = _point_vault_at(tmp_path)
+    _point_vault_at(tmp_path)
     config.set_env_secret("K", "v1")
     config.set_env_secret("K", "v2")
-    lines = (vault / ".env").read_text().splitlines()
+    lines = config.secrets_path().read_text().splitlines()
     assert lines.count("K=v2") == 1
     assert "K=v1" not in lines
 
@@ -625,3 +630,69 @@ def test_budget_caps_still_accepts_real_wall_clock_value():
     })
     caps = config.get_default_budget_caps()
     assert caps["max_wall_clock_min"] == 30.0
+
+
+def test_secrets_live_with_the_settings_not_the_work(tmp_path, monkeypatch):
+    """Keys kept beside a user's work inherit that folder's fate: a vault
+    pointed at a notes directory cannot be deleted on a wipe, so anything
+    colocated survives by accident of location. Settings are removable without
+    touching work, so one home makes a wipe able to take the secrets and leave
+    the documents."""
+    from modulatio import config
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    monkeypatch.setattr(config, "get_vault_root", lambda: tmp_path / "vault")
+    (tmp_path / "vault").mkdir()
+
+    written = config.set_env_secret("PROVIDER_API_KEY", "k-1")
+    assert written == config.secrets_path()
+    assert written.parent == config.CONFIG_DIR
+    assert not (tmp_path / "vault" / ".env").exists()
+    assert oct(written.stat().st_mode & 0o777) == "0o600"
+
+    assert config.remove_env_secret("PROVIDER_API_KEY") is True
+    assert "PROVIDER_API_KEY" not in config._parse_env_assignments(written)
+
+
+def test_keys_left_in_the_older_location_are_moved_not_orphaned(
+    tmp_path, monkeypatch,
+):
+    """An install that already holds keys beside its work keeps them: they are
+    carried to the settings home, and a value set there since is newer than one
+    left behind, so it is not overwritten."""
+    from modulatio import config
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    monkeypatch.setattr(config, "get_vault_root", lambda: tmp_path / "vault")
+    (tmp_path / "vault").mkdir()
+    legacy = tmp_path / "vault" / ".env"
+    legacy.write_text("# comment\nA_KEY=from-the-vault\nB_KEY=also-there\n")
+    config.set_env_secret("A_KEY", "set-more-recently")
+
+    assert config.migrate_vault_secrets() == 1
+    now = config._parse_env_assignments(config.secrets_path())
+    assert now["A_KEY"] == "set-more-recently"
+    assert now["B_KEY"] == "also-there"
+    # The source goes only once everything it held reads from the new home.
+    assert not legacy.exists()
+    # Nothing further to move, and no error on a clean install.
+    assert config.migrate_vault_secrets() == 0
+
+
+def test_an_unfinished_move_keeps_the_source(tmp_path, monkeypatch):
+    """A move that cannot complete leaves the older file in place, so the keys
+    keep working and the next start simply repeats the attempt."""
+    from modulatio import config
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    monkeypatch.setattr(config, "get_vault_root", lambda: tmp_path / "vault")
+    (tmp_path / "vault").mkdir()
+    legacy = tmp_path / "vault" / ".env"
+    legacy.write_text("A_KEY=v\n")
+
+    def _fail(name, value):
+        raise OSError("settings home unwritable")
+
+    monkeypatch.setattr(config, "set_env_secret", _fail)
+    assert config.migrate_vault_secrets() == 0
+    assert legacy.exists(), "the only copy must not be destroyed"
