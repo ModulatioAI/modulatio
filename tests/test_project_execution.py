@@ -2643,9 +2643,9 @@ def test_tick_runners_for_failure_reports_real_total(project, isolated):
 # ═══ fold: test_project_execution_resweep.py ═══
 # Re-sweep (0.9.0 pre-ship) regression tests for project_execution.
 #
-# Covers one confirmed-then-re-investigated finding:
+# Covers one re-investigated race:
 #
-#   * MEDIUM/race (Finding 1) — flagged that the leader-reflect
+#   * The leader-reflect
 #     ``compression.emit_compaction`` / ``emit_compaction_skipped`` calls
 #     fire WITHOUT the shared-run-file ``write_lock`` that every other
 #     ``<run>/audit.jsonl`` writer threads through. On inspection this is a

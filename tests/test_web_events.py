@@ -52,7 +52,7 @@ def test_event_to_json_scrubs_embedded_secrets_in_detail():
 
 
 def test_event_to_json_scrubs_secret_shaped_dict_keys():
-    """WB-2: a secret can ride in KEY position too — the scrub must reach
+    """A secret can ride in KEY position too — the scrub must reach
     keys, not just values."""
     from modulatio.web.serialize import event_to_json
 

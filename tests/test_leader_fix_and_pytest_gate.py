@@ -134,7 +134,7 @@ def test_pytest_gate_states_non_code_unavailable_and_no_suite(
     assert unavailable is not None and unavailable[0] is _TE.UNAVAILABLE
     assert "sandbox" in unavailable[1]
     # Enforceable sandbox but no suite anywhere → RED, not a silent skip
-    # (Mycroft MED-1): a code goal with no suite has no green evidence.
+    # A code goal with no suite has no green evidence.
     _simulated_capability(monkeypatch)
     no_suite = orch._goal_pytest_gate([_code_task()])
     assert no_suite is not None and no_suite[0] is _TE.HARD_FAILURE
@@ -565,7 +565,7 @@ def test_green_over_tampered_suite_clamps_to_disappointed(project, monkeypatch):
 # --------------------------------------------- cadre R1 adversarial closures
 
 def test_gate_unavailable_never_runs_collection_code(project_with_run, monkeypatch):
-    """WB H1: a non-enforceable sandbox makes the gate UNAVAILABLE and the
+    """A non-enforceable sandbox makes the gate UNAVAILABLE and the
     model-authored conftest never executes — no env/file escape."""
     orch = _orch(project_with_run)
     root = orch._shared_artifacts_root()
@@ -589,7 +589,7 @@ def test_gate_unavailable_never_runs_collection_code(project_with_run, monkeypat
 
 def test_verify_registry_run_shell_cannot_write_run_state(
         project_with_run, monkeypatch):
-    """WB H2: the leader registry's run_shell is artifacts-bound — a
+    """The leader registry's run_shell is artifacts-bound — a
     full-profile write aimed at engine-owned run state is refused."""
     _simulated_capability(monkeypatch)  # else run_shell is omitted (H1)
     orch = _orch(project_with_run)
@@ -618,7 +618,7 @@ def _chat_orch(project_with_run, tool):
 
 
 def test_transcript_stays_0600_after_model_unlinks_it(project_with_run):
-    """WB H3: the audit append recreates the transcript owner-only even if a
+    """The audit append recreates the transcript owner-only even if a
     tool unlinked it mid-loop (no 0644 window under a 022 umask)."""
     transcript = Path(project_with_run.wiki_path).parent / "t.jsonl"
 
@@ -640,7 +640,7 @@ def test_transcript_stays_0600_after_model_unlinks_it(project_with_run):
 
 
 def test_transcript_rejects_outside_symlink_swap(project_with_run, tmp_path):
-    """WB H3: a model that symlink-swaps the transcript to an outside file
+    """A model that symlink-swaps the transcript to an outside file
     cannot redirect the trusted parent's append (O_NOFOLLOW)."""
     transcript = Path(project_with_run.wiki_path).parent / "t2.jsonl"
     outside = tmp_path / "engine-owned.txt"
@@ -703,7 +703,7 @@ def test_repo_roots_derive_from_declared_output_paths(project_with_run):
 
 def test_leader_registry_omits_run_shell_when_sandbox_unenforceable(
         project_with_run, monkeypatch):
-    """WB R2 HIGH-1: the automatic leader verify/fix run_shell must share the
+    """The automatic leader verify/fix run_shell must share the
     gate's strict posture — when the sandbox is not enforceable it is OMITTED
     (the Leader keeps its file tools), never soft-fell to an unsandboxed
     child."""
@@ -720,7 +720,7 @@ def test_leader_registry_omits_run_shell_when_sandbox_unenforceable(
 
 def test_fix_registry_edit_file_cannot_reach_registered_folder(
         project_with_run, monkeypatch):
-    """WB R2 MED-3: the fix lane's edit_file/write_artifact are rebuilt
+    """The fix lane's edit_file/write_artifact are rebuilt
     against shared artifacts — a registered rw FOLDER (edit_file extra root
     in the base registry) is NOT writable from the fix lane."""
     from modulatio import tools
@@ -745,7 +745,7 @@ def test_fix_registry_edit_file_cannot_reach_registered_folder(
 @pytest.mark.skipif(not sandbox.is_sandbox_available(),
                     reason="bwrap required: the gate never runs unsandboxed")
 def test_gate_neutralizes_hostile_addopts(project_with_run, monkeypatch):
-    """WB R2 MED-1: a producer addopts=--ignore can't hide a red test — the
+    """A producer addopts=--ignore can't hide a red test — the
     engine passes explicit globbed files with addopts neutralized."""
     _enforceable_sandbox(monkeypatch)
     orch = _orch(project_with_run)
@@ -765,7 +765,7 @@ def test_gate_neutralizes_hostile_addopts(project_with_run, monkeypatch):
 
 
 def test_added_config_file_is_tamper(project_with_run):
-    """WB R2 MED-2: a Leader fix that ADDS a collection-control file
+    """A Leader fix that ADDS a collection-control file
     (pytest.ini / conftest.py deselecting the red tests) is tamper — the
     greenwash snapshot flags additive config, not just modified snapshot
     entries."""
@@ -790,7 +790,7 @@ def test_added_config_file_is_tamper(project_with_run):
 
 
 def test_added_test_module_is_not_tamper(project_with_run):
-    """WB R2 MED-2 boundary: ADDING a test module is legitimate (the Leader
+    """ADDING a test module is legitimate (the Leader
     may write new tests) — only config files and changed/removed snapshotted
     tests are tamper."""
     orch = _orch(project_with_run)
@@ -812,7 +812,7 @@ def test_added_test_module_is_not_tamper(project_with_run):
 
 
 def test_transcript_preplanted_symlink_not_chmodded(project_with_run, tmp_path):
-    """WB R2 HIGH-2: a symlink planted at the transcript path BEFORE the chat
+    """A symlink planted at the transcript path BEFORE the chat
     loop must not make the trusted parent chmod the outside target — no
     pathname touch/chmod runs before the no-follow append."""
     transcript = Path(project_with_run.wiki_path).parent / "pre.jsonl"
@@ -842,7 +842,7 @@ def test_transcript_preplanted_symlink_not_chmodded(project_with_run, tmp_path):
 @pytest.mark.skipif(not sandbox.is_sandbox_available(),
                     reason="bwrap required: the gate never runs unsandboxed")
 def test_conftest_hook_cannot_greenwash_gate(project_with_run, monkeypatch):
-    """WB R3 MED-1 (Choice A): a producer conftest.py that deselects the
+    """A producer conftest.py that deselects the
     failing test can't green the gate — the hook-free binding pass strips the
     hook, so the hidden test RUNS and fails → RED."""
     _enforceable_sandbox(monkeypatch)
@@ -867,7 +867,7 @@ def test_conftest_hook_cannot_greenwash_gate(project_with_run, monkeypatch):
 
 def test_seat_tool_sink_preplanted_symlink_not_chmodded(
         project_with_run, tmp_path):
-    """WB R3 MED-2: the seat sink no longer touch/chmods a pre-planted
+    """The seat sink no longer touch/chmods a pre-planted
     symlink at the transcript path before the no-follow append."""
     orch = _orch(project_with_run)
     tc_dir = orch._scope_root() / "tool_calls"

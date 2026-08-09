@@ -259,7 +259,7 @@ def test_artifact_preview_traversal_and_dotfile_refused(client):
 
 
 def test_artifact_preview_refuses_in_root_non_artifact_files(client):
-    """WB-1: the preview boundary is the artifact roots, NOT the project
+    """The preview boundary is the artifact roots, NOT the project
     root — an allowlisted-extension file that sits at the project root
     (permissions.json, and the escape-hatch `artifacts/../permissions.json`)
     must not be readable through the preview endpoint."""

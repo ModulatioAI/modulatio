@@ -2679,7 +2679,7 @@ class Orchestrator:
         #: floor producer re-dispatch). The deadlock guard (a producer↔QC
         #: stalemate) applies only to floor rounds; after a leader fix the
         #: persisted qc_authored_fix flags are stale, so the Leader keeps its
-        #: fix budget (Jenny R1 LOW). Tracks the ACTUAL lane, not the knob —
+        #: fix budget. Tracks the ACTUAL lane, not the knob —
         #: a no-chat-runner run falls back to floor with the knob still
         #: "leader".
         self._goal_redo_was_leader: dict[str, bool] = {}
@@ -14854,7 +14854,7 @@ class Orchestrator:
             # the LAST redo was a Leader fix-in-place, the producers were not
             # re-dispatched, so the qc_authored_fix flags persist stale from
             # an earlier pass and would spuriously kill the Leader's next fix
-            # cycle regardless of progress (Jenny R1 LOW). Keyed on the lane
+            # cycle regardless of progress. Keyed on the lane
             # that actually ran — NOT the knob — so a no-chat-runner run that
             # fell back to floor still gets the guard. The leader lane's own
             # breaker is the stalled deliverable fingerprint below (disk-

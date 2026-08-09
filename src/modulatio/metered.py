@@ -37,12 +37,12 @@ from modulatio import comptroller, review_ledger
 class AuthorizerResult(tuple):
     """The metered authorizer's return value.
 
-    (Finding 1): the comptroller flags an
+    The comptroller flags an
     idempotent replay structurally (``Authorization.idempotent_reuse``) so the
     tool runner can short-circuit the provider re-invoke (reuse the prior
-    result) instead of paying again. ``build_metered_authorizer`` previously
-    collapsed that signal to ``(allowed, reason)`` and dropped it, leaving the
-    contract unfulfilled — the runner would re-pay on an identical metered call.
+    result) instead of paying again. Collapsing that signal to
+    ``(allowed, reason)`` drops it and leaves the contract unfulfilled — the
+    runner re-pays on an identical metered call.
 
     This is a length-2 ``(allowed, reason)`` tuple so EVERY existing 2-tuple
     unpacker (the runner's ``allowed, why = metered_authorizer(...)`` and the

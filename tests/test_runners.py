@@ -1494,7 +1494,7 @@ def test_summarizer_failed_truncation_budgets_with_main_model(monkeypatch, tmp_p
 #
 # When a tool result crosses ``threshold_tokens`` and gets truncated, the kept
 # HEAD lands in the MAIN model's context, so it must be sized against the MAIN
-# model's tokenizer. The summarizer-FAILED branch was fixed (Finding 2) to pass
+# model's tokenizer. The summarizer-FAILED branch passes
 # ``model=model``. The sibling no-summarizer branch still passed
 # ``model=count_model`` (= ``summarizer_model or model``). When ``summarizer_model``
 # is set but the runner factory is unwired (``have_summarizer`` False), that branch

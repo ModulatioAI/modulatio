@@ -34,7 +34,7 @@ def test_web_requirements_parses_web_extra_both_quote_styles(monkeypatch):
 
 
 def test_web_requirements_drops_option_shaped_specs(monkeypatch):
-    """WB-4: hostile/broken dist-info can't smuggle a pip OPTION (e.g. a
+    """Hostile/broken dist-info can't smuggle a pip OPTION (e.g. a
     rogue --index-url) into the install command — any spec that starts with
     '-' is dropped, so only real package requirements reach argv."""
     poisoned = [

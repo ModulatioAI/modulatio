@@ -451,11 +451,11 @@ def test_key_add_blank_refused(client):
     assert r.status_code == 422
 
 
-# ── WB-1 remediation: keys are scoped to configured model/service handles ─
+# ── Keys are scoped to configured model/service handles ─────────────────
 
 
 def test_key_add_refuses_arbitrary_env_var(client, monkeypatch):
-    """WB-1 HIGH: the key route must not write ANY env var into the vault —
+    """The key route must not write ANY env var into the vault —
     only configured model/service key handles. A sandbox-bypass switch like
     MODULATIO_RUN_SHELL_UNSAFE is not a key handle and must be refused."""
     monkeypatch.delenv("MODULATIO_RUN_SHELL_UNSAFE", raising=False)
@@ -668,7 +668,7 @@ def test_get_listing_takes_no_caller_endpoint_or_keyname(client, monkeypatch):
 
 
 def test_custom_probe_uses_key_value_never_process_env(client, monkeypatch):
-    """SECURITY (Wild Bill HIGH): the custom probe is a CSRF-protected POST
+    """The custom probe is a CSRF-protected POST
     whose bearer is the supplied key VALUE — it must never resolve a
     caller-named process-env secret. A secret in os.environ cannot leak: there
     is no env-var name input, and the outbound header carries only the value."""
@@ -757,7 +757,7 @@ def test_model_add_custom_stores_key_under_opaque_handle(client):
 
 
 def test_custom_add_cannot_self_authorize_process_control_env(client, monkeypatch):
-    """SECURITY (Wild Bill HIGH): a custom add must not write a caller-named
+    """A custom add must not write a caller-named
     process-control env var. Even if the body names BASH_ENV as the slot, the
     key is stored under an opaque handle — BASH_ENV is never set in the live
     process (it would be executed by future non-interactive bash)."""

@@ -47,7 +47,7 @@ def test_release_path_keeps_hashed_install_then_nodeps_then_pip_check():
 
 def _write_drift_probe_wheel(dest_dir: Path) -> Path:
     """A minimal, pure-python wheel that declares a dependency which cannot be
-    satisfied — the artifact Wild Bill used to prove ``--no-deps`` installs
+    satisfied — the artifact used to prove ``--no-deps`` installs
     green while ``pip check`` refuses."""
     name, version = "driftprobe", "0.0.0"
     distinfo = f"{name}-{version}.dist-info"

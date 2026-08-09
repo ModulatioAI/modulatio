@@ -191,7 +191,7 @@ async def test_beta_oauth_body_shows_caveat_not_misleading_ready(monkeypatch):
 
 
 # ═══ fold: test_tui_widgets_auth_step_resweep.py ═══
-# Re-sweep regression for AuthStep._render_body (Finding 1, LOW/race).
+# Regression for AuthStep._render_body: a mount race.
 #
 # _render_body awaits body.remove_children() (yielding the event loop) and then
 # mounts a body that includes id=auth-key. The old code issued the mounts

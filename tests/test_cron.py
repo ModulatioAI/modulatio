@@ -732,7 +732,7 @@ def test_dispatch_disables_job_with_unparseable_schedule(monkeypatch):
 
 # ═══ fold: test_cron_resweep.py ═══
 # Regression: cron.dispatch_due must not double-fire a due job across
-# concurrent OS processes (finding 1, MEDIUM/race, cron.py:419).
+# concurrent OS processes.
 #
 # `dispatch_due` ran check_due (load-decide-release) → add_task → update across
 # three separate in-process-lock windows, and `_cron_lock` is an in-process RLock
