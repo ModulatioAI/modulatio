@@ -13716,7 +13716,14 @@ class Orchestrator:
                         # was opened is refuted.
                         refuted = {tok for tok, paths in watched.items()
                                    if paths and not (paths & opened)}
-                        kernel_withdrew.extend(sorted(refuted))
+                        # MEASURED is not the same as WITHDREW. This run was
+                        # cross-checked; whether it removed anything depends on
+                        # what the record went on to claim, which is not read
+                        # yet. Recording a withdrawal here would announce the
+                        # removal of a credit that may never have been made —
+                        # silence can refute an assertion, never manufacture
+                        # one to then take away.
+                        kernel_checked.append(str(root))
                 except (RuntimeError, ValueError, OSError) as exc:
                     _logger.warning("pytest gate could not run: %s", exc)
                     if obs_path is not None:
@@ -13738,6 +13745,9 @@ class Orchestrator:
                     # reasons below.
                     finalised, finally_seen = _read_observation(
                         obs_path, {t for t, srcs in watched.items() if srcs})
+                    # NOW the two facts can meet: a withdrawal is a credit the
+                    # record asserted AND the kernel contradicted.
+                    kernel_withdrew.extend(sorted(finally_seen & refuted))
                 finally:
                     obs_path.unlink(missing_ok=True)
                 head = result.split("\n", 1)[0]
@@ -13804,6 +13814,11 @@ class Orchestrator:
             #: is per invocation and per token, so a single global "checked" or
             #: "unchecked" would misdescribe a goal whose roots differ.
             kernel_withdrew: "list[str]" = []
+            #: Roots the kernel actually cross-checked. Measurement is what
+            #: makes silence meaningful, and a run can be measured while
+            #: withdrawing nothing — so the two are counted apart and the
+            #: withdrawal set is never used as a proxy for having measured.
+            kernel_checked: "list[str]" = []
             for repo_root in roots:
                 # Engine-selected explicit test files + neutralized addopts
                 #: the suite cannot steer collection via
@@ -13950,16 +13965,20 @@ class Orchestrator:
                 "attestation that the run completed honestly. A FAILURE "
                 "remains binding; only success is advisory."
             )
-            if kernel_unchecked and kernel_withdrew:
+            if kernel_unchecked and kernel_checked:
                 # Measurement is per invocation and per token. Claiming either
                 # extreme misdescribes a goal whose roots differ: saying
-                # nothing was checked hides real withdrawals, and saying
+                # nothing was checked hides real measurement, and saying
                 # everything was checked speaks for tokens nothing observed.
+                withdrew = (
+                    " It withdrew credits it contradicted ("
+                    + ", ".join(sorted(set(kernel_withdrew))[:3]) + ")."
+                    if kernel_withdrew else
+                    " It found no credit to contradict there.")
                 reports.append(
-                    "[ADVISORY] The kernel cross-checked PART of this goal. It "
-                    "withdrew credits it contradicted ("
-                    + ", ".join(sorted(set(kernel_withdrew))[:3])
-                    + "), and could not check the rest, which stay "
+                    "[ADVISORY] The kernel cross-checked PART of this goal."
+                    + withdrew
+                    + " It could not check the rest, which stay "
                     "producer-authored: "
                     + "; ".join(sorted(set(kernel_unchecked))[:3]))
             elif kernel_unchecked:
@@ -13970,13 +13989,24 @@ class Orchestrator:
                     "import credits, so NO credit was withdrawn and every one "
                     "of them is producer-authored: "
                     + "; ".join(sorted(set(kernel_unchecked))[:3]))
-            else:
+            elif kernel_withdrew:
                 reports.append(
                     "[ADVISORY] One fact here is NOT producer-authored: a "
                     "component the kernel never saw its source file opened was "
                     "not loaded, whatever the run reported, and such a credit "
-                    "has been withdrawn. That refutes a false load; it cannot "
-                    "establish that a loaded file's contents ran.")
+                    "has been withdrawn ("
+                    + ", ".join(sorted(set(kernel_withdrew))[:3])
+                    + "). That refutes a false load; it cannot establish that "
+                    "a loaded file's contents ran.")
+            else:
+                # Measured, and the record claimed nothing the kernel could
+                # contradict. Saying a credit "has been withdrawn" here would
+                # invent the credit in order to remove it.
+                reports.append(
+                    "[ADVISORY] The kernel cross-checked this run's import "
+                    "credits and found none to contradict. It can refute a "
+                    "load the run reported but never saw; it cannot establish "
+                    "that a loaded file's contents ran.")
 
             if advisory:
                 reports.append(

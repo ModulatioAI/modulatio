@@ -3048,3 +3048,159 @@ def test_an_unresolvable_origin_is_disclosed_not_dropped(tmp_path):
 
     assert "cvc-bad" in watched, "an unresolvable origin vanished silently"
     assert watched["cvc-bad"] == set()
+
+
+def test_a_zero_source_token_is_refused_by_the_parser_itself(project, monkeypatch):
+    """Defense in depth at the boundary, not at the constructor.
+
+    A sealed contract normally resolves to at least one source, so the planner
+    cannot emit this state — but a validation boundary is pinned by driving it
+    with the bad input anyway. The resolver result is fault-injected so the
+    token has nothing to watch, the record forges that token, and the REAL
+    call site decides: it must refuse the credit and disclose the token as
+    unobservable."""
+    from modulatio import orchestration as _orch
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    _gate_suite(orch._shared_artifacts_root(), shape="none")
+    (goal,) = store_mod.list_goals(PROJECT_CODE)
+    (contract,) = goal.convention_contracts
+
+    real_paths = _orch._witness_paths
+    monkeypatch.setattr(
+        _orch, "_witness_paths",
+        lambda declared, root: {t: set() for t in real_paths(declared, root)})
+
+    class _ForgeUnwatchable(_DeterministicRunShell):
+        def call(self, *, cmd, profile, cwd, timeout):
+            import shlex
+            out = super().call(cmd=cmd, profile=profile, cwd=cwd, timeout=timeout)
+            argv = shlex.split(cmd)
+            if "--" in argv:
+                Path(argv[argv.index("--") - 1]).write_text(
+                    '{"schema": 1, "tokens": ["%s"]}' % contract.contract_id,
+                    encoding="utf-8")
+            return out
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _ForgeUnwatchable())
+
+    line = next((ln for ln in report.splitlines()
+                 if "did not report loading" in ln), "")
+    assert "webapp" in line.split("did not report loading", 1)[-1], (
+        f"an unobservable token's forged credit was accepted: {state}\n{report}")
+    assert "no source file to observe" in report, (
+        "the unobservable token was not disclosed")
+
+
+def test_a_measured_root_with_no_credit_claims_no_withdrawal(project, monkeypatch):
+    """Silence can refute a credit that was asserted. It cannot manufacture an
+    assertion in order to announce removing it.
+
+    A run whose sources were never opened and whose record credits NOTHING has
+    been cross-checked and has withdrawn nothing — the report must say so."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    _gate_suite(orch._shared_artifacts_root(), shape="none")
+
+    class _EmptyRecord(_DeterministicRunShell):
+        """Finalised, crediting nothing — the wrapper ran and saw no load."""
+
+        def call(self, *, cmd, profile, cwd, timeout):
+            import shlex
+            out = super().call(cmd=cmd, profile=profile, cwd=cwd, timeout=timeout)
+            argv = shlex.split(cmd)
+            if "--" in argv:
+                Path(argv[argv.index("--") - 1]).write_text(
+                    '{"schema": 1, "tokens": []}', encoding="utf-8")
+            return out
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _EmptyRecord())
+
+    assert "found none to contradict" in report, report
+    assert "has been withdrawn" not in report, (
+        f"a withdrawal was claimed for a credit that was never made:\n{report}")
+
+
+def _two_roots_one_unmeasurable(orch, monkeypatch):
+    """Two suite roots where BETA's cache cannot be fully stripped and ALPHA's
+    can. A directory inside a cache is not something the strip will force, so
+    that root's silence stays meaningless while the other is measured — a real
+    filesystem shape, not an injected result."""
+    root = orch._shared_artifacts_root()
+    for name in ("alpha", "beta"):
+        _gate_suite(root / name, shape="none")
+    unstrippable = root / "beta" / "beta" / "__pycache__" / "unexpected"
+    unstrippable.mkdir(parents=True)
+    return root
+
+
+def test_a_goal_measured_in_part_names_the_split_and_no_false_withdrawal(
+    project, monkeypatch,
+):
+    """One root measured, one not, and the measured root's record credits
+    nothing. The report must say the goal was checked in part, name the
+    unchecked state — and claim NO withdrawal, because nothing was asserted
+    for the kernel to contradict."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _TWO_ROOT_PLAN, [], monkeypatch)
+    orch.kickoff("build two packages")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    _two_roots_one_unmeasurable(orch, monkeypatch)
+
+    class _EmptyRecords(_DeterministicRunShell):
+        def call(self, *, cmd, profile, cwd, timeout):
+            import shlex
+            out = super().call(cmd=cmd, profile=profile, cwd=cwd, timeout=timeout)
+            argv = shlex.split(cmd)
+            if "--" in argv:
+                Path(argv[argv.index("--") - 1]).write_text(
+                    '{"schema": 1, "tokens": []}', encoding="utf-8")
+            return out
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _EmptyRecords())
+
+    assert "cross-checked PART of this goal" in report, report
+    assert "found no credit to contradict" in report, report
+    assert "It withdrew credits it contradicted" not in report, (
+        f"a withdrawal was named though no credit was asserted:\n{report}")
+
+
+def test_a_goal_measured_in_part_names_a_real_withdrawal(project, monkeypatch):
+    """The other half of the split: when the measured root's record DOES
+    assert a credit the kernel contradicts, that withdrawal is named."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _TWO_ROOT_PLAN, [], monkeypatch)
+    orch.kickoff("build two packages")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    _two_roots_one_unmeasurable(orch, monkeypatch)
+    goal, = store_mod.list_goals(PROJECT_CODE)
+    contracts = {c.import_name: c for c in goal.convention_contracts}
+    if "alpha" not in contracts:
+        pytest.skip("the plan did not seal an alpha component")
+    alpha_token = contracts["alpha"].contract_id
+
+    class _ForgeAlpha(_DeterministicRunShell):
+        def call(self, *, cmd, profile, cwd, timeout):
+            import shlex
+            out = super().call(cmd=cmd, profile=profile, cwd=cwd, timeout=timeout)
+            argv = shlex.split(cmd)
+            if "--" in argv:
+                Path(argv[argv.index("--") - 1]).write_text(
+                    '{"schema": 1, "tokens": ["%s"]}' % alpha_token,
+                    encoding="utf-8")
+            return out
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _ForgeAlpha())
+
+    assert "cross-checked PART of this goal" in report, report
+    assert "It withdrew credits it contradicted" in report, (
+        f"a real withdrawal went unnamed:\n{report}")
+    assert alpha_token in report, report
