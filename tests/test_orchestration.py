@@ -4420,6 +4420,32 @@ def test_qc_rejection_surfaces_check_and_notes_to_summary(project: Project, monk
     assert "remove the numbered step-by-step plan" in first
 
 
+def test_qc_rejection_names_the_reviewer_in_the_summary_line(project: Project, monkeypatch):
+    """The operator-facing reject line calls the seat what the durable rationale
+    calls it. Naming the actor only in the transition record leaves the line the
+    operator actually reads still saying the role word."""
+    monkeypatch.setenv("MODULATIO_QC_FIXER", "0")
+
+    def _qc_reject(prompt: str) -> str:
+        payload = {"check": "leakage axis failed", "passed": False}
+        return f"```json\n{json.dumps(payload)}\n```"
+
+    orch = Orchestrator(
+        project,
+        {
+            "leader": _leader_stub,
+            "planner": _planner_stub,
+            "drafter": _drafter_stub,
+            "qc": _qc_reject,
+        },
+    )
+    monkeypatch.setattr(orch, "_seat_label", lambda agent_id, role_word: "Henry")
+    summary = orch.kickoff("Draft 3 essays on a chosen theme")
+
+    assert "Henry rejected" in summary.errors[0]
+    assert "QC rejected" not in summary.errors[0]
+
+
 def test_qc_retries_once_on_transient_parse_failure(project: Project):
     """Regression: if QC's first response is empty/malformed, retry once
     before giving up. Observed on GLM 5.1 during STA6 — one task lost its

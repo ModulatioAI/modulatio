@@ -11172,7 +11172,7 @@ class Orchestrator:
             )
         )
         t.status = TaskStatus.QC_REJECTED
-        summary_line = f"{t.id}: QC rejected — {qc_verdict.check}"
+        summary_line = f"{t.id}: {_qc} rejected — {qc_verdict.check}"
         if qc_notes:
             summary_line += f" (notes: {qc_notes})"
         summary.errors.append(summary_line)
