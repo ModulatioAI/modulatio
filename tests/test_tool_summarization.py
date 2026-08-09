@@ -691,7 +691,7 @@ def test_runner_truncates_large_result_when_no_summarizer(tmp_path: Path) -> Non
 # ═══ fold: test_tool_summarization_resweep.py ═══
 # 0.9.0 pre-ship re-sweep regressions for tool_summarization.
 #
-# Finding 1 (MEDIUM/correctness): prune_messages_sliding_window() rewrote the
+# prune_messages_sliding_window() rewrote the
 # oldest tool-role messages to a placeholder promising recovery via
 # ``read_tool_result(call_id=...)``, but the tool loop only persists a raw
 # result to disk when it crosses ``threshold_tokens``. A sub-threshold tool
@@ -830,7 +830,7 @@ def test_prune_reads_tool_calls_dir_from_bound_config(tmp_path: Path) -> None:
 # ═══ fold: test_tool_summarization_resweep_r3.py ═══
 # 0.9.0 pre-ship re-sweep (round 3) regressions for tool_summarization.
 #
-# Finding 1 (LOW/correctness): in prune_messages_sliding_window() the loop
+# In prune_messages_sliding_window() the loop
 # ``continue``s on any message whose content starts with ``[summarized:``, so
 # by the time the ``already_persisted`` flag is computed that prefix can NEVER
 # be present. The ``or content.startswith("[summarized:")`` clause in that

@@ -1297,7 +1297,7 @@ def test_document_head_toc_excludes_unit_body_drops(tmp_path, monkeypatch):
 # ═══ fold: test_assembly_resweep.py ═══
 # 0.9.0 pre-ship re-sweep regressions for assembly.py.
 #
-# Finding 1 (LOW, #101/0.9.0): the deliverable digest for a single-file-output
+# The deliverable digest for a single-file-output
 # family (media composites) used to fall to ``_generic_digest``, which stats the
 # INPUT unit files from ``units_used``. For a media join the deliverable IS the
 # single composited binary (``output_file``), so the verifier's "eyes" were
@@ -1374,7 +1374,7 @@ def test_missing_output_file_falls_back_to_unit_digest(tmp_path: Path):
 # ═══ fold: test_assembly_resweep_r3.py ═══
 # 0.9.0 pre-ship round-3 re-sweep regressions for assembly.py.
 #
-# Finding 1 (LOW, assembly.py:491): the document head's TOC cap-math used to seed
+# The document head's TOC cap-math used to seed
 # ``_unit_headings``'s ``base_total`` with the TITLE line only — but the body that
 # ``_assemble_document`` later concatenates counts the FULL ``title_page`` (title +
 # the entire rendered ``## Contents`` block) as its framing, AND it prepends that

@@ -140,7 +140,7 @@ def test_listing_key_prefers_env_api_key(monkeypatch):
 # ═══ fold: test_tui_widgets_model_picker_resweep_r3.py ═══
 # Re-sweep R3 regression: ModelPicker must not crash on duplicate model ids.
 #
-# Finding 1 (MEDIUM/edge-case): ``ModelPicker._populate`` added one OptionList
+# ``ModelPicker._populate`` added one OptionList
 # ``Option`` per model in the listing. The listing aggregates a provider's
 # ``models_source`` + ``extra_sources`` (via ``pc.fetch_models``), which can
 # carry the same id twice. Textual's ``OptionList.add_option`` raises

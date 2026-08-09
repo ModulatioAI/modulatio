@@ -268,7 +268,7 @@ def _set_budget_ten_ten(project_vault: Path) -> None:
     )
 
 
-# ── Finding 1: per-task metered cap must not conflate cost classes ──────────
+# ── Per-task metered cap must not conflate cost classes ─────────────────────
 
 def test_per_task_cap_is_scoped_to_cost_class(project_vault):
     """A single task issuing a paid-cloud metered call and then a
@@ -333,7 +333,7 @@ def test_per_task_cap_still_bounds_same_cost_class(project_vault):
     assert "per-task" in second.reason
 
 
-# ── Finding 2: non-UTF8 config / ledger must degrade-open, not crash ────────
+# ── Non-UTF8 config / ledger must degrade-open, not crash ───────────────────
 
 def test_load_budget_non_utf8_config_degrades_open(project_vault):
     """A non-UTF8 comptroller.md must not raise UnicodeDecodeError out of
@@ -362,7 +362,7 @@ def test_metered_non_utf8_ledger_does_not_crash(project_vault):
     assert result.allowed is True
 
 
-# ── Finding 3: corrupt/truncated metered lines counted consistently ─────────
+# ── Corrupt/truncated metered lines counted consistently ────────────────────
 
 def test_truncated_metered_line_is_ignored(project_vault):
     """A torn append leaves a metered line with only part of its fields. It

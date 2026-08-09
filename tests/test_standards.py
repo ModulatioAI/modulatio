@@ -377,7 +377,7 @@ def test_pinned_root_overrides_config(tmp_path, monkeypatch):
 # ═══ fold: test_standards_resweep_r4.py ═══
 # 0.9.0 pre-ship re-sweep regressions for ``standards.py``.
 #
-# Finding 1 [LOW/security]: ``load_with_metadata(domain, ...)`` built its three
+# ``load_with_metadata(domain, ...)`` built its three
 # tier paths (``seed``/``shared``/``project``) straight from ``domain`` (the
 # task's free-form, planner-sourced ``artifact_kind``) with no slug validation,
 # unlike ``qc_notes`` which guards with ``_DOMAIN_RE``. A traversal value could
@@ -399,7 +399,7 @@ def isolate_roots(tmp_path, monkeypatch):
     return tmp_path
 
 
-# --- Finding 1: path-traversal domain is rejected fail-closed ---------------
+# --- Path-traversal domain is rejected fail-closed --------------------------
 
 def test_traversal_domain_cannot_read_file_outside_seed_root(isolate_roots):
     """A ``../`` domain that would resolve to a real ``.md`` OUTSIDE the seed

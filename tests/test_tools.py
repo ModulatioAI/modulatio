@@ -2274,7 +2274,7 @@ def test_run_shell_binary_child_output_does_not_crash(tmp_path):
 
 
 
-# ── Finding 1: go vet flag bypass ──────────────────────────────────────
+# ── Go vet flag bypass ─────────────────────────────────────────────────
 
 def test_go_vet_rejects_vettool_binary_exec(tmp_path):
     """``-vettool=<binary>`` makes go vet EXECUTE an arbitrary binary —
@@ -2307,7 +2307,7 @@ def test_go_vet_confines_flag_value_paths(tmp_path):
     assert tools._check_passive(["go", "vet", "-json", "./..."], root)
 
 
-# ── Finding 2: single-dash flags as "files" ────────────────────────────
+# ── Single-dash flags as "files" ───────────────────────────────────────
 
 def test_is_safe_file_arg_rejects_leading_dash(tmp_path):
     """A dash-leading token is a flag, never a file."""
@@ -2345,7 +2345,7 @@ def test_passive_heads_keep_legitimate_forms(tmp_path):
     assert tools._check_passive(["wc", "-l", "notes.txt"], root)
 
 
-# ── Finding 3: fd leak on the triple-timeout drain path ────────────────
+# ── Fd leak on the triple-timeout drain path ───────────────────────────
 
 def test_wedged_drain_closes_pipes(tmp_path, monkeypatch):
     """On the pathological path where the pipes never reach EOF (an escaped
@@ -2416,7 +2416,7 @@ def test_wedged_drain_closes_pipes(tmp_path, monkeypatch):
 
 
 
-# ── Finding 1: give-up drain branch reaps the SIGKILL'd child ──────────
+# ── Give-up drain branch reaps the SIGKILL'd child ─────────────────────
 
 def test_give_up_branch_reaps_child(tmp_path, monkeypatch):
     """When the killed child never becomes waitable (every bounded ``wait``
@@ -2564,7 +2564,7 @@ def test_prlimit_prefix_empty_when_binary_missing(monkeypatch):
     assert tools._prlimit_wrapper_prefix() == []
 
 
-# ── Finding 1: caps reach the payload on the SANDBOXED path ─────────────────
+# ── Caps reach the payload on the SANDBOXED path ────────────────────────────
 
 def test_sandboxed_payload_is_prlimit_wrapped_inside_bwrap(tmp_path, monkeypatch):
     """On the sandboxed (production) path the prlimit prefix must land INSIDE

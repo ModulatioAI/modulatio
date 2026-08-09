@@ -1,6 +1,6 @@
 """0.9.0 pre-ship re-sweep regressions for the metered-tool authorizer (round 4).
 
-Finding 1 [MEDIUM/integration]: ``Authorization.idempotent_reuse`` was added so
+``Authorization.idempotent_reuse`` was added so
 the tool runner could short-circuit the provider re-invoke on an identical
 metered call (reuse the prior result instead of re-paying). But
 ``metered.build_metered_authorizer``'s callback collapsed the result to
@@ -197,7 +197,7 @@ def test_runner_plain_2tuple_authorizer_still_works():
 # ═══ fold: test_metered_resweep.py ═══
 # 0.9.0 pre-ship re-sweep regressions for the metered-tool authorizer.
 #
-# Finding 1 [LOW/resource-leak]: ``metered._scan_for_network_params`` recursed
+# ``metered._scan_for_network_params`` recursed
 # through LLM-controlled tool-call args with no depth bound, so a pathologically
 # deep ``args`` object could raise ``RecursionError``. The scan is now depth-bounded
 # and treats over-depth as FORBIDDEN (deny) — consistent with the narrow-param /

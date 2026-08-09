@@ -509,7 +509,7 @@ def test_cache_root_honors_xdg_cache_home(monkeypatch, tmp_path: Path) -> None:
 # ═══ fold: test_semantic_router_resweep_r3.py ═══
 # Round-3 re-sweep regression tests for ``semantic_router``.
 #
-# Finding 1 (LOW/correctness): ``semantic_router`` pinned ``_EMBED_MODEL``
+# ``semantic_router`` pinned ``_EMBED_MODEL``
 # and ``_EMBED_DIM`` at module import while ``qc_history`` and
 # ``team_memory`` resolve ``config.get_embedding_model()`` LIVE per call to
 # honor a mid-process wizard model-swap. Since one shared ``FastEmbedder``

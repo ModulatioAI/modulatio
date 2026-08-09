@@ -628,7 +628,7 @@ def _isolate(tmp_path, monkeypatch):
     config.reload()
 
 
-# === Finding 1: heartbeat run-once --no-stub must fail loud at the CLI ===
+# === Heartbeat run-once --no-stub must fail loud at the CLI ==============
 
 def test_run_once_no_stub_rejected_with_clear_reason(tmp_path, monkeypatch):
     """`--no-stub` is unsupported (the real-model path is the daemon's).

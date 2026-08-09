@@ -523,7 +523,7 @@ def test_win_persist_failure_does_not_consume_cluster(proj, monkeypatch):
     assert len(recoveries.unconsumed_recoveries(proj)) == 3  # retained for retry
 
 
-# ── B1 completion: bound the codification DURATION (post-A/B finding 2026-06-28) ──
+# ── Bound the codification DURATION ─────────────────────────────────────────
 
 
 def test_post_run_codification_bounded_by_timeout(proj, monkeypatch):

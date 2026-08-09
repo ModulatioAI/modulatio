@@ -971,7 +971,7 @@ def test_extract_sub_objectives_normal_descriptions_unchanged():
 
 
 
-# ── Finding 1: inner-emphasis titles must not be dropped ────────────────
+# ── Inner-emphasis titles must not be dropped ───────────────────────────
 
 
 def test_extract_sub_objectives_keeps_inner_emphasis_title():
@@ -1079,7 +1079,7 @@ def test_extract_sub_objectives_returns_empty_on_detected_drop(caplog):
     assert "fail closed" in caplog.text or "dropped" in caplog.text
 
 
-# ── Finding 2: persist() id allocation is collision-safe ────────────────
+# ── persist() id allocation is collision-safe ───────────────────────────
 
 
 _PLAN_BODY = (
@@ -1135,7 +1135,7 @@ def test_persist_round_trips_after_atomic_write(isolated_vault):
     assert loaded.source_message == "msg"
 
 
-# ── Finding 3: malformed budget caps degrade to None ────────────────────
+# ── Malformed budget caps degrade to None ───────────────────────────────
 
 
 def _write_plan_with_frontmatter(isolated_vault, plan_id: str, fm_lines: str):
@@ -1238,13 +1238,13 @@ def test_load_preserves_valid_numeric_caps(isolated_vault):
 #
 # Each test FAILS against the pre-fix code and PASSES after the fix.
 #
-# Finding 1 (extract_sub_objectives, LOW/correctness):
+#
 #     A nested ``**bold**`` span in the DESCRIPTION (after the em-dash)
 #     made the greedy title capture bind its closing ``**`` to the last
 #     ``**`` on the line, corrupting both title and description WITHOUT
 #     tripping the item-count cross-check (still one parsed item).
 #
-# Finding 2 (set_status / update_execution_state, LOW/race):
+#
 #     Both do an unguarded read-YAML / modify / write-YAML on the same
 #     plan file. A concurrent cancel()'s ``status='declined'`` flip could
 #     be clobbered by the dispatcher loop's update_execution_state writing
@@ -1256,7 +1256,7 @@ def test_load_preserves_valid_numeric_caps(isolated_vault):
 
 
 
-# ── Finding 1: bold in the DESCRIPTION must not corrupt title/desc ──────
+# ── Bold in the DESCRIPTION must not corrupt title/desc ─────────────────
 
 
 def test_bold_in_description_does_not_corrupt_title():
@@ -1319,7 +1319,7 @@ def test_title_only_nested_bold_still_preserved():
     assert items[0]["description"] == "Do the **important** thing"
 
 
-# ── Finding 2: mutators serialize under a per-plan lock ─────────────────
+# ── Mutators serialize under a per-plan lock ────────────────────────────
 
 
 def test_update_execution_state_blocks_while_plan_lock_held(isolated_vault):
@@ -1399,7 +1399,7 @@ def test_cancel_not_clobbered_by_concurrent_update(isolated_vault):
         os.environ.pop("MODULATIO_PLAN_LOCK_TIMEOUT", None)
 
 
-# ── Finding 2b: a lock-free load() must never observe a torn write ──────
+# ── A lock-free load() must never observe a torn write ─────────────────
 
 
 def test_concurrent_load_never_observes_torn_write(isolated_vault):
@@ -1452,7 +1452,7 @@ def test_concurrent_load_never_observes_torn_write(isolated_vault):
 # Round-3 re-sweep regression tests for two 0.9.0 pre-ship findings on
 # plans.py. Each test FAILS against the pre-fix code and PASSES after.
 #
-# Finding 1 (_plan_lock, MEDIUM/race):
+#
 #     The re-entrancy key was computed as
 #     ``str(lock_path.resolve() if lock_path.exists() else lock_path)``.
 #     On the OUTER acquisition the lock file doesn't exist yet (touch()ed
@@ -1463,7 +1463,7 @@ def test_concurrent_load_never_observes_torn_write(isolated_vault):
 #     the same fd → self-deadlock. Fix: compute the key unconditionally as
 #     ``str(lock_path.resolve())`` so both acquisitions agree.
 #
-# Finding 2 (_coerce_cap, LOW/correctness):
+#
 #     A negative cap (``max_tokens: -1``) was coerced as-is; ``over_cap()``
 #     returns a halt reason on the first usage record (``0 > -1``), so the
 #     plan halts immediately with a confusing "cap exceeded". Fix: a
@@ -1475,8 +1475,8 @@ def test_concurrent_load_never_observes_torn_write(isolated_vault):
 def symlinked_vault(tmp_path: Path, monkeypatch):
     """Vault root reached through a symlinked component, so that
     ``Path.resolve()`` (symlink-following) differs from the literal path.
-    This is the exact condition that made the outer/inner lock keys
-    diverge in Finding 1."""
+    This is the exact condition that makes the outer/inner lock keys
+    diverge."""
     real_root = tmp_path / "real_projects"
     real_root.mkdir()
     link_root = tmp_path / "linked_projects"
@@ -1489,7 +1489,7 @@ def symlinked_vault(tmp_path: Path, monkeypatch):
 
 
 
-# ── Finding 1: nested re-entrant lock under a symlinked root ────────────
+# ── Nested re-entrant lock under a symlinked root ───────────────────────
 
 
 def test_reentrant_plan_lock_under_symlinked_root_does_not_deadlock(
@@ -1540,7 +1540,7 @@ def test_reentrant_lock_keys_match_across_existence(symlinked_vault):
     assert key_before == key_after
 
 
-# ── Finding 2: negative budget caps degrade to unbounded ────────────────
+# ── Negative budget caps degrade to unbounded ───────────────────────────
 
 
 def test_negative_token_cap_coerces_to_none():

@@ -370,7 +370,7 @@ def test_send_document_normal_filename_preserved(tmp_path, monkeypatch):
 # ═══ fold: test_telegram_notify_resweep_r3.py ═══
 # Round-3 re-sweep regressions for telegram_notify.
 #
-# Finding 1: ``_split_chunks`` measured Python code points against the 4096
+# ``_split_chunks`` measured Python code points against the 4096
 # cap, but Telegram counts UTF-16 code units. An emoji-heavy chunk could be
 # under the code-point cap yet ~2x over the wire cap -> HTTP 400. The fix
 # budgets by UTF-16 code units everywhere, including the hard-split path.

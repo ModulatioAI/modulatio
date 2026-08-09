@@ -343,7 +343,7 @@ def test_digest_no_hoist_run_id_stays_alphabetical(tmp_path):
 
 
 # ═══ fold: test_team_canvas_resweep_r3.py ═══
-# Round-3 re-sweep regressions for team_canvas — Finding 1 (security).
+# Security regressions for team_canvas.
 #
 # A producer holding a shell tool can plant a symlink inside the run's
 # artifacts/ tree pointing at a file OUTSIDE the tree (e.g. /etc/passwd or

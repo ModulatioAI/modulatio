@@ -304,7 +304,7 @@ async def test_clean_run_headline_unchanged(tui_vault):
 # ═══ fold: test_tui_app_resweep_r3.py ═══
 # Round-3 re-sweep regression for ``modulatio.tui.app`` (1 finding).
 #
-# Finding 1 (LOW/resource-leak) — ``on_worker_state_changed`` only branched on
+# ``on_worker_state_changed`` only branched on
 # ``WorkerState.SUCCESS`` and ``WorkerState.ERROR`` for both the ``kickoff`` and
 # ``converse`` worker groups. ``WorkerState.CANCELLED`` was silently dropped, so
 # neither ``_on_kickoff_done`` nor a converse-lane settle ran when a worker was
@@ -712,7 +712,7 @@ async def test_kickoff_pending_keeps_converse_done_from_settling():
 # ═══ fold: test_tui_app_r2_audit.py ═══
 # Round-2 audit regressions for ``modulatio.tui.app`` (3 findings).
 #
-# Finding 1 (MEDIUM/resource-leak) — a double KICK OFF (two fast F5 presses, or
+# A double KICK OFF (two fast F5 presses, or
 # F5 while the button-disable guard is bypassed) re-entered ``_run_kickoff`` and
 # overwrote ``self._kickoff_tick`` with a fresh ``set_interval`` handle WITHOUT
 # stopping the prior one, leaking a timer that ticks forever (its handle is gone,
@@ -720,12 +720,12 @@ async def test_kickoff_pending_keeps_converse_done_from_settling():
 # if a kickoff is already in flight (``_kickoff_tick`` live), the second launch is
 # a no-op with a "job already running" status.
 #
-# Finding 2 (MEDIUM/correctness) — ``/restart`` calls ``app.exit(return_code=42)``
+# ``/restart`` calls ``app.exit(return_code=42)``
 # but the entry point ignored the code, so the TUI just quit with a misleading
 # "Restarting..." message and never came back. The fix adds ``_relaunch_if_restart``
 # which re-execs the interpreter on code 42 (and is a no-op otherwise).
 #
-# Finding 3 (LOW/correctness) — ``_agent_name``'s cache is documented "Cached per
+# ``_agent_name``'s cache is documented "Cached per
 # run" but was built once for the app's whole lifetime and never invalidated, so a
 # roster change between runs (new agent / rename) resolved to a stale/empty name.
 # The fix drops the cache on each ``kickoff_started`` activity event.
@@ -748,7 +748,7 @@ def _kickoff_started_event():
 
 
 
-# ─── Finding 1: double KICK OFF must not leak a set_interval timer ───────────
+# ─── Double KICK OFF must not leak a set_interval timer ──────────────────────
 
 
 @pytest.mark.asyncio
@@ -798,7 +798,7 @@ async def test_kickoff_starts_tick_when_none_running():
             await pilot.pause()
 
 
-# ─── Finding 2: /restart must actually relaunch on return_code 42 ────────────
+# ─── /restart must actually relaunch on return_code 42 ───────────────────────
 
 
 class _FakeApp:
@@ -857,7 +857,7 @@ async def test_restart_side_effect_exits_with_code_42():
         assert captured.get("return_code") == 42
 
 
-# ─── Finding 3: _agent_name cache must be per-run, not per-app-lifetime ──────
+# ─── _agent_name cache must be per-run, not per-app-lifetime ─────────────────
 
 
 @pytest.mark.asyncio
@@ -908,7 +908,7 @@ async def test_agent_name_rebuilds_after_invalidation():
 # ═══ fold: test_tui_app_resweep.py ═══
 # Re-sweep (0.9.0 pre-ship) regression for ``modulatio.tui.app``.
 #
-# Finding 1 (MEDIUM/race) — ``_on_kickoff_done`` settled the shared TEAM spinner
+# ``_on_kickoff_done`` settled the shared TEAM spinner
 # unconditionally from the direct kickoff's OWN result. The engine explicitly
 # supports a converse-driven ``run_job`` AND a direct kickoff being live at the
 # same time (each on its own worker — see ``_active_job_orchestrators``). When a

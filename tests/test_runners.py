@@ -1289,14 +1289,14 @@ def test_chat_pool_seed_last_err_is_a_ratelimiterror(monkeypatch):
 #
 # Two confirmed pre-ship findings:
 #
-# Finding 1 (MEDIUM/integration): ``litellm_chat_runner.run`` — the PRIMARY
+# ``litellm_chat_runner.run`` — the PRIMARY
 # tool-using producer path — had no ``AuthenticationError`` handling, so an
 # expired OAuth access token (they die ~24h) killed every tool-using producer
 # overnight while the single-shot ``litellm_runner`` self-healed. The tool-loop
 # runner must now refresh-once + retry, fire an auth alert on persistent 401,
 # and clear a prior alert on success — same contract as ``litellm_runner``.
 #
-# Finding 2 (LOW/product-agnostic): on the summarizer-FAILED truncation
+# On the summarizer-FAILED truncation
 # fallback in ``run_llm_with_tools``, the kept head was budgeted with the
 # SUMMARIZER model's tokenizer (``count_model``) even though the truncated text
 # lands in the MAIN model's context. The head must be sized against the
@@ -1360,7 +1360,7 @@ def _add_oauth_preset(key="grok"):
     )
 
 
-# ── Finding 1: tool-loop chat runner recovers from a 401 via refresh ───────
+# ── Tool-loop chat runner recovers from a 401 via refresh ──────────────────
 
 
 def test_chat_runner_refreshes_on_auth_error_and_retries(monkeypatch):
@@ -1422,7 +1422,7 @@ def test_chat_runner_clears_alert_on_success(monkeypatch):
     assert auth_alerts.has_active_alerts() is False
 
 
-# ── Finding 2: summarizer-failed truncation budgets with the MAIN model ────
+# ── Summarizer-failed truncation budgets with the MAIN model ───────────────
 
 
 def test_summarizer_failed_truncation_budgets_with_main_model(monkeypatch, tmp_path):
@@ -1490,7 +1490,7 @@ def test_summarizer_failed_truncation_budgets_with_main_model(monkeypatch, tmp_p
 # ═══ fold: test_runners_resweep_r4.py ═══
 # Re-sweep round-4 regressions for ``src/modulatio/runners.py``.
 #
-# Finding 1 (LOW, product-agnostic) — sibling of re-sweep Finding 2.
+# Sibling of the summarizer-failed truncation case.
 #
 # When a tool result crosses ``threshold_tokens`` and gets truncated, the kept
 # HEAD lands in the MAIN model's context, so it must be sized against the MAIN
@@ -1640,7 +1640,7 @@ def test_summarizer_failed_branch_still_sizes_head_with_main_model(
 #    so only the dedicated base_url/strategy fields set them.
 
 
-# ── Finding 4: default_params can't override authoritative auth ──────────────
+# ── default_params can't override authoritative auth ─────────────────────────
 
 def test_default_params_cannot_override_api_key_for_none_auth_preset(monkeypatch):
     """A none-auth preset whose ``default_params`` smuggles an api_key/api_base
@@ -1699,7 +1699,7 @@ def test_default_params_api_base_does_not_clobber_dedicated_base_url(monkeypatch
     assert kwargs["api_base"] == "https://real.example/v1"
 
 
-# ── Finding 1: _rotated_pool_key TOCTOU — single snapshot, never base ────────
+# ── _rotated_pool_key TOCTOU — single snapshot, never base ───────────────────
 
 def test_rotated_pool_key_emptied_pool_returns_none_not_base(monkeypatch):
     """If the pool snapshot is empty, return None — NEVER the base var (which
@@ -1745,7 +1745,7 @@ def test_rotated_pool_key_indexes_single_snapshot(monkeypatch):
     assert calls["n"] == 3
 
 
-# ── Finding 3: AuthenticationError refresh on a pooled preset ────────────────
+# ── AuthenticationError refresh on a pooled preset ───────────────────────────
 
 def _pooled_preset_invalid_host():
     return {
@@ -1821,7 +1821,7 @@ def test_auth_refresh_retry_for_pooled_preset_redraws_from_pool(monkeypatch):
     assert "BASE-VAR-MAYBE-PINNED" not in seen
 
 
-# ── Finding 2: responses() path gains OAuth refresh + 429 failover ───────────
+# ── responses() path gains OAuth refresh + 429 failover ──────────────────────
 
 def _fake_responses_obj(text="resp-ok"):
     class _Content:
@@ -1936,14 +1936,14 @@ def test_responses_path_429_pool_failover(monkeypatch):
 # Two TOCTOU-pool-shrink holes in the RateLimitError key-pool failover, distinct
 # from the seeded-``last_err`` fix already covered by test_runners_low_audit.py:
 #
-# Finding 1 (litellm_runner failover): when ``_rotated_pool_key`` transiently
+# When ``_rotated_pool_key`` transiently
 # returns ``None`` for a retry slot (the last unpinned key got pinned/unset
 # between iterations), the old code retried with ``retry_kwargs`` that carried NO
 # explicit ``api_key`` (pooled construction leaves ``api_key`` out of ``kwargs``),
 # letting LiteLLM resolve the maybe-PINNED base env var and borrow a key the
 # metering keel forbids. The fix skips an empty slot instead of dispatching.
 #
-# Finding 2 (litellm_chat_runner failover): ``_call`` invokes
+# ``_call`` invokes
 # ``_pooled_call_key``, which RAISES RuntimeError on an emptied pool. The loop
 # only caught RateLimitError, so that RuntimeError escaped and MASKED the seeded
 # 429 re-raise. The fix swallows the RuntimeError so the seeded 429 surfaces.
@@ -1965,7 +1965,7 @@ def _patch_presets(monkeypatch):
 
 
 def test_failover_skips_empty_rotated_slot_never_borrows_base_key(monkeypatch):
-    """Finding 1: a transient ``_rotated_pool_key() is None`` mid-failover must
+    """A transient ``_rotated_pool_key() is None`` mid-failover must
     NOT dispatch a retry — that retry would carry no explicit api_key and let
     LiteLLM borrow the (maybe-pinned) base env var. Every completion call must
     carry an explicit pooled key; an all-empty failover re-raises the 429."""
@@ -2005,7 +2005,7 @@ def test_failover_skips_empty_rotated_slot_never_borrows_base_key(monkeypatch):
 
 
 def test_chat_failover_swallows_pooled_key_runtimeerror_reraises_429(monkeypatch):
-    """Finding 2: in litellm_chat_runner, a mid-failover pool-empty makes
+    """In litellm_chat_runner, a mid-failover pool-empty makes
     ``_pooled_call_key`` raise RuntimeError. That must NOT escape the loop and
     mask the rate limit — the seeded 429 re-raises instead."""
     import litellm

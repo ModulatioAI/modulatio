@@ -1338,7 +1338,7 @@ def test_confirm_producers_line_not_all_question_marks(monkeypatch, capsys):
 # ═══ fold: test_setup_wizard_finalize_resweep.py ═══
 # Re-sweep regression tests for setup_wizard.finalize (0.9.0 pre-ship).
 #
-# Finding 1 [LOW]: a key staged under the neutral ``API_KEY`` sentinel
+# A key staged under the neutral ``API_KEY`` sentinel
 # (``default_env_var_for``'s fallback for a malformed base_url) rendered a bogus
 # ``api_key`` provider on the confirm line. ``API_KEY`` (7 chars) does not end
 # with ``_API_KEY`` (8 chars), so the suffix strip missed it. ``_derive_providers``
@@ -1643,7 +1643,7 @@ def test_is_cached_sees_runtime_populated_cache(tmp_path, monkeypatch):
 # ═══ fold: test_setup_wizard_steps_resweep.py ═══
 # Re-sweep regression for the Models-step BACK / staged-api-keys defect.
 #
-# Finding 1 [MEDIUM/correctness], filed at steps.py:228 (the
+# At steps.py:228 (the
 # ``pop_state(steps[step_idx], state)`` call site in ``run_step_machine``).
 #
 # Root cause is NOT in the product-agnostic state-machine framework
@@ -1763,7 +1763,7 @@ def test_pop_state_models_preserves_staged_api_keys():
 # ═══ fold: test_setup_wizard___init___resweep_r3.py ═══
 # Round-3 re-sweep regression tests for modulatio.setup_wizard.__init__.
 #
-# Finding 1 [LOW/correctness]: per finding #348 the embedded_llm prefetch step
+# Per finding #348 the embedded_llm prefetch step
 # now runs BEFORE confirm (step 7 of 8). ``embedded_llm_step.prefetch()``
 # downloads the routing embedder (potentially hundreds of MB) into fastembed's
 # cache — a durable, reusable on-disk side effect. The abort handler only
@@ -1930,7 +1930,7 @@ def test_abort_prefetch_with_unknown_model_id_omits_label_gracefully():
 # ═══ fold: test_setup_wizard___init___resweep_r4.py ═══
 # Round-4 re-sweep regression tests for modulatio.setup_wizard.__init__.
 #
-# Finding 1 [LOW/correctness]: BACK out of the agents step popped the
+# BACK out of the agents step popped the
 # disk-loaded team pre-fill. ``_load_existing_state`` pre-populates
 # ``triad_agents`` / ``worker_agents`` from the saved team_template.json so the
 # agents step starts on the user's current team with edit/keep semantics. The
@@ -1939,7 +1939,7 @@ def test_abort_prefetch_with_unknown_model_id_omits_label_gracefully():
 # in-progress picks) on re-entry, restarting on an empty re-provision. Fix:
 # ``agents`` pops nothing — the step overwrites both keys on re-entry.
 #
-# Finding 2 [LOW/correctness]: the abort handler re-capitalized the lead clause
+# The abort handler re-capitalized the lead clause
 # only ``if presets_changed``. On a run whose ONLY durable side effect was the
 # embedded-LLM cache warm (no presets, no system-tool install), the single
 # clause starts lowercase ('the embedded routing model ...'), producing
@@ -1948,7 +1948,7 @@ def test_abort_prefetch_with_unknown_model_id_omits_label_gracefully():
 # must stay lowercase for the verbatim 'pandoc'/'clipboard' test contract).
 
 
-# === Finding 1: _pop_state('agents', ...) ===
+# === _pop_state('agents', ...) ==============
 
 
 def test_pop_state_agents_preserves_team_prefill():
@@ -1980,7 +1980,7 @@ def test_pop_state_other_steps_still_clear():
     assert "budget_caps" not in state
 
 
-# === Finding 2: abort-message lead capitalization ===
+# === Abort-message lead capitalization ==============
 
 
 

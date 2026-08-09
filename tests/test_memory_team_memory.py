@@ -39,7 +39,7 @@ def isolate(tmp_path, monkeypatch):
     yield
 
 
-# === Finding 1: binary / non-UTF-8 entry must not brick the listing ===
+# === Binary / non-UTF-8 entry must not brick the listing ==============
 
 def test_parse_skips_non_utf8_entry_instead_of_crashing():
     # A valid entry plus a corrupt (binary / non-UTF-8) .md in the same dir.
@@ -66,7 +66,7 @@ def test_parse_returns_none_on_undecodable_file():
     assert team_memory._parse(bad) is None
 
 
-# === Finding 2: embedding model resolved per-call, not captured at import ===
+# === Embedding model resolved per-call, not captured at import ==============
 
 def test_embed_model_resolves_current_config(monkeypatch):
     # The module must NOT serve a value frozen at import. Swap the config
@@ -93,7 +93,7 @@ def test_config_hash_tracks_live_model_swap(monkeypatch):
     _ = rec
 
 
-# === Finding 3: recency fallback must not claim sim 1.00 ===
+# === Recency fallback must not claim sim 1.00 ==============
 
 def _seed_one():
     team_memory.write(
@@ -274,7 +274,7 @@ def test_recall_falls_back_to_recency_when_vector_table_empty(monkeypatch):
 # ═══ fold: test_memory_team_memory_resweep.py ═══
 # 0.9.0 pre-ship re-sweep regression for src/modulatio/memory/team_memory.py.
 #
-# Finding 1 [MEDIUM/correctness]: recall's semantic branch builds the LanceDB
+# Recall's semantic branch builds the LanceDB
 # table from the FULL record pool, runs a GLOBAL top-k*4 similarity search, then
 # applies the metadata filter in Python AFTER. When the pool is larger than that
 # slice and the metadata-matched entries rank below non-matching bodies, the
@@ -389,7 +389,7 @@ def test_recall_semantic_small_pool_unchanged():
 # ═══ fold: test_memory_team_memory_resweep_r3.py ═══
 # 0.9.0 pre-ship re-sweep (round 3) regression for team_memory.py.
 #
-# Finding 1 [LOW/security]: approve_proposal/reject_proposal located the proposal
+# approve_proposal/reject_proposal located the proposal
 # file via a substring glob ``dir_.glob(f"*{proposal_id}*.json")`` over a
 # caller/operator-supplied ``proposal_id``. A glob metacharacter (``*``/``?``/
 # ``[``) made the pattern match ALL/arbitrary proposals (acting on a

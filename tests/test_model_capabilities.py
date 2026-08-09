@@ -349,7 +349,7 @@ def test_remote_host_containing_localhost_does_not_force_free_local():
 # ═══ fold: test_model_capabilities_resweep.py ═══
 # 0.9.0 pre-ship re-sweep regressions for ``model_capabilities``.
 #
-# Finding 1 (MEDIUM/correctness): ``_OPENAI_O_SERIES`` false-positived on
+# ``_OPENAI_O_SERIES`` false-positived on
 # hyphen-/underscore-delimited o-tokens welded onto another family id
 # (``command-o4-beta``, ``llama-o3-instruct``, ``foo_o3_bar``). The old left
 # boundary class ``[/\s_-]`` treated a bare ``-``/``_`` as a token boundary, so an

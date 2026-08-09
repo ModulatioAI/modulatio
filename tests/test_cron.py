@@ -603,7 +603,7 @@ def test_add_rejects_nonpositive_count_and_bad_stop_metadata():
 #      the schedule became unparseable.
 
 
-# === Finding 1: add-time JT validation parity with the run-time fit-gate ===
+# === Add-time JT validation parity with the run-time fit-gate ==============
 
 
 def test_add_jt_out_of_enum_param_raises():
@@ -656,7 +656,7 @@ def test_add_jt_per_item_with_list_driver_ok():
     assert job["jt_params"] == {"targets": ["a", "b"]}
 
 
-# === Finding 2: _new_id must be collision-resistant ===
+# === _new_id must be collision-resistant ==============
 
 
 def test_new_id_keeps_all_microsecond_digits_and_random_suffix():
@@ -670,7 +670,7 @@ def test_new_id_no_collision_in_tight_loop():
     assert len(ids) == 2000
 
 
-# === Finding 3: dispatch_due must not pin a job as perpetually-due ===
+# === dispatch_due must not pin a job as perpetually-due ==============
 
 
 def _due_job(**over):
@@ -864,7 +864,7 @@ def test_concurrent_processes_fire_due_job_once(tmp_path):
 # ═══ fold: test_cron_resweep_r3.py ═══
 # Round-3 cron re-sweep regressions (additive to test_cron_resweep.py).
 #
-# Finding 1 [MEDIUM/race, cron.py:129] — the cross-process dispatch flock was held
+# The cross-process dispatch flock was held
 # ONLY by dispatch_due. The CLI-facing mutators add/update/remove (and
 # enable/disable via update) took only the in-process _cron_lock RLock, which can't
 # see across the OS-process boundary. A daemon dispatch (which RMWs the config via
@@ -874,7 +874,7 @@ def test_concurrent_processes_fire_due_job_once(tmp_path):
 # the dispatch path (which already holds it) can still call update without
 # deadlocking against a fresh-fd flock.
 #
-# Finding 2 [LOW/integration, cron.py:332] — cron.add only .upper()'d project_code,
+# cron.add only .upper()'d project_code,
 # never validating its shape (heartbeat.add_task does). A malformed/path-hostile
 # code was accepted at add-time then rejected on every headless dispatch. Fix:
 # validate up front via vault.validate_project_code so the operator is told
@@ -898,7 +898,7 @@ def _nonblocking_flock_is_blocked() -> bool:
         os.close(fd)
 
 
-# --- Finding 1: mutators hold the cross-process lock during their RMW ---
+# --- Mutators hold the cross-process lock during their RMW --------------
 
 
 def test_add_holds_cross_process_lock_during_rmw(monkeypatch):
@@ -969,7 +969,7 @@ def test_remove_holds_cross_process_lock_during_rmw(monkeypatch):
     assert observed.get("blocked_during_save") is True
 
 
-# --- Finding 1: re-entrancy — dispatch_due -> _dispatch_one -> update must NOT
+# --- Re-entrancy — dispatch_due -> _dispatch_one -> update must NOT
 #     deadlock against the outer flock, and must still fire exactly once. ---
 
 
@@ -1038,7 +1038,7 @@ def test_no_fd_leak_across_many_mutations(monkeypatch):
     assert after - before < 20, f"fd leak: {before} -> {after}"
 
 
-# --- Finding 2: cron.add validates project_code shape at add-time ---
+# --- cron.add validates project_code shape at add-time --------------
 
 
 @pytest.mark.parametrize(
@@ -1092,7 +1092,7 @@ def test_added_job_dispatches_without_code_error(monkeypatch):
 # ═══ fold: test_cron_resweep_r4.py ═══
 # Round-4 re-sweep regressions for src/modulatio/cron.py.
 #
-# Finding 1 (MEDIUM/integration): cron.add's JT fit-gate must MIRROR the run-time
+# cron.add's JT fit-gate must MIRROR the run-time
 # #97 fit-gate, which evaluates the bind AFTER folding the JT's standing defaults
 # in (`_run_jt_interview` → `_jt_fit`). The add-time gate previously checked the
 # RAW `jt_params` alone, so a cron whose required blank is filled by the template's

@@ -419,7 +419,7 @@ def test_cli_heartbeat_add_accepts_valid_every():
 
 
 
-# === Finding 3: unparseable next_run is NOT eligible-now ===
+# === Unparseable next_run is NOT eligible-now ==============
 
 def test_unparseable_next_run_is_skipped_not_run_now():
     t = heartbeat.add_task(
@@ -446,7 +446,7 @@ def test_valid_future_next_run_still_skipped_and_past_still_runs():
     assert tf  # future one stays unselected
 
 
-# === Finding 2: completion must not clobber a concurrent cancel ===
+# === Completion must not clobber a concurrent cancel ==============
 
 def test_finalize_task_skips_when_cancelled():
     t = heartbeat.add_task(description="c", project_code="STA", objective="x")
@@ -487,7 +487,7 @@ def test_run_task_honors_cancel_and_skips_done_and_requeue():
     assert pendings == []
 
 
-# === Finding 1: claim is exclusive across processes ===
+# === Claim is exclusive across processes ==============
 
 def _claim_worker(cfg_dir_str, vault_root_str, return_list):
     # Re-create the same isolated config in the child process.
@@ -545,7 +545,7 @@ def test_claim_is_cross_process_exclusive(tmp_path):
 
 
 
-# === Finding 3: parse_interval rejects zero/negative ===
+# === parse_interval rejects zero/negative ==============
 
 @pytest.mark.parametrize("s", ["0m", "0h", "0d", "0 min", "0 hours", "0 days"])
 def test_parse_interval_rejects_zero(s):
@@ -569,7 +569,7 @@ def test_requeue_recurring_treats_zero_interval_as_non_recurring():
     assert len(heartbeat.list_tasks()) == 1
 
 
-# === Finding 1: requeue_recurring is atomic — child never eligible-now ===
+# === requeue_recurring is atomic — child never eligible-now ==============
 
 def test_add_task_accepts_next_run_kwarg():
     nr = "2099-01-01T00:00:00+00:00"
@@ -625,16 +625,16 @@ def test_recurring_child_is_not_immediately_claimable():
 #
 # Two confirmed findings:
 #
-# - Finding 1 (race): the dispatch-failure retry path must not resurrect an
+# - The dispatch-failure retry path must not resurrect an
 #   operator-cancelled task back to ``pending`` (which ``_select_next_pending``
 #   would re-dispatch, defeating the cancel).
-# - Finding 2 (correctness): a ``depends_on`` suffix must not false-satisfy
+# - A ``depends_on`` suffix must not false-satisfy
 #   against an unrelated done task via a bare ``endswith`` over the whole id.
 
 
 
 
-# === Finding 1: retry path must honor a mid-dispatch cancel ===
+# === Retry path must honor a mid-dispatch cancel ==============
 
 def test_retry_path_does_not_resurrect_cancelled_task():
     """A retryable dispatch failure that races with an operator cancel must
@@ -683,7 +683,7 @@ def test_retry_path_still_rearms_when_not_cancelled():
     assert heartbeat.next_pending()["id"] == task["id"]
 
 
-# === Finding 2: dependency suffix must not false-match an unrelated id ===
+# === Dependency suffix must not false-match an unrelated id ==============
 
 def test_short_dep_does_not_false_match_unrelated_done_task():
     """A short ``depends_on`` fragment that coincidentally tails an unrelated
@@ -747,7 +747,7 @@ def test_full_id_dep_satisfies_dependency():
 # ═══ fold: test_heartbeat_resweep_r3.py ═══
 # 0.9.0 pre-ship round-3 re-sweep regressions for ``heartbeat.py``.
 #
-# Finding 1 (MEDIUM/race): every queue read-modify-write — not just
+# Every queue read-modify-write — not just
 # ``claim_next_pending`` — must hold the cross-process ``flock`` and write through
 # a per-process-unique tmp. Before the fix, ``add_task``/``update_task``/
 # ``finalize_task``/``requeue_task``/``clear_done``/``recover_stale_tasks``

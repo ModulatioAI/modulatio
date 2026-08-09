@@ -1224,7 +1224,7 @@ def test_soft_cap_warn_refires_for_new_run_same_recipient(
 
 
 
-# ── finding 1: priority validation at API entry ──────────────────────────
+# ── Priority validation at API entry ─────────────────────────────────────
 
 
 def test_propose_rejects_invalid_priority(run_dir: Path, audit_path: Path) -> None:
@@ -1279,9 +1279,9 @@ def test_enqueue_rejects_invalid_priority(run_dir: Path, audit_path: Path) -> No
 def test_accept_of_poisoned_candidate_cannot_happen(
     run_dir: Path, audit_path: Path,
 ) -> None:
-    """Because propose now refuses the bad priority, the deferred
-    accept-time KeyError described in finding 1 is unreachable: there is
-    no poisoned candidate to accept."""
+    """Because propose refuses the bad priority, the deferred
+    accept-time KeyError is unreachable: there is no poisoned candidate
+    to accept."""
     with pytest.raises(inboxes.InboxError):
         inboxes.propose(
             source_agent_id="drafter-1", source_role="drafter",
@@ -1297,7 +1297,7 @@ def test_accept_of_poisoned_candidate_cannot_happen(
     assert pending == []
 
 
-# ── finding 2: double-accept produces a DUPLICATE, not a supersede ────────
+# ── Double-accept produces a DUPLICATE, not a supersede ───────────────────
 
 
 def test_double_accept_produces_duplicate_note(
@@ -1359,7 +1359,7 @@ def test_double_accept_produces_duplicate_note(
     assert all(getattr(n, "supersedes_note_id", None) is None for n in dup)
 
 
-# ── finding 3: bare heading (no fence) must NOT be stripped ────────────────
+# ── Bare heading (no fence) must NOT be stripped ───────────────────────────
 
 
 def test_bare_heading_without_fence_is_preserved() -> None:
@@ -1422,7 +1422,7 @@ def _append_raw(path: Path, row: dict) -> None:
         fh.write(json.dumps(row) + "\n")
 
 
-# ── finding 1: schema-drifted tombstone row must not brick reads ──────────
+# ── Schema-drifted tombstone row must not brick reads ─────────────────────
 
 
 def test_load_tombstoned_ids_skips_schema_drifted_row(run_dir: Path) -> None:
@@ -1518,7 +1518,7 @@ def test_enqueue_survives_drifted_tombstone(
 # ═══ fold: test_inboxes_resweep_r4.py ═══
 # Round-4 re-sweep regressions for src/modulatio/inboxes.py.
 #
-# Finding 1 [LOW/error-path]: ``_load_jsonl`` opened JSONL with
+# ``_load_jsonl`` opened JSONL with
 # ``encoding="utf-8"`` and the default ``errors="strict"``. A non-UTF-8 byte
 # (a Latin-1 hand-edit or a torn write — the exact resilience scenarios the
 # module's docstrings cite) raised ``UnicodeDecodeError`` during ``for line in

@@ -724,7 +724,7 @@ def test_capacity_cap_floored_on_direct_construction() -> None:
 
 
 def test_capacity_cap_floored_on_model_copy_update_zero() -> None:
-    """re-sweep finding 1: a sub-1 cap must not enter the roster via the
+    """A sub-1 cap must not enter the roster via the
     ``model_copy(update=...)`` path. Pydantic v2 field_validators do NOT
     fire on model_copy, so before the override this returned 0 (a silent
     non-dispatchable producer)."""
@@ -734,7 +734,7 @@ def test_capacity_cap_floored_on_model_copy_update_zero() -> None:
 
 
 def test_capacity_cap_floored_on_model_copy_update_negative() -> None:
-    """re-sweep finding 1: negative caps via copy are floored too."""
+    """Negative caps via copy are floored too."""
     base = Agent(id="a", name="a", capacity_cap=4)
     assert base.model_copy(update={"capacity_cap": -7}).capacity_cap == 1
 

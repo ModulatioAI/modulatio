@@ -2285,7 +2285,7 @@ def test_tick_runners_failure_reports_real_status_not_executing(project, isolate
 
 
 
-# ── Finding 1: over-cap pauses (does not raise + does not starve) ───────
+# ── Over-cap pauses (does not raise + does not starve) ──────────────────
 
 
 def test_over_cap_pauses_instead_of_raising(project):
@@ -2351,7 +2351,7 @@ def test_over_cap_opens_pause_ticket(project):
     ), [t.title for t in open_tickets]
 
 
-# ── Finding 2: reflection markers use positional order ──────────────────
+# ── Reflection markers use positional order ─────────────────────────────
 
 
 def test_reflection_markers_positional_not_llm_index(project):
@@ -2386,7 +2386,7 @@ def test_reflection_markers_positional_not_llm_index(project):
     assert lines[2].strip().startswith("☐")
 
 
-# ── Finding 3: emit_state schema carries outcome payloads ───────────────
+# ── emit_state schema carries outcome payloads ──────────────────────────
 
 
 def test_emit_state_schema_exposes_outcome_payloads():
@@ -2686,7 +2686,7 @@ def _structured_reflect_runner():
     return _runner
 
 
-# ── Finding 1: serial reflect-emit writes the compaction row unlocked ──
+# ── Serial reflect-emit writes the compaction row unlocked ─────────────
 
 
 def test_leader_reflect_emit_compaction_serial_path_writes_audit_row(project):

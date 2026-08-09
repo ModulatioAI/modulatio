@@ -12440,7 +12440,7 @@ def _task(**kw) -> Task:
     return Task(**base)
 
 
-# ── Finding 1: tool-loop binary assembly output_file ─────────────────────────
+# ── Tool-loop binary assembly output_file ────────────────────────────────────
 
 
 def test_tool_loop_honors_binary_assembly_output_file(project, tmp_path, monkeypatch):
@@ -12504,7 +12504,7 @@ def test_tool_loop_honors_binary_assembly_output_file(project, tmp_path, monkeyp
     assert not composite_src.exists()
 
 
-# ── Finding 2: dynamic document fence in kickoff attachments ─────────────────
+# ── Dynamic document fence in kickoff attachments ────────────────────────────
 
 
 def test_kickoff_attachment_fence_survives_inner_backticks():
@@ -12532,7 +12532,7 @@ def test_kickoff_attachment_fence_survives_inner_backticks():
     assert "```\nmalicious" in enclosed  # the inner fence sits INSIDE, not breaking out
 
 
-# ── Finding 4: wave merge can't claim another task's primary slot ────────────
+# ── Wave merge can't claim another task's primary slot ───────────────────────
 
 
 def test_wave_merge_sidecar_cannot_land_on_unwritten_sibling_primary(project, tmp_path):

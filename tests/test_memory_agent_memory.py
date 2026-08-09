@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Re-sweep R4 regressions for agent_memory atomic/crash-safe persistence.
 
-Finding 1 [MEDIUM/resource-leak]: _save_json did a plain path.write_text() that
+_save_json did a plain path.write_text() that
 truncates-then-streams the entire store on every mutation. The lock-free readers
 (get_semantic/search/stats/promote_candidates) could observe a half-written file
 mid-rewrite -> json.JSONDecodeError swallowed by _load_json -> silent whole-store
@@ -185,7 +185,7 @@ def test_create_entry_ids_distinct_under_frozen_clock(monkeypatch):
 
 
 
-# === Finding 2: add_semantic prune overshoot ===
+# === add_semantic prune overshoot ==============
 
 def test_add_semantic_prune_never_overshoots_with_many_active():
     """All-active inserts past the cap must leave the store <= SEMANTIC_MAX_ENTRIES.
@@ -222,7 +222,7 @@ def test_add_semantic_prune_mix_of_active_and_inactive_bounded():
     assert len(raw) <= max_n
 
 
-# === Finding 1: concurrent read-modify-write must not lose updates ===
+# === Concurrent read-modify-write must not lose updates ==============
 
 def test_concurrent_add_episodic_no_lost_updates():
     """Many threads appending concurrently must all be retained (up to the cap).

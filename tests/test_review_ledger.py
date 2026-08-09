@@ -526,7 +526,7 @@ def test_empty_deps_fall_back_reason_no_longer_says_cross_goal(tmp_path):
 
 
 def test_verify_assembly_docstring_documents_engine_wiring():
-    """Finding 1: the docstring must reference the engine wiring rather than the
+    """The docstring must reference the engine wiring rather than the
     stale 'cross-goal assemblies have none and fall back' claim."""
     doc = review_ledger.verify_assembly.__doc__ or ""
     assert "_wire_cross_goal_assembler_deps" in doc
@@ -534,7 +534,7 @@ def test_verify_assembly_docstring_documents_engine_wiring():
 
 
 def test_module_docstring_documents_engine_wiring():
-    """Finding 1: the module docstring's depends_on note must point at the engine
+    """The module docstring's depends_on note must point at the engine
     wiring (same-goal AND cross-goal), not imply cross-goal assemblers lack deps."""
     doc = review_ledger.__doc__ or ""
     assert "_wire_cross_goal_assembler_deps" in doc
