@@ -263,16 +263,22 @@ def migrate_vault_secrets() -> int:
         legacy = get_vault_root() / ".env"
         if not legacy.is_file():
             return 0
-        current = _parse_env_assignments(secrets_path())
-        legacy_pairs = _parse_env_assignments(legacy)
-        moved = 0
-        for name, value in legacy_pairs.items():
-            if name in current:
-                continue
-            set_env_secret(name, value)
-            moved += 1
-        if all(k in _parse_env_assignments(secrets_path()) for k in legacy_pairs):
-            legacy.unlink()
+        # One transaction over the whole move. Reading the destination,
+        # deciding which keys are absent, writing them, and dropping the
+        # source are four steps whose answer changes if another editor writes
+        # between them: a key set after the read would be seen as absent and
+        # overwritten with the older value this file carries.
+        with _secret_edit_guard():
+            current = _parse_env_assignments(secrets_path())
+            legacy_pairs = _parse_env_assignments(legacy)
+            moved = 0
+            for name, value in legacy_pairs.items():
+                if name in current:
+                    continue
+                set_env_secret(name, value)
+                moved += 1
+            if all(k in _parse_env_assignments(secrets_path()) for k in legacy_pairs):
+                legacy.unlink()
         return moved
     except OSError:
         # A move that cannot complete leaves the source in place; the loader
@@ -305,19 +311,48 @@ def _parse_env_assignments(path: Path) -> "dict[str, str]":
 #: as the write, because reading stale content is what makes the loss.
 _SECRET_EDIT_LOCK = threading.RLock()
 
+#: Nesting depth of :func:`_secret_edit_guard`, read and written only while
+#: ``_SECRET_EDIT_LOCK`` is held. Nonzero means this process already owns the
+#: file lock, so an inner guard must not try to take it again.
+_SECRET_EDIT_DEPTH = 0
+
 
 @contextlib.contextmanager
 def _secret_edit_guard():
     """Hold the in-process lock and a file lock over the secret store, so
     concurrent editors in one process and in separate processes both
-    serialize."""
+    serialize.
+
+    Re-entrant: a caller that already holds it may run an operation that takes
+    it again. The in-process lock re-enters on its own, but a file lock belongs
+    to the open file description, so a second open in the same process waits on
+    the first and never gets it. The file lock is therefore taken once, by the
+    outermost holder, and the depth is tracked under the lock that guards it.
+    """
+    global _SECRET_EDIT_DEPTH
     lock_path = Path(str(secrets_path()) + ".lock")
     with _SECRET_EDIT_LOCK:
+        if _SECRET_EDIT_DEPTH:
+            _SECRET_EDIT_DEPTH += 1
+            try:
+                yield
+            finally:
+                _SECRET_EDIT_DEPTH -= 1
+            return
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+        # O_NOFOLLOW: a link planted at this path would otherwise be followed,
+        # creating a file wherever it points and taking the lock on THAT inode.
+        # Two processes whose links differ would then both hold "the" lock and
+        # serialize against nothing, which is exactly the lost update this
+        # exists to prevent.
+        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
+            _SECRET_EDIT_DEPTH += 1
+            try:
+                yield
+            finally:
+                _SECRET_EDIT_DEPTH -= 1
         finally:
             try:
                 fcntl.flock(fd, fcntl.LOCK_UN)

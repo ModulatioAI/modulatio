@@ -6,8 +6,10 @@ Covers defaults.json load/save/reload + path accessors with fallbacks
 
 from __future__ import annotations
 
-import os
+import errno
 import json
+import os
+import threading
 
 import pytest
 
@@ -744,3 +746,80 @@ def test_concurrent_secret_edits_do_not_lose_each_other(tmp_path, monkeypatch):
     for i in range(8):
         assert f"KEY_{i}=v{i}" in body, f"writer {i} was lost:\n{body}"
     assert "BASE=0" in body
+
+
+def test_a_symlinked_lock_path_is_refused(tmp_path):
+    """The lock exists so two editors serialize. Followed, a link planted at
+    its path creates a file wherever it points and takes the lock on THAT
+    inode — two processes whose links differ then both believe they hold it
+    and serialize against nothing, which is the lost update the lock prevents.
+    Creating a file at an attacker-chosen path is the second consequence."""
+    _point_vault_at(tmp_path)
+    lock_path = config.Path(str(config.secrets_path()) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    victim = tmp_path / "victim"
+    lock_path.symlink_to(victim)
+
+    with pytest.raises(OSError) as exc:
+        with config._secret_edit_guard():
+            pass
+
+    assert exc.value.errno in (errno.ELOOP, errno.EMLINK), exc.value
+    assert not victim.exists(), "a file was created through the planted link"
+
+
+def test_the_secret_guard_is_reentrant(tmp_path):
+    """A file lock belongs to the open file description, so a second open in
+    the same process waits on the first and never gets it. An operation that
+    holds the guard and calls one that takes it again would hang forever."""
+    _point_vault_at(tmp_path)
+
+    with config._secret_edit_guard():
+        with config._secret_edit_guard():
+            config.set_env_secret("INNER_KEY", "inner-value")
+
+    assert config._SECRET_EDIT_DEPTH == 0, "the depth did not unwind"
+    assert "INNER_KEY=inner-value" in config.secrets_path().read_text().splitlines()
+
+
+def test_migration_does_not_overwrite_a_key_written_after_its_read(tmp_path):
+    """The move reads the destination, decides which keys are absent, writes
+    them, and drops the source. A key set between the read and the write would
+    be seen as absent and replaced with the older value the source carries —
+    so the four steps are one transaction, and a concurrent editor either runs
+    wholly before or wholly after it."""
+    _point_vault_at(tmp_path)
+    legacy = config.get_vault_root() / ".env"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text("SHARED_KEY=old-value\n", encoding="utf-8")
+
+    started, may_finish = threading.Event(), threading.Event()
+    real_parse = config._parse_env_assignments
+
+    def _parse_then_wait(path):
+        out = real_parse(path)
+        if not started.is_set():
+            started.set()
+            may_finish.wait(timeout=5)     # a competing editor's window
+        return out
+
+    def _competitor():
+        started.wait(timeout=5)
+        config.set_env_secret("SHARED_KEY", "new-value")   # blocks on the guard
+        may_finish.set()
+
+    config._parse_env_assignments = _parse_then_wait
+    racer = threading.Thread(target=_competitor, daemon=True)
+    try:
+        racer.start()
+        # The competitor cannot enter until the migration's transaction ends,
+        # so it releases this wait rather than deadlocking the test.
+        threading.Timer(1.0, may_finish.set).start()
+        config.migrate_vault_secrets()
+    finally:
+        config._parse_env_assignments = real_parse
+    racer.join(timeout=5)
+
+    final = config._parse_env_assignments(config.secrets_path())
+    assert final["SHARED_KEY"] == "new-value", (
+        "the migration overwrote a key written after it read the destination")
