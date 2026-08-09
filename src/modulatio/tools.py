@@ -2012,6 +2012,14 @@ def _pdf_text(data: bytes, path: str) -> str:
     - stdout/stderr drain incrementally under hard ceilings; timeout or
       overflow kills the whole group (never an unbounded capture).
 
+    The parser runs inside the engine's mandatory sandbox, not merely with a
+    stripped environment: a document parser is a large C codebase reading
+    fully attacker-controlled input, so resource ceilings bound what a bug
+    costs while a mount graph bounds what it can REACH. Without one, an
+    exploit runs with everything this process can touch. Its only inputs are
+    a private scratch directory holding the staged copy and the runtime
+    mounted read-only; there is no network, no home, and no credential.
+
     Hosts without poppler, ceilings, timeouts, failures, and text-less scans
     refuse with one actionable line — the read_file refusal class."""
     # Resolve ONLY from the helper's fixed system path — never the engine's
@@ -2035,75 +2043,53 @@ def _pdf_text(data: bytes, path: str) -> str:
             f"read_file: {path!r} is a {len(data) // 1024**2} MB PDF — over "
             f"the {_PDF_INPUT_MAX_BYTES // 1024**2} MB extraction ceiling"
         )
-    import signal as _signal
     import tempfile
-    import threading
 
-    with tempfile.TemporaryDirectory(prefix="modulatio-pdf-") as td:
-        staged = Path(td, "staged.pdf")
+    from modulatio import code_probes as _probes
+
+    # A private engine-owned directory is the parser's ONLY writable mount and
+    # holds both its input and its output; the extracted text is read back
+    # here rather than piped, so the phase's small diagnostic tail never
+    # bounds a document's contents.
+    # Engine-owned staging, not the world-writable temp root: the sandbox
+    # replaces /tmp with a private filesystem, so a scratch directory there is
+    # shadowed rather than shared, and untrusted input has no business sitting
+    # somewhere every process on the host can reach.
+    from modulatio import config as _config
+    _pdf_base = Path(_config.CONFIG_DIR) / "parse"
+    _pdf_base.mkdir(parents=True, exist_ok=True)
+    os.chmod(_pdf_base, 0o700)
+    with tempfile.TemporaryDirectory(prefix="pdf-", dir=str(_pdf_base)) as td:
+        scratch = Path(td)
+        staged = scratch / "staged.pdf"
         staged.touch(mode=0o600)
         staged.write_bytes(data)
-        proc = subprocess.Popen(
-            [binary, str(staged), "-"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=_PDF_HELPER_ENV,
-            start_new_session=True,
+        out = scratch / "extracted.txt"
+        res = _probes.run_probe_phase(
+            [binary, str(staged), str(out)],
+            phase="pdf_text", snapshot=_probes._null_snapshot(scratch),
+            scratch=scratch, timeout_s=_PDF_TIMEOUT_S, allow_network=False,
+            env_extra=_PDF_HELPER_ENV,
+            # The parser's own directory, read-only — the runtime mounts
+            # already cover a system install, and a parser resolved elsewhere
+            # still cannot be modified from inside.
+            extra_ro=(binary_path.parent,),
         )
-        _apply_rlimits_to_pid(proc.pid)
-        timed_out = threading.Event()
-
-        def _kill_group() -> None:
-            timed_out.set()
-            try:
-                os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                proc.kill()
-
-        def _drain(stream, limit: int) -> "tuple[bytes, bool]":
-            buf = bytearray()
-            while True:
-                chunk = stream.read(65536)
-                if not chunk:
-                    return bytes(buf), False
-                buf += chunk
-                if len(buf) > limit:
-                    return bytes(buf), True
-
-        timer = threading.Timer(_PDF_TIMEOUT_S, _kill_group)
-        timer.start()
-        try:
-            out, out_over = _drain(proc.stdout, _READ_FILE_MAX_BYTES)
-            if out_over:
-                _kill_group()  # stop the producer; keep the capped head
-            err, _ = _drain(proc.stderr, _PDF_STDERR_CAP)
-            try:
-                proc.wait(timeout=_RUN_SHELL_DRAIN_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                _kill_group()
-                try:
-                    proc.wait(timeout=_RUN_SHELL_DRAIN_TIMEOUT)
-                except subprocess.TimeoutExpired:
-                    pass
-        finally:
-            timer.cancel()
-            for pipe in (proc.stdout, proc.stderr):
-                try:
-                    pipe.close()
-                except OSError:
-                    pass
-    if timed_out.is_set() and not out_over:
-        raise ValueError(f"read_file: pdftotext timed out on {path!r}")
-    if proc.returncode != 0 and not out_over:
-        e = err.decode("utf-8", "replace").strip()[:200]
-        raise ValueError(f"read_file: pdftotext failed on {path!r}: {e}")
-    text = out[:_READ_FILE_MAX_BYTES].decode("utf-8", "replace")
+        if res.status is not _probes.ProbeStatus.OK:
+            # Containment is the precondition, not a bonus: an unconfined
+            # parse of attacker-controlled input is the thing being refused.
+            raise ValueError(
+                f"read_file: {path!r} is a PDF and its text could not be "
+                f"extracted under containment ({res.reason or res.status.value})"
+            )
+        raw = out.read_bytes() if out.exists() else b""
+    over = len(raw) > _READ_FILE_MAX_BYTES
+    text = raw[:_READ_FILE_MAX_BYTES].decode("utf-8", "replace")
     if not text.strip():
         raise ValueError(
             f"read_file: {path!r} has no extractable text layer (a scan?)"
         )
-    if out_over:
+    if over:
         text += f"\n[...truncated at {_READ_FILE_MAX_BYTES} bytes]"
     return text
 

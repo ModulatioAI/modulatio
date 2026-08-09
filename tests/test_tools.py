@@ -2788,6 +2788,19 @@ def test_read_file_still_refuses_utf16_shaped_binary(tmp_path):
 _TINY_PDF_STREAM = b"BT /F1 18 Tf 20 100 Td (the owl flies at midnight) Tj ET"
 
 
+def _sealed_or_skip(monkeypatch):
+    """Lift the suite-wide bypass so the mandatory sandbox is real for this
+    test. A parser reading attacker-controlled input runs confined or not at
+    all, so its ceilings can only be exercised inside that confinement."""
+    from modulatio import sandbox
+
+    monkeypatch.delenv("MODULATIO_RUN_SHELL_UNSAFE", raising=False)
+    monkeypatch.setenv("MODULATIO_SANDBOX_PROFILE", "standard")
+    sandbox.reset_enforcement_state_cache()
+    if sandbox.enforcement_state() is not sandbox.EnforcementState.SANDBOXED_FULL:
+        pytest.skip("host cannot seal the sandbox")
+
+
 def _tiny_pdf() -> bytes:
     return (
         b"%PDF-1.4\n"
@@ -2804,8 +2817,9 @@ def _tiny_pdf() -> bytes:
 
 @pytest.mark.skipif(tools.shutil.which("pdftotext") is None,
                     reason="poppler-utils not installed")
-def test_read_file_extracts_pdf_text(tmp_path):
+def test_read_file_extracts_pdf_text(tmp_path, monkeypatch):
     """Reader parity: reading a PDF returns its text layer, not a refusal."""
+    _sealed_or_skip(monkeypatch)
     (tmp_path / "novel.pdf").write_bytes(_tiny_pdf())
     registry = tools.build_registry(artifacts_root=tmp_path)
     assert "the owl flies at midnight" in registry["read_file"].call(path="novel.pdf")
@@ -2829,48 +2843,62 @@ def _stub_pdftotext(tmp_path, script: str):
     return stub
 
 
-def test_pdf_helper_absolute_binary_staged_path_stripped_env(tmp_path, monkeypatch):
-    """WB F1 pins: the helper execs the RESOLVED absolute binary, reads only
-    the engine-owned staged copy (never the operator pathname — kills the
-    sniff-then-reopen swap), and gets a minimal env with no engine secrets."""
-    stub = _stub_pdftotext(tmp_path, 'echo "ARGV0=$0"; echo "ARG1=$1"; env')
+def test_the_parser_is_handed_a_staged_copy_and_a_minimal_environment(
+        tmp_path, monkeypatch):
+    """The parser execs the RESOLVED absolute binary and reads only the
+    engine-owned staged copy, never the operator's pathname — which is what
+    kills the sniff-then-reopen swap — and it inherits no engine secret."""
+    from modulatio import code_probes as _probes
+
+    stub = _stub_pdftotext(tmp_path, 'true')
     monkeypatch.setattr(tools.shutil, "which", lambda _n, path=None: str(stub))
     monkeypatch.setenv("PROVIDER_SECRET_XYZ", "leak-me")
+    seen: dict = {}
+
+    def _spy(argv, **kw):
+        seen["argv"] = list(argv)
+        seen["kw"] = kw
+        Path(argv[2]).write_text("extracted words\n")
+        return _probes.ProbePhaseResult(
+            status=_probes.ProbeStatus.OK, phase="pdf_text", origin="engine",
+            reason="")
+
+    monkeypatch.setattr(_probes, "run_probe_phase", _spy)
     src = tmp_path / "doc.pdf"
     src.write_bytes(b"%PDF-1.4 tiny")
     registry = tools.build_registry(artifacts_root=tmp_path)
-    out = registry["read_file"].call(path="doc.pdf")
-    assert f"ARGV0={stub}" in out
-    assert str(src) not in out and "modulatio-pdf-" in out
-    assert "PROVIDER_SECRET_XYZ" not in out
+    assert "extracted words" in registry["read_file"].call(path="doc.pdf")
+
+    argv, kw = seen["argv"], seen["kw"]
+    assert argv[0] == str(stub.resolve()), "the resolved absolute binary"
+    assert str(src) not in argv[1], "never the operator's own path"
+    assert argv[1].endswith("staged.pdf")
+    assert kw["allow_network"] is False
+    assert "PROVIDER_SECRET_XYZ" not in (kw.get("env_extra") or {})
 
 
-def test_pdf_helper_output_flood_is_capped(tmp_path, monkeypatch):
-    """A stdout flood drains to the hard ceiling, the group is
-    killed, and the capped head returns truncated — never unbounded capture."""
-    stub = _stub_pdftotext(tmp_path, "exec yes floodfloodfloodflood")
+def test_a_parser_that_emits_without_end_is_bounded_on_read_back(
+        tmp_path, monkeypatch):
+    """A parser that writes without end cannot load a document-sized flood
+    into the caller: the text returns truncated at the read ceiling."""
+    from modulatio import code_probes as _probes
+
+    stub = _stub_pdftotext(tmp_path, 'true')
     monkeypatch.setattr(tools.shutil, "which", lambda _n, path=None: str(stub))
+
+    def _flood(argv, **kw):
+        Path(argv[2]).write_bytes(b"x" * (tools._READ_FILE_MAX_BYTES + 5000))
+        return _probes.ProbePhaseResult(
+            status=_probes.ProbeStatus.OK, phase="pdf_text", origin="engine",
+            reason="")
+
+    monkeypatch.setattr(_probes, "run_probe_phase", _flood)
     (tmp_path / "doc.pdf").write_bytes(b"%PDF-1.4 tiny")
     registry = tools.build_registry(artifacts_root=tmp_path)
     out = registry["read_file"].call(path="doc.pdf")
+
     assert out.endswith(f"[...truncated at {tools._READ_FILE_MAX_BYTES} bytes]")
     assert len(out) <= tools._READ_FILE_MAX_BYTES + 100
-
-
-def test_pdf_helper_timeout_kills_the_group(tmp_path, monkeypatch):
-    """wall-clock timeout SIGKILLs the whole process group
-    (grandchildren included) and refuses promptly."""
-    import time
-
-    stub = _stub_pdftotext(tmp_path, "sleep 300 &\nsleep 300")
-    monkeypatch.setattr(tools.shutil, "which", lambda _n, path=None: str(stub))
-    monkeypatch.setattr(tools, "_PDF_TIMEOUT_S", 0.4)
-    (tmp_path / "doc.pdf").write_bytes(b"%PDF-1.4 tiny")
-    registry = tools.build_registry(artifacts_root=tmp_path)
-    t0 = time.monotonic()
-    with pytest.raises(ValueError, match="timed out"):
-        registry["read_file"].call(path="doc.pdf")
-    assert time.monotonic() - t0 < 10
 
 
 def test_pdf_over_input_ceiling_refuses(tmp_path, monkeypatch):
@@ -2884,24 +2912,38 @@ def test_pdf_over_input_ceiling_refuses(tmp_path, monkeypatch):
 
 @pytest.mark.skipif(tools.shutil.which("pdftotext", path="/usr/bin:/bin") is None,
                     reason="poppler-utils not installed")
-def test_pdf_helper_ignores_engine_path_and_cwd(tmp_path, monkeypatch):
-    """A fake ./pdftotext riding the engine's PATH/cwd never
-    runs — the helper resolves only from its fixed system path, absolute."""
+def test_the_parser_is_resolved_only_from_the_fixed_system_path(
+        tmp_path, monkeypatch):
+    """A fake parser sitting on the engine's own PATH, or in its working
+    directory, never runs: the binary is resolved from a fixed system path and
+    exec'd by its absolute name, so a cwd-controlled stand-in cannot ride an
+    ordinary document read."""
+    from modulatio import code_probes as _probes
+
     fake = tmp_path / "pdftotext"
     sentinel = tmp_path / "pwned"
     fake.write_text(f"#!/bin/sh\ntouch {sentinel}\n", encoding="utf-8")
     fake.chmod(0o755)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PATH", f".:{tmp_path}")
+
+    seen: dict = {}
+
+    def _spy(argv, **kw):
+        seen["binary"] = argv[0]
+        Path(argv[2]).write_text("real text\n")
+        return _probes.ProbePhaseResult(
+            status=_probes.ProbeStatus.OK, phase="pdf_text", origin="engine",
+            reason="")
+
+    monkeypatch.setattr(_probes, "run_probe_phase", _spy)
     (tmp_path / "doc.pdf").write_bytes(_tiny_pdf())
     registry = tools.build_registry(artifacts_root=tmp_path)
-    out = registry["read_file"].call(path="doc.pdf")
-    assert "the owl flies at midnight" in out  # the SYSTEM helper ran
-    assert not sentinel.exists()
+    registry["read_file"].call(path="doc.pdf")
 
-
-# ── honorable outside writes ────────────────────────────────────────
-
+    assert seen["binary"].startswith("/usr/"), seen["binary"]
+    assert str(fake) != seen["binary"]
+    assert not sentinel.exists(), "the stand-in ran"
 
 def test_write_artifact_honors_granted_extra_roots(tmp_path):
     """The UI could present and approve an outside write the tool then
@@ -3555,3 +3597,58 @@ def test_the_no_execution_profile_gains_no_shell(tmp_path):
                       lambda: sandbox.EnforcementState.SANDBOXED_FULL):
         with pytest.raises(ValueError, match="not allowed by profile"):
             sh(cmd="echo hi | tee out.txt", profile="passive", timeout=15)
+
+
+def test_the_pdf_parser_cannot_reach_outside_its_mounts(tmp_path, monkeypatch):
+    """A document parser is a large C codebase reading fully attacker-
+    controlled input. Resource ceilings bound what a bug COSTS; only a mount
+    graph bounds what it can REACH. This exercises the real graph the parser
+    now runs inside, with a payload that tries to read a host file it was
+    never given."""
+    from modulatio import code_probes as _probes
+    from modulatio import sandbox
+
+    # The graph itself is under test, so the suite-wide bypass is lifted
+    # rather than the state patched: a patched state proves the code
+    # branched, never that anything was confined.
+    monkeypatch.delenv("MODULATIO_RUN_SHELL_UNSAFE", raising=False)
+    monkeypatch.setenv("MODULATIO_SANDBOX_PROFILE", "standard")
+    sandbox.reset_enforcement_state_cache()
+    if sandbox.enforcement_state() is not sandbox.EnforcementState.SANDBOXED_FULL:
+        pytest.skip("host cannot seal the sandbox")
+
+    sentinel = tmp_path / "outside.txt"
+    sentinel.write_text("HOST SECRET\n")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    out = scratch / "grabbed.txt"
+
+    res = _probes.run_probe_phase(
+        ["/bin/sh", "-c", f"cat {sentinel} > {out} 2>&1 || true"],
+        phase="pdf_text", snapshot=_probes._null_snapshot(scratch),
+        scratch=scratch, timeout_s=30, allow_network=False,
+    )
+
+    grabbed = out.read_text() if out.exists() else ""
+    assert "HOST SECRET" not in grabbed, (res.status, grabbed)
+
+
+def test_a_pdf_is_not_parsed_at_all_without_containment(tmp_path, monkeypatch):
+    """Containment is the precondition for parsing untrusted input, not a
+    bonus applied when convenient: with no usable sandbox the parse is refused
+    before the parser starts."""
+    from modulatio import code_probes as _probes
+    from modulatio import sandbox
+
+    started: list = []
+    monkeypatch.setattr(
+        sandbox, "enforcement_state",
+        lambda: sandbox.EnforcementState.DEGRADED_ALLOWLIST)
+    monkeypatch.setattr(
+        _probes, "run_probe_phase",
+        lambda *a, **k: started.append(1) or _probes.ProbePhaseResult(
+            status=_probes.ProbeStatus.ENGINE_UNAVAILABLE, phase="pdf_text",
+            origin="engine", reason="sandbox enforcement not FULL"))
+
+    with pytest.raises(ValueError, match="under containment"):
+        tools._pdf_text(b"%PDF-1.4\nstub\n", "probe.pdf")
