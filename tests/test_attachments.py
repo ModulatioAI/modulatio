@@ -379,5 +379,3 @@ def test_bytes_must_come_from_inside_the_folder_that_authorized_them(
     assert attachments.build_attachment(
         granted / "note.txt", kind="document",
         beneath=granted).content == "AUTHORIZED\n"
-
-

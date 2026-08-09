@@ -139,7 +139,7 @@ modulatio export <FILE> [--include-secrets] [--code CODE [--code CODE ...]]
 
 By default, secrets (vault `.env` contents, Telegram bot token) are **stripped** from the backup. The resulting `.modulatio` is share-safe — you can email it, attach it to a bug report, or commit it to a shared sync location. After importing, re-authenticate providers and re-set the Telegram token.
 
-To produce a self-contained backup that re-imports without re-auth, pass `--include-secrets`. The CLI prints a clear warning to stderr when this flag is used.
+To produce a self-contained backup that carries the API-key store (provider sign-ins are not carried; a restore signs in again), pass `--include-secrets`. The CLI prints a clear warning to stderr when this flag is used.
 
 `--code` filters to specific project codes; repeat for multiple. By default all projects under the vault root are included.
 

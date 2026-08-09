@@ -215,9 +215,9 @@ def export_backup(
     Includes config files + per-project vault snapshots. By default
     (``strip_secrets=True``) omits .env contents and the Telegram bot
     token so the export is share-safe. Set ``strip_secrets=False`` to
-    include them — the resulting backup re-imports without re-auth
-    but is no longer share-safe (the CLI emits a warning when this
-    path is taken).
+    include the API-key store — no longer share-safe (the CLI emits a
+    warning when this path is taken). Provider sign-ins are left behind
+    even then, so a restore signs in again.
 
     ``project_codes`` filters which projects are snapshotted; defaults
     to all projects under the vault root.
@@ -309,9 +309,9 @@ def export_backup(
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(payload, encoding="utf-8")
     else:
-        # Backup contains vault_env + telegram bot token + provider
-        # OAuth state. write_secret_file gives 0600 throughout, no
-        # world-readable window.
+        # The archive carries the API-key store and the messaging token —
+        # NOT provider sign-ins, which are deliberately left behind.
+        # write_secret_file gives 0600 throughout, no world-readable window.
         config.write_secret_file(out, payload)
     return out
 

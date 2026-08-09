@@ -2073,9 +2073,11 @@ def export(
     """Export Modulatio configuration + project vaults to a .modulatio backup.
 
     Default behavior strips secrets so the resulting file is
-    share-safe. Pass ``--include-secrets`` for a self-contained backup
-    that re-imports without re-auth (the CLI prints a clear warning
-    in that case so the file isn't accidentally shared).
+    share-safe. Pass ``--include-secrets`` to carry the API-key store as
+    well (the CLI prints a clear warning so the file isn't accidentally
+    shared). Provider sign-ins are never carried — they are bound to this
+    install and this machine, and a backup travels — so a restore signs in
+    again.
     """
     if include_secrets:
         typer.echo(

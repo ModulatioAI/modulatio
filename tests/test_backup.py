@@ -724,3 +724,37 @@ def test_import_current_version_still_works(tmp_path):
     out = _write_backup(tmp_path, backup.BACKUP_FORMAT_VERSION)
     summary = backup.import_backup(out)
     assert isinstance(summary, dict)
+
+
+def test_an_archive_carrying_keys_still_leaves_provider_signins_behind(
+        tmp_path, monkeypatch):
+    """Sign-ins are bound to this install and this machine, and a backup
+    travels. A file carrying a live one is a worse thing to send than one
+    carrying none, so the archive says which credentials it holds rather than
+    implying a restore needs no sign-in."""
+    from modulatio import backup, config
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    (tmp_path / "cfg").mkdir()
+    config.set_env_secret("PROVIDER_KEY", "sk-carried")
+    (tmp_path / "cfg" / ".openai_oauth.json").write_text('{"token": "LIVE"}')
+
+    out = backup.export_backup(tmp_path / "b.modulatio", strip_secrets=False)
+    body = out.read_text()
+
+    assert "sk-carried" in body, "the key store rides an include-secrets export"
+    assert "LIVE" not in body, "a provider sign-in was carried"
+    assert '"omits_provider_signins": true' in body.lower()
+
+
+def test_the_docs_do_not_promise_a_restore_without_signing_in(tmp_path):
+    """An operator-facing restore claim is not cosmetic: it decides whether
+    they plan to re-authenticate."""
+    from pathlib import Path
+
+    import modulatio
+
+    pkg = Path(modulatio.__file__).parent
+    for path in (pkg / "backup.py", pkg / "cli.py", pkg / "_docs" / "25-cli.md"):
+        body = path.read_text(encoding="utf-8", errors="replace")
+        assert "re-imports without re-auth" not in body, path.name
