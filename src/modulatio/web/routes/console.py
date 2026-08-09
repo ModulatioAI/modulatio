@@ -173,7 +173,8 @@ def converse(project: str, body: ConverseBody, request: Request) -> dict:
     try:
         try:
             for handle in body.uploads:
-                staged, shown = uploads.consume(handle, project=code)
+                staged, shown = uploads.consume(
+                    handle, project=code, composer=_composer_id(request))
                 claimed.append(staged)
                 # The same constructor a disk load goes through, so an upload
                 # meets one policy rather than a second one written for it: the

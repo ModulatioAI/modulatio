@@ -612,6 +612,42 @@ def declared_build_requires(root: Path) -> "list[str]":
     return [str(r) for r in reqs if isinstance(r, str)]
 
 
+_TARGET_TAGS_CACHE: "frozenset | None" = None
+
+
+def _target_wheel_tags() -> "frozenset | None":
+    """Wheel tags the TARGET interpreter can install, or ``None`` when they
+    cannot be established.
+
+    A wheel's name records the interpreter, ABI and platform it was built for,
+    and one built for another of any of those cannot be installed here — so
+    counting it as satisfying a requirement reports a build that will fail as
+    ready to run, and blames the failure on the deliverable.
+
+    The target runs on this machine, so its platform tags are this process's;
+    only the interpreter version can differ, and that is compared before the
+    engine's own tag set is used for it. When the versions differ, or the
+    target environment cannot be read, ``None`` is returned and callers apply
+    no tag filter — refusing a wheel on a guess would fail builds that work.
+    """
+    global _TARGET_TAGS_CACHE
+    if _TARGET_TAGS_CACHE is None:
+        _TARGET_TAGS_CACHE = frozenset()
+        env = _pep508_env()
+        if env:
+            import platform as _platform
+            try:
+                from packaging import tags as _packaging_tags
+            except ImportError:
+                return None
+            here_version = ".".join(_platform.python_version_tuple()[:2])
+            if (env.get("python_version") == here_version
+                    and env.get("platform_machine") == _platform.machine()):
+                _TARGET_TAGS_CACHE = frozenset(
+                    str(tag) for tag in _packaging_tags.sys_tags())
+    return _TARGET_TAGS_CACHE or None
+
+
 def _unsatisfiable_build_requirement(
     root: Path, wheelhouse: Path,
 ) -> "str | None":
@@ -624,7 +660,9 @@ def _unsatisfiable_build_requirement(
     and a requirement that does not apply to this interpreter is not required
     at all. So the specifier is honoured, the marker is evaluated against the
     interpreter that will do the building, and a wheel counts only when its own
-    version satisfies the specifier.
+    version satisfies the specifier AND its name says it can be installed by
+    the interpreter that will install it — a wheel built for another
+    interpreter, ABI or platform supplies nothing here.
 
     A declaration that cannot be parsed is the DELIVERABLE's defect, not the
     engine's, and is reported as such rather than as a shortfall here.
@@ -632,11 +670,17 @@ def _unsatisfiable_build_requirement(
     from packaging.requirements import InvalidRequirement, Requirement
     from packaging.utils import InvalidWheelFilename, parse_wheel_filename
 
+    target_tags = _target_wheel_tags()
     available: "dict[str, list]" = {}
     for wheel in wheelhouse.glob("*.whl"):
         try:
-            name, version, _build, _tags = parse_wheel_filename(wheel.name)
+            name, version, _build, wheel_tags = parse_wheel_filename(wheel.name)
         except (InvalidWheelFilename, ValueError):
+            continue
+        # A wheel this interpreter cannot install does not supply the
+        # requirement, however right its name and version are.
+        if target_tags is not None and not any(
+                str(tag) in target_tags for tag in wheel_tags):
             continue
         available.setdefault(str(name).replace("_", "-").lower(), []).append(version)
 

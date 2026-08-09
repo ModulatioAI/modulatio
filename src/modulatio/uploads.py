@@ -117,22 +117,29 @@ def stage_upload(
     return handle, shown
 
 
-def consume(handle: str, *, project: str) -> "tuple[Path, str]":
+def consume(handle: str, *, project: str, composer: str = "") -> "tuple[Path, str]":
     """Claim a handle exactly once, returning ``(staged_path, display_name)``.
 
-    The project is checked as well as the handle: a token is unguessable, but
-    a stolen one must not reach a project its holder is not already working
-    in. The entry is removed before returning, so a replay finds nothing —
-    the caller owns the file from here and deletes it when done.
+    The project and the composer are both checked, not only the handle. A
+    token is unguessable, but a stolen one must not reach a project its holder
+    is not already working in — and within one project, two browsers are two
+    people: bytes one of them attached are not the other's to send, however
+    the handle was come by. Cleanup is already scoped this way, so claiming
+    scoped only to the project let a turn send what it could never discard.
+
+    The entry is removed before returning, so a replay finds nothing — the
+    caller owns the file from here and deletes it when done.
 
     Raises :class:`UploadRefused` when the handle is unknown, expired, already
-    claimed, or belongs to another project. All four are one message: telling
-    a caller which of them happened confirms that some other handle exists.
+    claimed, or belongs to another project or composer. All of them are one
+    message: telling a caller which happened confirms that some other handle
+    exists.
     """
     with _lock:
         _expire_locked(time.monotonic())
         item = _pending.get(handle)
-        if item is None or item.project != project:
+        if (item is None or item.project != project
+                or item.composer != composer):
             raise UploadRefused("upload not found; it may have expired")
         _pending.pop(handle, None)
     return item.path, item.display_name

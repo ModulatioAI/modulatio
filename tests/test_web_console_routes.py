@@ -387,11 +387,11 @@ def test_one_composer_finishing_a_turn_does_not_discard_another_s_uploads(
 
     assert uploads.discard_all("web", "tab-a") == 1
 
-    staged, _ = uploads.consume(theirs, project="web")
+    staged, _ = uploads.consume(theirs, project="web", composer="tab-b")
     assert staged.read_bytes() == b"theirs\n"
     import pytest
     with pytest.raises(uploads.UploadRefused):
-        uploads.consume(mine, project="web")
+        uploads.consume(mine, project="web", composer="tab-a")
 
 
 def test_a_refusal_partway_through_a_batch_strands_nothing(
@@ -415,3 +415,23 @@ def test_a_refusal_partway_through_a_batch_strands_nothing(
 
     assert not [p for p in (tmp_path / "cfg" / "uploads").glob("*") if p.is_file()]
     assert not [p for p in (tmp_path / "cfg" / "loaded").glob("*") if p.is_file()]
+
+
+def test_one_composer_cannot_claim_another_s_upload(tmp_path, monkeypatch):
+    """Cleanup was scoped to the composer while claiming was scoped only to
+    the project, so a turn could SEND bytes it could never have discarded.
+    Two browsers on one project are two people on both sides of that."""
+    import pytest
+
+    from modulatio import config, uploads
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    theirs, _ = uploads.stage_upload(
+        b"theirs\n", display_name="b.md", project="web", composer="tab-b")
+
+    with pytest.raises(uploads.UploadRefused):
+        uploads.consume(theirs, project="web", composer="tab-a")
+
+    # Refused, not consumed: the owner can still send their own bytes.
+    staged, _ = uploads.consume(theirs, project="web", composer="tab-b")
+    assert staged.read_bytes() == b"theirs\n"

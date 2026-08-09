@@ -1893,3 +1893,72 @@ def test_a_malformed_requirement_is_the_deliverable_s_defect(tmp_path):
 
     with pytest.raises(cp._MalformedRequirement):
         cp._unsatisfiable_build_requirement(root, wh)
+
+
+def test_a_wheel_built_for_another_platform_supplies_nothing(tmp_path, monkeypatch):
+    """A wheel's name records the interpreter, ABI and platform it was built
+    for. One built for another of any of those cannot be installed here, so
+    counting it as satisfying the requirement reports a build that will fail
+    as ready to run — and the failure then reads as the deliverable's."""
+    wh = tmp_path / "wh"
+    wh.mkdir()
+    # Right name, right version, an ABI and platform this interpreter has not.
+    (wh / "hatchling-1.0.0-cp27-cp27m-win32.whl").write_bytes(b"x")
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['hatchling>=1.0']\n")
+
+    assert cp._target_wheel_tags(), "this host's tag set could not be read"
+    assert cp._unsatisfiable_build_requirement(root, wh) == "hatchling>=1.0"
+
+    # The same name and version as a wheel this interpreter CAN install.
+    (wh / "hatchling-1.0.0-py3-none-any.whl").write_bytes(b"x")
+    assert cp._unsatisfiable_build_requirement(root, wh) is None
+
+
+def test_no_tag_filter_is_applied_when_the_target_cannot_be_read(
+        tmp_path, monkeypatch):
+    """Refusing a wheel on a guess would fail builds that work. When the
+    target environment cannot be read, every wheel counts as it did before —
+    the check adds evidence and never removes a working build."""
+    monkeypatch.setattr(cp, "_TARGET_TAGS_CACHE", None)
+    monkeypatch.setattr(cp, "_pep508_env", lambda: None)
+
+    assert cp._target_wheel_tags() is None
+
+    wh = tmp_path / "wh"
+    wh.mkdir()
+    (wh / "hatchling-1.0.0-cp27-cp27m-win32.whl").write_bytes(b"x")
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['hatchling>=1.0']\n")
+
+    assert cp._unsatisfiable_build_requirement(root, wh) is None
+
+
+def test_no_tag_filter_is_applied_when_the_target_runs_another_python(
+        tmp_path, monkeypatch):
+    """The engine's own tag set describes the engine's interpreter. It stands
+    in for the target's only while the two agree; on a target running another
+    Python it would refuse wheels that interpreter installs perfectly well."""
+    import platform
+
+    monkeypatch.setattr(cp, "_TARGET_TAGS_CACHE", None)
+    monkeypatch.setattr(cp, "_pep508_env", lambda: {
+        "python_version": "2.7",                      # not this process's
+        "platform_machine": platform.machine(),
+    })
+
+    assert cp._target_wheel_tags() is None
+
+    wh = tmp_path / "wh"
+    wh.mkdir()
+    (wh / "hatchling-1.0.0-cp27-cp27m-win32.whl").write_bytes(b"x")
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['hatchling>=1.0']\n")
+
+    assert cp._unsatisfiable_build_requirement(root, wh) is None
