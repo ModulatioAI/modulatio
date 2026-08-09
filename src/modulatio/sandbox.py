@@ -305,6 +305,28 @@ def _probe_policy_shape() -> bool:
     return result.returncode == 0
 
 
+def can_confine() -> bool:
+    """Whether the host CAN confine — the substrate question, separate from
+    the policy question :func:`enforcement_state` answers.
+
+    An operator's choice to run unsandboxed by default does not decide what
+    the host is capable of, and it is not a ceiling on what he may grant. A
+    run that reaches an operator-granted folder is confined on a host that
+    can confine, whatever the default posture says: the grant is honored and
+    the reach is still bounded.
+
+    Shares the one probe cache, so a call taken beside ``enforcement_state``
+    reports the same substrate that state was derived from.
+    """
+    global _POLICY_PROBE_CACHE
+    now = time.monotonic()
+    if _POLICY_PROBE_CACHE is not None and now - _POLICY_PROBE_CACHE[1] < _ENFORCEMENT_TTL_S:
+        return _POLICY_PROBE_CACHE[0]
+    probe_ok = _probe_policy_shape()
+    _POLICY_PROBE_CACHE = (probe_ok, now)
+    return probe_ok
+
+
 def enforcement_state() -> EnforcementState:
     """Compute (or serve cached) the typed enforcement state:
 
@@ -313,17 +335,11 @@ def enforcement_state() -> EnforcementState:
                                 path only; an explicit bypass/off wins)
     - ``DEGRADED_ALLOWLIST``  — everything else (the disclosed soft state)
     """
-    global _POLICY_PROBE_CACHE
     # Policy is read fresh; only the probe behind it may be cached.
     explicit_unsafe = is_bypass_requested() or current_profile() == "off"
     if explicit_unsafe:
         return EnforcementState.DEGRADED_ALLOWLIST
-    now = time.monotonic()
-    if _POLICY_PROBE_CACHE is not None and now - _POLICY_PROBE_CACHE[1] < _ENFORCEMENT_TTL_S:
-        probe_ok = _POLICY_PROBE_CACHE[0]
-    else:
-        probe_ok = _probe_policy_shape()
-        _POLICY_PROBE_CACHE = (probe_ok, now)
+    probe_ok = can_confine()
     if probe_ok:
         return EnforcementState.SANDBOXED_FULL
     return (EnforcementState.REFUSED if is_sandbox_required()

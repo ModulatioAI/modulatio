@@ -691,7 +691,7 @@ def test_widened_exec_refused_without_functional_sandbox(tmp_path, monkeypatch):
     granted = tmp_path / "proj"
     granted.mkdir()
     (granted / "x.py").write_text("print(1)\n")
-    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: False)
+    monkeypatch.setattr(sandbox, "can_confine", lambda: False)
     rs = tools.make_run_shell(art, extra_roots=(granted,))
 
     # widened cwd + no functional sandbox → REFUSE, even with the global bypass set
@@ -726,7 +726,7 @@ def test_widened_exec_via_argv_path_not_bypassable(tmp_path, monkeypatch):
     rs = tools.make_run_shell(art, extra_roots=(granted,))
 
     # widened ARGV + workspace cwd + bypass + NO functional sandbox → REFUSE
-    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: False)
+    monkeypatch.setattr(sandbox, "can_confine", lambda: False)
     monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: True)
     with pytest.raises(RuntimeError, match="widened exec refused"):
         rs(cmd=f"python3 {script}", profile="full", cwd="")
@@ -751,13 +751,18 @@ def test_widened_exec_via_argv_path_not_bypassable(tmp_path, monkeypatch):
     with pytest.raises(_ReachedSandbox):
         rs(cmd=f"python3 {script}", profile="full", cwd="")
 
-    # An explicit bypass cannot buy a widened run its sandbox. Confinement is
-    # what makes a granted folder reachable, so a request to run unsandboxed
-    # and a request to reach outside the workspace are answered together: the
-    # run is refused rather than silently confined against the operator's
-    # stated choice, or silently widened against the sandbox's.
+    # A default posture of running unsandboxed does not withdraw the
+    # operator's grant: on a host that CAN confine, the widened run still
+    # runs, and still runs confined. The grant is his to make.
     monkeypatch.setattr(sandbox, "enforcement_state",
                         lambda: sandbox.EnforcementState.DEGRADED_ALLOWLIST)
+    monkeypatch.setattr(sandbox, "can_confine", lambda: True)
+    with pytest.raises(_ReachedSandbox):
+        rs(cmd=f"python3 {script}", profile="full", cwd="")
+
+    # Only a host with no usable sandbox refuses: the grant widens a mount
+    # graph, and there is none to widen.
+    monkeypatch.setattr(sandbox, "can_confine", lambda: False)
     with pytest.raises(RuntimeError, match="widened exec refused"):
         rs(cmd=f"python3 {script}", profile="full", cwd="")
 

@@ -1666,15 +1666,20 @@ def make_run_shell(
                 "or set MODULATIO_RUN_SHELL_UNSAFE=1 to accept unsandboxed "
                 "execution explicitly."
             )
-        if _widened and not sealed:
-            # An operator-granted folder is reachable only from inside real
-            # confinement; the grant widens the mount graph, not the host.
+        # A run reaching an operator-granted folder is confined wherever the
+        # host CAN confine, whatever the default posture is: the grant is the
+        # operator's to make, and a choice to run unsandboxed by default is
+        # not a ceiling on what he may authorize. Only a host that cannot
+        # confine at all refuses — the grant widens the mount graph, and
+        # without a mount graph there is nothing to widen.
+        _confine = sealed or (_widened and _sandbox.can_confine())
+        if _widened and not _confine:
             raise RuntimeError(
                 "widened exec refused: bwrap sandbox unavailable. Running "
                 "commands in an operator-granted folder requires a functional "
                 "sandbox (no bypass). Install/repair bubblewrap."
             )
-        if sealed:
+        if _confine:
             run_argv, run_env = _sandbox.build_sandboxed_argv(
                 _payload_argv, artifacts_root, profile=_profile,
                 extra_rw_roots=tuple(Path(r) for r in extra_roots),
