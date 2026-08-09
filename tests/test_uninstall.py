@@ -777,15 +777,9 @@ def test_the_fallback_stops_entry_points_without_killing_mentions(tmp_path):
         decoy.wait(timeout=10)
 
 
-def test_a_process_that_cannot_be_signalled_stops_the_uninstall(tmp_path):
-    """A signal failing for any reason other than "no such process" leaves the
-    process running and the uninstaller unable to stop it. Treating that as an
-    exit is fail-open: files come off disk while a server still serves them.
-    A probe cannot tell the two apart, so the error itself is read.
-
-    The refusal is driven deterministically — a stand-in signal that returns
-    the permission error — rather than by finding a real process this user may
-    not touch, which differs per host."""
+def test_a_process_that_survives_the_signal_stops_the_uninstall(tmp_path):
+    """A process still in the table after the signal blocks deletion. This is
+    the SURVIVOR branch; the signal-error branch has its own pin below."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
     (bindir / "ps").write_text(
@@ -911,3 +905,148 @@ def test_an_unreadable_process_list_stops_the_uninstall(tmp_path):
     assert r.returncode == 1, r.stdout
     assert "process list could not be read" in r.stderr
     assert cache.exists(), "it deleted without being able to see the process table"
+
+
+def test_a_signal_error_other_than_absence_stops_the_uninstall(tmp_path):
+    """A signal fails identically when the process is gone and when it may not
+    be touched, so reading the failure as an exit removes files out from under
+    something still running. The error text itself is what separates them.
+
+    Driven through a shell-function seam: the signal is a shell builtin, so a
+    stand-in on PATH never reaches it and a pin that tries reports the wrong
+    branch."""
+    seam = tmp_path / "seam.sh"
+    seam.write_text(
+        "kill() {\n"
+        '  echo "kill: (${1:-?}) - Operation not permitted" >&2\n'
+        "  return 1\n"
+        "}\n", encoding="utf-8")
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "ps").write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        '  *args*) echo "  4242 /usr/local/bin/modulatio-api" ;;\n'
+        '  *) echo "" ;;\n'          # gone from the survivor reread
+        "esac\n", encoding="utf-8")
+    (bindir / "ps").chmod(0o755)
+
+    cache = tmp_path / ".cache" / "modulatio"
+    cache.mkdir(parents=True)
+    env = _fake_home_env(tmp_path)
+    env["MODULATIO_UNINSTALL_STANDALONE"] = "1"
+    env["MODULATIO_SYSTEMD_ROOTS"] = str(tmp_path / "no-units")
+    env["PATH"] = f"{bindir}:{env.get('PATH', '/usr/bin:/bin')}"
+    env["BASH_ENV"] = str(seam)
+
+    r = subprocess.run(
+        ["bash", str(UNINSTALL_SH), "--keep-package", "--yes"],
+        env=env, stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, timeout=60,
+    )
+
+    assert r.returncode == 1, r.stdout
+    assert "cannot stop Modulatio process 4242" in r.stderr
+    assert "Operation not permitted" in r.stderr
+    # Not the survivor branch: the reread reports nothing alive.
+    assert "did not stop" not in r.stderr
+    assert cache.exists(), "it deleted after a signal it could not deliver"
+
+
+def test_the_identifying_inventory_failing_alone_stops_the_uninstall(tmp_path):
+    """The two process listings answer different questions. A listing that
+    never ran looks exactly like a machine with nothing on it, and the later
+    reread cannot catch that — so both must fail closed independently."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "ps").write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        '  *args*) exit 1 ;;\n'      # the identifying listing fails
+        '  *) echo "" ;;\n'          # the reread succeeds, reporting nothing
+        "esac\n", encoding="utf-8")
+    (bindir / "ps").chmod(0o755)
+
+    cache = tmp_path / ".cache" / "modulatio"
+    cache.mkdir(parents=True)
+    env = _fake_home_env(tmp_path)
+    env["MODULATIO_UNINSTALL_STANDALONE"] = "1"
+    env["MODULATIO_SYSTEMD_ROOTS"] = str(tmp_path / "no-units")
+    env["PATH"] = f"{bindir}:{env.get('PATH', '/usr/bin:/bin')}"
+
+    r = subprocess.run(
+        ["bash", str(UNINSTALL_SH), "--keep-package", "--yes"],
+        env=env, stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, timeout=60,
+    )
+
+    assert r.returncode == 1, r.stdout
+    assert "process list could not be read" in r.stderr
+    assert cache.exists(), "it deleted without being able to identify processes"
+
+
+def test_the_callers_noclobber_setting_survives_a_backup(tmp_path):
+    """Clearing the option unconditionally turns it off for a caller who had
+    deliberately turned it on, so a later redirect of theirs silently
+    truncates a file it would have refused."""
+    cfg = tmp_path / ".config" / "modulatio"
+    cfg.mkdir(parents=True)
+    (cfg / ".env").write_text("KEY=value\n")
+
+    for start, expected in (("set -o noclobber", "on"), ("set +o noclobber", "off")):
+        probe = (
+            f"{start}\n"
+            f"source {UNINSTALL_SH}\n"
+            f'CONFIG_DIR="{cfg}"; VAULT="{tmp_path}/vault"\n'
+            f'DELIVERABLES="{tmp_path}/deliv"\n'
+            "REMOVE_SETTINGS=1; REMOVE_PROJECTS=0; REMOVE_DELIVERABLES=0\n"
+            "backup_userdata >/dev/null 2>&1\n"
+            'case "$-" in *C*) echo on ;; *) echo off ;; esac\n'
+        )
+        r = subprocess.run(["bash", "-c", probe], env=_fake_home_env(tmp_path),
+                           capture_output=True, text=True, timeout=30)
+        assert r.stdout.strip().endswith(expected), (start, r.stdout, r.stderr)
+
+
+def test_the_destination_swapped_mid_write_is_caught_dynamically(tmp_path):
+    """A descriptor outlives the name it was opened through, so a name
+    repointed at an outside file after the write leaves verification reading a
+    valid archive while the reported path is something else entirely — and the
+    deletion that follows would have no recoverable backup behind it.
+
+    The swap is driven at the real command boundary with a DEBUG trap rather
+    than asserted about the source, so this stays a regression against the
+    running script and not against its current wording."""
+    cfg = tmp_path / ".config" / "modulatio"
+    cfg.mkdir(parents=True)
+    (cfg / ".env").write_text("KEY=secret-value\n")
+    victim = tmp_path / "victim.txt"
+    victim.write_text("PRECIOUS", encoding="utf-8")
+
+    probe = (
+        f"source {UNINSTALL_SH}\n"
+        f'CONFIG_DIR="{cfg}"; VAULT="{tmp_path}/vault"\n'
+        f'DELIVERABLES="{tmp_path}/deliv"\n'
+        "REMOVE_SETTINGS=1; REMOVE_PROJECTS=0; REMOVE_DELIVERABLES=0\n"
+        # Fires once, after the descriptor exists and before the bytes land.
+        "swapped=0\n"
+        "swap() {\n"
+        '  case "$BASH_COMMAND" in\n'
+        "    tar\\ -cz*)\n"
+        '      [ "$swapped" = 1 ] && return 0\n'
+        "      swapped=1\n"
+        f'      rm -f "$dest"; ln -s "{victim}" "$dest" ;;\n'
+        "  esac\n"
+        "}\n"
+        "trap swap DEBUG\n"
+        "set -T\n"
+        "backup_userdata; echo \"EXIT=$?\"\n"
+    )
+    r = subprocess.run(["bash", "-c", probe], env=_fake_home_env(tmp_path),
+                       capture_output=True, text=True, timeout=60)
+
+    assert "EXIT=0" not in r.stdout, f"it accepted a swapped destination: {r.stdout}"
+    assert victim.read_text(encoding="utf-8") == "PRECIOUS", "the victim was overwritten"
+    assert "secret-value" not in victim.read_text(encoding="utf-8")
+    assert "no longer names the archive" in r.stderr, r.stderr

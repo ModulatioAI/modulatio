@@ -2243,7 +2243,11 @@ def test_forged_contract_refuses_at_every_authority_consumer(
 
     smoke = orch._convention_import_smoke(
         [bound], lambda *a, **k: (0, "", ""))
-    assert smoke is not None and smoke[0] is not True
+    # Named exactly: "not True" admitted every state AND the raw boolean that
+    # used to leak out of here, so it asserted nothing the caller cares about.
+    # The caller routes by identity, so only the binding state binds.
+    assert smoke is not None
+    assert smoke[0] is _TE.HARD_FAILURE, smoke[1]
 
 
 def test_replan_over_a_broken_sealed_record_conflicts(project, monkeypatch):

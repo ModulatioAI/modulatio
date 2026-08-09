@@ -1894,3 +1894,61 @@ def test_the_evidence_block_does_not_render_a_reported_success_as_passed():
     # A failure still speaks plainly: nothing is gained by reporting one
     # falsely, so it binds.
     assert "FAILED" in fmt((_TE.HARD_FAILURE, "1 failed"))
+
+
+def test_every_typed_evidence_producer_returns_a_state():
+    """Three functions share one result contract, and a caller routes on it by
+    identity — so a raw boolean returned by any of them matches no state and
+    falls through the branch that was supposed to bind it. Checked at every
+    return the function itself owns, not by looking for the type's name."""
+    import ast
+    from pathlib import Path
+
+    import modulatio
+
+    src = (Path(modulatio.__file__).parent / "orchestration.py").read_text()
+    tree = ast.parse(src)
+    producers = {"_goal_execution_probe", "_goal_pytest_gate",
+                 "_convention_import_smoke"}
+    seen: set = set()
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name not in producers:
+            continue
+        seen.add(node.name)
+        # Returns belonging to THIS function — a nested helper carries its own
+        # contract and is not part of this one.
+        nested = {n for d in ast.walk(node)
+                  if isinstance(d, ast.FunctionDef) and d is not node
+                  for n in ast.walk(d)}
+        for ret in (n for n in ast.walk(node)
+                    if isinstance(n, ast.Return) and n not in nested):
+            value = ret.value
+            if value is None or (isinstance(value, ast.Constant)
+                                 and value.value is None):
+                continue                      # not applicable — the whole result
+            if isinstance(value, ast.Name):
+                continue                      # a state already decided elsewhere
+            assert isinstance(value, ast.Tuple), (
+                f"{node.name}:{ret.lineno} returns a non-tuple result")
+            first = value.elts[0]
+            assert not isinstance(first, ast.Constant), (
+                f"{node.name}:{ret.lineno} returns the raw value "
+                f"{first.value!r} where a state belongs — a caller routing by "
+                f"identity will not recognise it")
+
+    assert seen == producers, f"a typed producer was not found: {producers - seen}"
+
+
+def test_the_evidence_contract_is_not_described_in_the_old_vocabulary():
+    """A docstring still promising a boolean tuple sends the next reader to
+    write one."""
+    import inspect
+
+    from modulatio.orchestration import Orchestrator
+
+    for name in ("_goal_execution_probe", "_goal_pytest_gate",
+                 "_convention_import_smoke"):
+        doc = inspect.getdoc(getattr(Orchestrator, name)) or ""
+        for withdrawn in ("(True, report)", "(False, report)", "(None, reason)"):
+            assert withdrawn not in doc, f"{name} still documents {withdrawn}"

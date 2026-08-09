@@ -13899,10 +13899,12 @@ class Orchestrator:
     ) -> "tuple[TestEvidence, str] | None":
         """Import each sealed convention contract's declared module from its
         declared layout, through the same sandboxed ``run_shell`` the pytest
-        gate uses. ``None`` = no applicable contract (no witnessed package
-        claim to check); ``(None, reason)`` = could not run (UNAVAILABLE);
-        ``(False, report)`` = the declared component does not import —
-        conformance RED regardless of producer test results."""
+        gate uses. ``None`` when no contract applies — no witnessed package
+        claim to check. Otherwise a state: ``UNAVAILABLE`` when the check could
+        not run, ``HARD_FAILURE`` when the declared component does not import
+        or its authority is not sealed content, and ``ADVISORY_SUCCESS`` when
+        every declared module imported. This check is the ENGINE's own, so its
+        failure binds regardless of what the producer's tests reported."""
         from modulatio import conventions as _conv
         contracts = []
         for gid in sorted({t.goal_id for t in tasks}):
@@ -13917,8 +13919,8 @@ class Orchestrator:
                 if why_invalid is not None:
                     # Conformance cannot be checked against authority that
                     # is not sealed content: that is RED, never a pass.
-                    return (False, f"convention authority is unusable: "
-                                   f"{why_invalid}")
+                    return (TestEvidence.HARD_FAILURE,
+                            f"convention authority is unusable: {why_invalid}")
                 contracts.append(c)
         if not contracts:
             return None

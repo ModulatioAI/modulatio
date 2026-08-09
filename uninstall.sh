@@ -90,16 +90,25 @@ backup_userdata() {
   # interval. tar then overwrites whatever it points at and the verification
   # accepts the victim as the archive. Holding one descriptor means the bytes
   # reach the inode that was created and nowhere else.
-  local prev_umask; prev_umask="$(umask)"
+  # The caller's shell options are restored to what they WERE, not to what
+  # this function happens to want. Clearing noclobber unconditionally turns it
+  # off for a caller who had deliberately turned it on, so a later redirect of
+  # theirs silently truncates a file it would have refused.
+  local prev_umask prev_noclobber
+  prev_umask="$(umask)"
+  case "$-" in *C*) prev_noclobber=on ;; *) prev_noclobber=off ;; esac
+  _restore_shell_state() {
+    [ "$prev_noclobber" = on ] || set +o noclobber
+    umask "$prev_umask"
+  }
   umask 077
   set -o noclobber
   if ! exec 3> "$dest"; then
-    set +o noclobber; umask "$prev_umask"
+    _restore_shell_state
     echo "  ! backup destination could not be created safely: $dest" >&2
     return 1
   fi
-  set +o noclobber
-  umask "$prev_umask"
+  _restore_shell_state
   if ! tar -cz "${items[@]}" 2>/dev/null >&3; then
     exec 3>&-
     echo "  ! backup FAILED — refusing to remove anything" >&2
@@ -316,6 +325,16 @@ main() {
   # and stopping it would be worse than the leftover this is hunting. An entry
   # point is either the executable itself or the script an interpreter was
   # handed as its first argument.
+  # The identifying inventory is captured and CHECKED before it is parsed.
+  # Read through a process substitution its failure status is discarded, so a
+  # listing that never ran looks exactly like a machine with nothing on it —
+  # and the later PID-only reread cannot catch that, because it answers a
+  # different question. Both inventories fail closed.
+  local process_rows
+  if ! process_rows="$(ps -eo pid=,args= 2>/dev/null)"; then
+    echo "Refusing to uninstall — the process list could not be read, so a live Modulatio process cannot be ruled out." >&2
+    exit 1
+  fi
   local leftover=""
   while read -r pid a0 a1 _rest; do
     case "$pid" in ''|*[!0-9]*) continue ;; esac
@@ -339,7 +358,7 @@ main() {
       esac
     fi
     leftover="$leftover$pid "
-  done < <(ps -eo pid=,args= 2>/dev/null)
+  done <<<"$process_rows"
   # A process that will not stop must not be followed by deletion: removing
   # files from under a live server is the state this refuses to create. The
   # process table is re-read rather than probed with a signal, because a probe
