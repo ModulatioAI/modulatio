@@ -519,6 +519,12 @@ class AgentPanePanel(Vertical):
                 f"slice. ({escape(str(exc))})"
             )
             return
+        except (ValueError, OSError) as exc:
+            # A refused load — over the cap, a link, something that is not a
+            # regular file, or unreadable. Each already names its own blocker
+            # and remedy; an uncaught one takes the pane down instead.
+            log.write(f"[bold red]Attach failed:[/] {escape(str(exc))}")
+            return
         self._attachments.append(att)
         self._refresh_status()
         log.write(

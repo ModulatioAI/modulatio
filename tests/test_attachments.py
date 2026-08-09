@@ -143,10 +143,12 @@ def test_replacing_the_source_after_loading_changes_nothing(tmp_path, monkeypatc
     assert att.staged_path.read_text() == "original bytes\n"
 
 
-def test_a_symlink_is_not_followed_when_loading(tmp_path, monkeypatch):
-    """The regular-file check runs on the OPEN DESCRIPTOR, not the path: a
-    check against a name answers for whatever it pointed at a moment ago,
-    which is a different question from what is now being read."""
+def test_a_symlink_is_refused_rather_than_loaded_through(tmp_path, monkeypatch):
+    """A name that points elsewhere can point somewhere else by the next open,
+    so what was loaded is not what was checked. The refusal names the remedy
+    rather than loading the target silently."""
+    import pytest
+
     from modulatio import attachments, config
 
     monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
@@ -155,8 +157,57 @@ def test_a_symlink_is_not_followed_when_loading(tmp_path, monkeypatch):
     link = tmp_path / "link.md"
     link.symlink_to(target)
 
-    staged, digest = attachments._stage(link, "document")
-    assert staged is None and digest == ""
+    with pytest.raises(ValueError) as caught:
+        attachments.build_attachment(link, kind="document")
+    assert "symbolic link" in str(caught.value)
+    # The refusal names the link, never the target's bytes or where it led.
+    assert "secret" not in str(caught.value)
+
+
+def test_the_text_comes_from_the_snapshot_not_a_second_read_of_the_path(
+        tmp_path, monkeypatch):
+    """Reading the path for content and the descriptor for the digest asks the
+    same name twice, and the answers can disagree — the text dispatched is then
+    not the bytes that were measured. Proven by making a path read impossible:
+    the load still succeeds, so nothing reached for the path again."""
+    from pathlib import Path as _Path
+
+    from modulatio import attachments, config
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    src = tmp_path / "notes.md"
+    src.write_text("the real body\n")
+
+    def _refuse(*a, **k):
+        raise AssertionError("the path was read a second time")
+
+    monkeypatch.setattr(_Path, "read_text", _refuse)
+    item = attachments.build_attachment(src, kind="document")
+
+    assert item.content == "the real body\n"
+    assert item.size == len("the real body\n")
+    assert item.sha256.startswith("sha256:")
+
+
+def test_a_file_that_grows_past_the_cap_while_copying_is_refused(tmp_path, monkeypatch):
+    """A cap checked against a size read beforehand bounds nothing: the copy
+    that follows is a separate act on a file that may have grown, and a source
+    whose reported size is meaningless could smuggle bytes past the limit."""
+    import pytest
+
+    from modulatio import attachments, config
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    monkeypatch.setenv(attachments._OVERRIDE_ENV, "64")
+    big = tmp_path / "big.md"
+    big.write_bytes(b"x" * 4096)
+
+    with pytest.raises(ValueError) as caught:
+        attachments.build_attachment(big, kind="document")
+    assert "cap" in str(caught.value)
+    # The partial copy does not outlive the refusal.
+    staged = tmp_path / "cfg" / "loaded"
+    assert not [p for p in staged.glob("*") if p.is_file()]
 
 
 def test_an_image_does_not_put_a_host_path_in_the_prompt(tmp_path, monkeypatch):

@@ -28,6 +28,7 @@ text is far past most context windows — and overridable via
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import os
 import stat
@@ -116,33 +117,18 @@ def build_attachment(path: Path, *, kind: AttachmentKind) -> Attachment:
     """
     if not path.exists():
         raise FileNotFoundError(f"attachment not found: {path}")
-    if not path.is_file():
-        # Reject a non-regular file (FIFO / device / socket /
-        # directory). Its ``st_size`` reads 0 so it slips past the size cap
-        # below, and reading it can block or stream unboundedly. A symlink to a
-        # real regular file still passes — ``is_file`` follows the link.
-        raise ValueError(
-            f"attachment {path.name!r} is not a regular file"
-        )
 
     cap = _resolve_cap(
         DEFAULT_MAX_DOCUMENT_BYTES if kind == "document"
         else DEFAULT_MAX_IMAGE_BYTES
     )
-    size = path.stat().st_size
-    if size > cap:
-        raise ValueError(
-            f"attachment {path.name!r} is {size} bytes; exceeds the "
-            f"{kind} cap of {cap} bytes "
-            f"(override via {_OVERRIDE_ENV})."
-        )
-
+    staged, digest, size = _stage(path, cap=cap, kind=kind)
     content: str | None = None
     if kind == "document":
-        # utf-8 with strict errors so binary inputs fail fast.
-        content = path.read_text(encoding="utf-8")
-
-    staged, digest = _stage(path, kind)
+        # Decoded from the SNAPSHOT, so the text dispatched and the bytes
+        # digested are the same bytes. utf-8 with strict errors so binary
+        # inputs fail fast.
+        content = staged.read_bytes().decode("utf-8")
     return Attachment(
         kind=kind,
         path=path,
@@ -164,40 +150,70 @@ def _staging_dir() -> Path:
     return d
 
 
-def _stage(path: Path, kind: AttachmentKind) -> "tuple[Path | None, str]":
-    """Copy the bytes aside and digest them, returning ``(staged, sha256)``.
+def _stage(
+    path: Path, *, cap: int, kind: AttachmentKind,
+) -> "tuple[Path, str, int]":
+    """Copy the bytes aside and digest them: ``(staged, sha256, size)``.
 
-    Opened WITHOUT following symlinks and verified to be a regular file on the
-    OPEN DESCRIPTOR rather than on the path: a check against the path answers
-    for whatever the name pointed at a moment ago, which is a different
-    question from what is now being read.
+    ONE open answers every question — is this a regular file, how large is it,
+    what does it contain, what is its digest. Asking the path twice is what
+    lets the answers disagree: a name checked, then opened again, can point
+    somewhere else by the second open, and the file dispatched is not the file
+    that was measured.
 
-    Best-effort — a snapshot that cannot be taken costs the guarantee, never
-    the attachment, so an operator's file still loads on a filesystem that
-    refuses the copy.
+    Opened WITHOUT following symlinks and verified regular on the DESCRIPTOR
+    rather than the path, since a check against a name answers for whatever it
+    pointed at a moment ago.
+
+    The cap binds WHILE COPYING, not against a size read beforehand: a file
+    that grows between the two is bounded by the copy that is actually
+    happening, and a source whose reported size is meaningless cannot use it
+    to smuggle bytes past the limit.
+
+    Raises ``ValueError`` naming the blocker. A snapshot that cannot be taken
+    fails the load rather than yielding an attachment nothing can vouch for —
+    the guarantee downstream relies on is that it reads these bytes and never
+    the path again.
     """
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError:
-        return None, ""
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.EMLINK):
+            raise ValueError(
+                f"attachment {path.name!r} is a symbolic link; load the file "
+                f"it points at, so what is read cannot be repointed"
+            ) from exc
+        raise ValueError(
+            f"attachment {path.name!r} could not be opened: {exc.strerror}"
+        ) from exc
     try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            return None, ""
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            # A FIFO, device, socket or directory: its reported size is not
+            # its content, and reading it can block or stream without end.
+            raise ValueError(f"attachment {path.name!r} is not a regular file")
         digest = hashlib.sha256()
         dest = _staging_dir() / f"{os.urandom(16).hex()}-{_safe_stem(path.name)}"
         out = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        size = 0
         try:
             with os.fdopen(out, "wb") as sink:
                 while chunk := os.read(fd, 1 << 20):
+                    size += len(chunk)
+                    if size > cap:
+                        raise ValueError(
+                            f"attachment {path.name!r} exceeds the {kind} cap "
+                            f"of {cap} bytes (override via {_OVERRIDE_ENV})."
+                        )
                     digest.update(chunk)
                     sink.write(chunk)
-        except OSError:
+        except (OSError, ValueError):
             dest.unlink(missing_ok=True)
-            return None, ""
-        return dest, f"sha256:{digest.hexdigest()}"
-    except OSError:
-        return None, ""
+            raise
+        return dest, f"sha256:{digest.hexdigest()}", size
+    except OSError as exc:
+        raise ValueError(
+            f"attachment {path.name!r} could not be read: {exc.strerror}"
+        ) from exc
     finally:
         os.close(fd)
 
