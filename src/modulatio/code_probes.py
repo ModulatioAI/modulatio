@@ -612,21 +612,51 @@ def declared_build_requires(root: Path) -> "list[str]":
     return [str(r) for r in reqs if isinstance(r, str)]
 
 
-def _unsatisfiable_build_requirement(root: Path, wheelhouse: Path) -> "str | None":
-    """The first declared build requirement with no wheel in the approved
-    local source, or ``None``. Compared by distribution name, which is what a
-    filename encodes; version constraints are the installer's business."""
-    import re as _re
+def _unsatisfiable_build_requirement(
+    root: Path, wheelhouse: Path,
+) -> "str | None":
+    """The first declared build requirement the approved local source cannot
+    satisfy, or ``None``.
 
-    available = {
-        w.name.split("-", 1)[0].replace("_", "-").lower()
-        for w in wheelhouse.glob("*.whl")
-    }
-    for req in declared_build_requires(root):
-        name = _re.split(r"[<>=!~\[; ]", req.strip(), 1)[0]
-        if name and name.replace("_", "-").lower() not in available:
-            return name
+    Comparing distribution NAMES alone answers a different question than the
+    one asked: a project declaring a version the bundle does not carry is just
+    as unbuildable here as one declaring a backend that is missing entirely,
+    and a requirement that does not apply to this interpreter is not required
+    at all. So the specifier is honoured, the marker is evaluated against the
+    interpreter that will do the building, and a wheel counts only when its own
+    version satisfies the specifier.
+
+    A declaration that cannot be parsed is the DELIVERABLE's defect, not the
+    engine's, and is reported as such rather than as a shortfall here.
+    """
+    from packaging.requirements import InvalidRequirement, Requirement
+    from packaging.utils import InvalidWheelFilename, parse_wheel_filename
+
+    available: "dict[str, list]" = {}
+    for wheel in wheelhouse.glob("*.whl"):
+        try:
+            name, version, _build, _tags = parse_wheel_filename(wheel.name)
+        except (InvalidWheelFilename, ValueError):
+            continue
+        available.setdefault(str(name).replace("_", "-").lower(), []).append(version)
+
+    for raw in declared_build_requires(root):
+        try:
+            req = Requirement(raw)
+        except InvalidRequirement as exc:
+            raise _MalformedRequirement(f"{raw!r}: {exc}") from exc
+        # A requirement whose marker excludes this interpreter is not one the
+        # engine has to supply.
+        if req.marker is not None and not req.marker.evaluate():
+            continue
+        versions = available.get(req.name.replace("_", "-").lower(), [])
+        if not any(v in req.specifier for v in versions):
+            return raw
     return None
+
+
+class _MalformedRequirement(ValueError):
+    """A build requirement the engine cannot parse — a product defect."""
 
 
 def build_wheel_phase(
@@ -660,8 +690,17 @@ def build_wheel_phase(
     # whether the backend it declares exists in the approved local source. A
     # shortfall found here is the engine's, and it is established by text the
     # engine read rather than by anything the build printed.
-    absent = _unsatisfiable_build_requirement(
-        Path(build_target) if build_target else Path(snapshot.path), wh)
+    try:
+        absent = _unsatisfiable_build_requirement(
+            Path(build_target) if build_target else Path(snapshot.path), wh)
+    except _MalformedRequirement as exc:
+        # The declaration is the deliverable's, and one the engine cannot read
+        # is a defect in it — not a shortfall in what the engine could supply.
+        return ProbePhaseResult(
+            status=ProbeStatus.PRODUCT_FAILED, phase="wheel",
+            origin="deliverable",
+            reason=f"declared build requirement is malformed — {exc}",
+        )
     if absent:
         return ProbePhaseResult(
             status=ProbeStatus.ENGINE_UNAVAILABLE, phase="wheel",

@@ -1841,3 +1841,55 @@ def test_a_declared_backend_with_no_wheel_is_named_before_anything_runs(
     assert res.status is cp.ProbeStatus.ENGINE_UNAVAILABLE
     assert "nowhere-backend" in res.reason
     assert not ran, "producer code ran before the shortfall was known"
+
+
+def test_a_declared_version_the_bundle_cannot_supply_is_detected(
+        tmp_path, monkeypatch):
+    """Comparing distribution NAMES answers a different question than the one
+    asked. A project declaring a version the approved source does not carry is
+    exactly as unbuildable here as one naming a backend that is absent."""
+    wh = tmp_path / "wh"
+    wh.mkdir()
+    (wh / "hatchling-1.0.0-py3-none-any.whl").write_bytes(b"x")
+
+    def _root(req: str, name: str):
+        r = tmp_path / name
+        r.mkdir()
+        (r / "pyproject.toml").write_text(f"[build-system]\nrequires = ['{req}']\n")
+        return r
+
+    assert cp._unsatisfiable_build_requirement(
+        _root("hatchling>=9999", "impossible"), wh) == "hatchling>=9999"
+    assert cp._unsatisfiable_build_requirement(
+        _root("hatchling>=1.0", "satisfied"), wh) is None
+
+
+def test_a_requirement_that_does_not_apply_here_is_not_required(
+        tmp_path, monkeypatch):
+    """A requirement whose marker excludes this interpreter is not something
+    the engine has to supply, so treating it as absent would report a shortfall
+    that does not exist."""
+    wh = tmp_path / "wh"
+    wh.mkdir()
+    root = tmp_path / "marked"
+    root.mkdir()
+    (root / "pyproject.toml").write_text(
+        "[build-system]\nrequires = ['nonesuch; python_version < \"3\"']\n")
+
+    assert cp._unsatisfiable_build_requirement(root, wh) is None
+
+
+def test_a_malformed_requirement_is_the_deliverable_s_defect(tmp_path):
+    """The declaration is the deliverable's. One the engine cannot read is a
+    defect in it, not a shortfall in what the engine could have supplied — and
+    the difference decides whether the verdict clamps."""
+    import pytest
+
+    wh = tmp_path / "wh"
+    wh.mkdir()
+    root = tmp_path / "bad"
+    root.mkdir()
+    (root / "pyproject.toml").write_text("[build-system]\nrequires = ['==']\n")
+
+    with pytest.raises(cp._MalformedRequirement):
+        cp._unsatisfiable_build_requirement(root, wh)

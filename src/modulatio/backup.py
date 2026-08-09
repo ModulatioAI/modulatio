@@ -33,10 +33,16 @@ so the resulting ``.modulatio`` is share-safe — it can be emailed,
 committed, or attached to a bug report without leaking credentials.
 Restore is still functional; the user re-authenticates after import.
 
-To produce a self-contained backup that re-imports without re-auth
-(zero-setup restore), pass ``strip_secrets=False`` (or
+To carry the API-key store as well, pass ``strip_secrets=False`` (or
 ``--include-secrets`` from the CLI). The CLI prints a visible
 warning to stderr when ``--include-secrets`` is used.
+
+That covers keys, NOT provider sign-ins. OAuth credentials and the
+web bearer are deliberately left behind even then: they are bound to
+this install and this machine, a backup travels, and a file that
+carries a live sign-in is a worse thing to email than one that
+carries none. A restore therefore signs in again, and saying it
+restores "without re-auth" would promise something it does not do.
 
 Secrets-by-default is a leak vector; explicit opt-in
 is the safer contract. See ``SECURITY.md``.
@@ -288,6 +294,9 @@ def export_backup(
         "telegram_config": telegram_data,
         "setup_state": setup_state_data,
         "vault_env": vault_env,
+        # Named in the file itself, so a restore that asks for a sign-in is a
+        # documented outcome rather than a surprise the operator debugs.
+        "omits_provider_signins": True,
         "vaults": vaults,
         # Count of vault files dropped from this (text-only) backup so the
         # lossiness is recorded durably in the file, not just at log-time.

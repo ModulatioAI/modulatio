@@ -186,3 +186,22 @@ def test_cli_repair_runs_and_exits_on_q(monkeypatch):
     result = CliRunner().invoke(app, ["repair"], input="q\n")
     assert result.exit_code == 0
     assert "Modulatio repair" in result.output
+
+
+def test_a_secrets_reset_removes_every_credential_not_only_the_keys(
+        tmp_path, monkeypatch):
+    """Repair, backup and uninstall each decide what counts as a credential,
+    and a list kept in three places drifts. The way it drifts is that
+    something keeps a secret the operator believed a reset had taken."""
+    from modulatio import config, repair
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
+    for name in (".env", ".openai_oauth.json", ".xai_oauth.json", ".web_token"):
+        (tmp_path / name).write_text("credential\n")
+    keep = tmp_path / "preferences.json"
+    keep.write_text("{}\n")
+
+    listed = {p.name for p in repair._secret_files()}
+    assert {".env", ".openai_oauth.json", ".xai_oauth.json",
+            ".web_token"} <= listed
+    assert "preferences.json" not in listed, "a nonsecret rode the secret tier"

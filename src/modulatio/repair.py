@@ -38,12 +38,13 @@ def _agent_files() -> list[Path]:
 
 
 def _secret_files() -> list[Path]:
-    """Every file holding a credential, including the store the keys
-    themselves live in. Clearing labels and pins while leaving the keys would
-    remove the record of what is configured and keep what it protects."""
+    """Every file holding a credential, plus the labels and pins that describe
+    them. The inventory comes from one place so repair, backup and uninstall
+    cannot each hold a different idea of what a credential is — the way that
+    drifts is that something keeps a secret the operator believed was gone."""
     from modulatio import provider_keys, telegram_notify
 
-    return [config.secrets_path(), telegram_notify.CONFIG_FILE,
+    return [*config.credential_files(), telegram_notify.CONFIG_FILE,
             provider_keys.LABELS_FILE, provider_keys.PINS_FILE]
 
 

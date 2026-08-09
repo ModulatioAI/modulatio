@@ -222,6 +222,22 @@ def write_secret_file(path: Path, content: str) -> None:
         raise
 
 
+def credential_files() -> "list[Path]":
+    """Every file holding a credential, in one place.
+
+    Repair, backup and uninstall each decide what to remove or carry, and each
+    had its own idea of what counts. A list kept in three places drifts, and
+    the way it drifts is that something keeps a credential the operator
+    believed was gone.
+    """
+    return [
+        secrets_path(),
+        CONFIG_DIR / ".openai_oauth.json",
+        CONFIG_DIR / ".xai_oauth.json",
+        CONFIG_DIR / ".web_token",
+    ]
+
+
 def secrets_path() -> Path:
     """THE file secrets and API keys live in.
 
