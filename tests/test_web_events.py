@@ -566,3 +566,26 @@ def test_the_console_capitalizes_an_acronym_role_as_itself():
     end = body.index("\n}")
 
     assert 'return "QC"' in body[:end]
+
+
+def test_the_console_wires_escape_to_the_interrupt_it_advertises():
+    """The chrome hints that Escape interrupts. Advertising an affordance no
+    handler listens for leaves a wedged turn with no way out but killing the
+    process, and the route it would call sitting unread.
+
+    Source-level pin, matching the notice test above: the repo carries no JS
+    harness, and standing one up to drive one binding would cost more than it
+    pins."""
+    from pathlib import Path
+
+    import modulatio.web as web
+
+    static = Path(web.__file__).parent / "static/js"
+    chrome = (static / "app.js").read_text()
+    console = (static / "pages/console.js").read_text()
+
+    assert "Esc</span> interrupt" in chrome, "the hint is the claim"
+    assert 'ev.key === "Escape"' in console, "nothing listens for it"
+    assert "converse/interrupt" in console, "it must reach the route"
+    # The approval modal owns Escape as a fail-closed deny while it is up.
+    assert "if (modal.open) return;" in console

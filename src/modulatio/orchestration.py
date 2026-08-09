@@ -1008,8 +1008,14 @@ def _format_registered_folders() -> str:
     before the feature."""
     from modulatio import config as _config
 
-    folders = _config.list_folders()
-    if not folders:
+    # Records the registry could not classify come back through the reporting
+    # channel rather than in the list, so the block would render as though the
+    # operator had registered nothing there. A registration that cannot be
+    # honored is stated HERE, where the reader is deciding what is reachable,
+    # instead of only in a log they are not looking at.
+    unusable: "list[str]" = []
+    folders = _config.list_folders(on_corrupt=unusable.append)
+    if not folders and not unusable:
         return ""
     mode_words = {
         "ro": "read-only",
@@ -1018,6 +1024,13 @@ def _format_registered_folders() -> str:
         "rw": "read-write (files here may be created/modified during the run)",
     }
     lines = ["", "", "# Registered folders (operator-configured)"]
+    for problem in unusable:
+        # Named, never dropped: a registration the engine cannot read means
+        # nothing there is reachable, which is a different fact from the
+        # operator having registered nothing at all.
+        lines.append(
+            f"- UNUSABLE registration — {problem} — nothing there is "
+            f"reachable until it is corrected")
     for rec in folders:
         entry = ""
         try:

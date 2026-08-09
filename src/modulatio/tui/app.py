@@ -611,6 +611,12 @@ class ModulatioApp(App):
         )
         # Immediate feedback before the first engine event lands.
         self._set_lane_status("stream-team-status", "modulating")
+        # Stamp the run's start as its first activity. Without a seed there is
+        # no age until something happens, so a run that goes quiet BEFORE its
+        # first event — the wedge the rail exists to show — reports no age at
+        # all, which reads as nothing to see.
+        import time as _t
+        self._last_activity_at = _t.monotonic()
         self._kickoff_tick = self.set_interval(1.0, self._update_kickoff_progress)
 
         # A /kickoff … /end job rides whatever's staged on the LEADER chatbox.

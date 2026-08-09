@@ -187,7 +187,12 @@ def mode_status_rows(
     if bypass or profile == "off":
         sandbox = "OFF (unsandboxed — provider secrets exposed)"
     elif not sandbox_available:
-        sandbox = "UNAVAILABLE — shell will be refused"
+        # What actually happens with no usable sandbox and no demand for one:
+        # ordinary work still runs, unconfined, and only a command reaching an
+        # operator-granted folder is refused. Saying "shell will be refused"
+        # promised a wall that is not there.
+        sandbox = ("UNAVAILABLE — commands run unconfined; a granted folder "
+                   "is refused")
     else:
         sandbox = profile or "standard"
     return (f"Access: {access}", f"Sandbox: {sandbox}")

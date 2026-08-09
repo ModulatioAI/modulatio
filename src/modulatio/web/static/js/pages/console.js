@@ -694,6 +694,7 @@ export function mountConsole(page, ctx) {
       // single-use, so a retry after a failure re-attaches nothing.
       const uploads = pendingUploads.splice(0).map((u) => u.handle);
       renderChips();
+      state.thinking = true;
       const { reply } = await api(`/${ctx.project}/converse`, {
         method: "POST", body: { text, uploads },
       });
@@ -702,7 +703,21 @@ export function mountConsole(page, ctx) {
       appendLine(tvLeader, el("div", { class: "stream-line mono error-text" },
         `converse failed — ${err.message}`));
     } finally {
+      state.thinking = false;
       if (!state.running) statusLine.textContent = "standby";
+    }
+  }
+
+  async function interruptTurn() {
+    // Only meaningful while the Leader holds the turn; an idle lane answers
+    // false and a stray key must not disturb it.
+    if (!state.thinking) return;
+    try {
+      const { interrupted } = await api(
+        `/${ctx.project}/converse/interrupt`, { method: "POST" });
+      if (interrupted) statusLine.textContent = "✋ interrupted the Leader";
+    } catch (err) {
+      statusLine.textContent = `✗ interrupt failed — ${err.message}`;
     }
   }
 
@@ -717,6 +732,14 @@ export function mountConsole(page, ctx) {
   });
 
   function onKey(ev) {
+    if (ev.key === "Escape") {
+      // The approval modal owns Escape as a fail-closed deny while it is up,
+      // so the interrupt never competes with it.
+      if (modal.open) return;
+      ev.preventDefault();
+      interruptTurn();
+      return;
+    }
     if (ev.key === "F4") {
       ev.preventDefault();
       flip(state.lane === "leader" ? "team" : "leader");

@@ -295,3 +295,32 @@ def test_unreachable_folder_absent_from_all_grants(orch, tmp_path, monkeypatch):
     reg = orch._staging_tool_registry(tmp_path / "st2")
     with pytest.raises(ValueError):
         reg["read_file"].call(path=str(docs / "a.txt"))
+
+
+def test_a_registration_the_engine_cannot_read_is_named_in_the_block(
+        tmp_path, monkeypatch):
+    """The registry drops what it cannot classify and reports it on a channel
+    the prompt does not read, so the block rendered as though the operator had
+    registered nothing there — a quieter falsehood than saying so. Driven from
+    a real defaults file, not from a patched lister."""
+    import json
+
+    from modulatio import config
+    from modulatio.orchestration import _format_registered_folders
+
+    good = tmp_path / "good"
+    good.mkdir()
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config, "DEFAULTS_FILE", tmp_path / "defaults.json")
+    config.DEFAULTS_FILE.write_text(json.dumps({"folders": [
+        {"name": "good", "path": str(good), "mode": "ro", "kind": "path"},
+        {"name": "broken", "path": str(good), "mode": "sideways",
+         "kind": "path"},
+    ]}))
+    monkeypatch.setattr(config, "_cached_defaults", None)
+
+    block = _format_registered_folders()
+    assert "UNUSABLE" in block
+    assert "broken" in block
+    # The well-formed one still renders.
+    assert 'folder "good"' in block
