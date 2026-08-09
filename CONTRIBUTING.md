@@ -87,6 +87,25 @@ future tooling) can include them in regular triage.
 - For non-trivial changes, sketch the approach in a comment on the
   related issue first — saves rework.
 
+### Removing something that looks unused
+
+"No production caller" is not "unused" — **check the test surface before
+deleting.** Some functions exist so an invariant can be exercised on its own:
+`AuthorizationTransactionState.reconcile` and `.recover_durable` have no caller
+in `src/`, because the readiness check runs their bodies under a single
+transaction. Kept separately, they let recovery and reconciliation be asserted
+apart from each other, which the combined entry point cannot do. Deleting them
+on the strength of an empty caller search costs sixteen authorization cases.
+
+A grep cannot settle this on its own. A function passed as a value — a registry
+entry, a callback — never appears with parentheses, and a short name doubles as
+an ordinary English word in comments. `pytest -q` is the authority: if removing
+something turns the suite red, it was load-bearing, and the failure names what
+it was carrying.
+
+When a seam exists only for the tests, say so in its docstring and say what
+isolating it buys. The next person to audit it will start with the same grep.
+
 ## Testing & evaluation methodology
 
 Two layers: the unit/integration suite (correctness) and the A/B evaluation harness (behavior).
