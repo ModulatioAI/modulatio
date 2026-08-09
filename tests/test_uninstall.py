@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -986,30 +987,112 @@ def test_the_identifying_inventory_failing_alone_stops_the_uninstall(tmp_path):
     assert cache.exists(), "it deleted without being able to identify processes"
 
 
-def test_the_callers_noclobber_setting_survives_a_backup(tmp_path):
-    """Clearing the option unconditionally turns it off for a caller who had
-    deliberately turned it on, so a later redirect of theirs silently
-    truncates a file it would have refused."""
-    cfg = tmp_path / ".config" / "modulatio"
+def _backup_probe(tmp_path, name, prelude, epilogue, dest_exists=False):
+    """Run backup_userdata in a sourced shell with its own HOME, so each case
+    gets a fresh destination name rather than colliding with a prior run's."""
+    home = tmp_path / name
+    cfg = home / ".config" / "modulatio"
     cfg.mkdir(parents=True)
     (cfg / ".env").write_text("KEY=value\n")
+    probe = (
+        f"{prelude}\n"
+        f"source {UNINSTALL_SH}\n"
+        f'HOME="{home}"\n'
+        f'CONFIG_DIR="{cfg}"; VAULT="{home}/vault"\n'
+        f'DELIVERABLES="{home}/deliv"\n'
+        "REMOVE_SETTINGS=1; REMOVE_PROJECTS=0; REMOVE_DELIVERABLES=0\n"
+        "backup_userdata >/dev/null 2>&1; echo \"RC=$?\"\n"
+        f"{epilogue}\n"
+    )
+    env = _fake_home_env(tmp_path)
+    env["HOME"] = str(home)
+    r = subprocess.run(["bash", "-c", probe], env=env,
+                       capture_output=True, text=True, timeout=60)
+    return home, r
 
-    for start, expected in (("set -o noclobber", "on"), ("set +o noclobber", "off")):
-        probe = (
-            f"{start}\n"
-            f"source {UNINSTALL_SH}\n"
-            f'CONFIG_DIR="{cfg}"; VAULT="{tmp_path}/vault"\n'
-            f'DELIVERABLES="{tmp_path}/deliv"\n'
-            "REMOVE_SETTINGS=1; REMOVE_PROJECTS=0; REMOVE_DELIVERABLES=0\n"
-            "backup_userdata >/dev/null 2>&1\n"
-            'case "$-" in *C*) echo on ;; *) echo off ;; esac\n'
-        )
-        r = subprocess.run(["bash", "-c", probe], env=_fake_home_env(tmp_path),
-                           capture_output=True, text=True, timeout=30)
-        assert r.stdout.strip().endswith(expected), (start, r.stdout, r.stderr)
+
+@pytest.mark.parametrize("start,expected", [("set -o noclobber", "on"),
+                                            ("set +o noclobber", "off")])
+def test_a_backup_returns_the_callers_shell_exactly_as_it_found_it(tmp_path, start, expected):
+    """Clearing the option unconditionally turns it off for a caller who had
+    deliberately turned it on, so a later redirect of theirs silently truncates
+    a file it would have refused. The umask is the same kind of borrowed state:
+    the archive needs an owner-only one, the caller did not ask for it."""
+    home, r = _backup_probe(
+        tmp_path, f"home-{expected}", f"umask 022\n{start}",
+        'case "$-" in *C*) echo "NOCLOBBER=on" ;; *) echo "NOCLOBBER=off" ;; esac\n'
+        'echo "UMASK=$(umask)"\n',
+    )
+    assert "RC=0" in r.stdout, r.stdout + r.stderr
+    assert f"NOCLOBBER={expected}" in r.stdout, r.stdout
+    assert "UMASK=0022" in r.stdout, r.stdout
+    archives = list(home.glob("modulatio-uninstall-backup-*.tar.gz"))
+    assert len(archives) == 1, archives
+    assert tarfile.open(archives[0]).getmembers(), "the archive is not readable"
 
 
-def test_the_destination_swapped_mid_write_is_caught_dynamically(tmp_path):
+def test_a_backup_leaves_no_helper_in_the_callers_function_table(tmp_path):
+    """A function defined inside another is global in this shell, not lexically
+    scoped. Defining one during a backup overwrites a caller's function of the
+    same name and outlives the locals it reads, so the caller's later call runs
+    a foreign body against variables that are gone."""
+    sentinel = "_restore_shell_state() { echo CALLER_SENTINEL; }"
+    _, r = _backup_probe(
+        tmp_path, "home-fn", sentinel,
+        "_restore_shell_state\n"
+        'echo "BODY<<$(declare -f _restore_shell_state)>>"\n',
+    )
+    assert "RC=0" in r.stdout, r.stdout + r.stderr
+    assert "CALLER_SENTINEL" in r.stdout, "the caller's function was overwritten"
+    assert "umask" not in r.stdout.split("BODY<<")[1], "the backup's body leaked into it"
+
+
+def test_a_backup_defines_no_helper_where_the_caller_had_none(tmp_path):
+    """Even with no collision, a definition left behind is state the caller did
+    not have when it sourced a script advertised as safe to source."""
+    _, r = _backup_probe(
+        tmp_path, "home-nofn", "",
+        'declare -F _restore_shell_state >/dev/null && echo LEAKED || echo CLEAN\n',
+    )
+    assert "RC=0" in r.stdout, r.stdout + r.stderr
+    assert "CLEAN" in r.stdout, "a helper was left in the caller's function table"
+
+
+def test_a_failed_exclusive_create_still_restores_the_callers_shell(tmp_path):
+    """The failure exit restores the same state the success exit does; an early
+    return that skips it leaves the caller's shell altered by a backup that
+    never happened."""
+    home = tmp_path / "home-fail"
+    cfg = home / ".config" / "modulatio"
+    cfg.mkdir(parents=True)
+    (cfg / ".env").write_text("KEY=value\n")
+    sentinel = "_restore_shell_state() { echo CALLER_SENTINEL; }"
+    probe = (
+        f"umask 022\nset -o noclobber\n{sentinel}\n"
+        f"source {UNINSTALL_SH}\n"
+        f'HOME="{home}"\n'
+        f'CONFIG_DIR="{cfg}"; VAULT="{home}/vault"\n'
+        f'DELIVERABLES="{home}/deliv"\n'
+        "REMOVE_SETTINGS=1; REMOVE_PROJECTS=0; REMOVE_DELIVERABLES=0\n"
+        # An unwritable HOME makes the exclusive create fail.
+        f'chmod 500 "{home}"\n'
+        "backup_userdata >/dev/null 2>&1; echo \"RC=$?\"\n"
+        f'chmod 700 "{home}"\n'
+        'case "$-" in *C*) echo "NOCLOBBER=on" ;; *) echo "NOCLOBBER=off" ;; esac\n'
+        'echo "UMASK=$(umask)"\n'
+        "_restore_shell_state\n"
+    )
+    env = _fake_home_env(tmp_path)
+    env["HOME"] = str(home)
+    r = subprocess.run(["bash", "-c", probe], env=env,
+                       capture_output=True, text=True, timeout=60)
+    assert "RC=1" in r.stdout, r.stdout + r.stderr
+    assert "NOCLOBBER=on" in r.stdout, r.stdout
+    assert "UMASK=0022" in r.stdout, r.stdout
+    assert "CALLER_SENTINEL" in r.stdout, r.stdout
+
+
+def test_a_destination_name_replaced_after_the_write_is_refused(tmp_path):
     """A descriptor outlives the name it was opened through, so a name
     repointed at an outside file after the write leaves verification reading a
     valid archive while the reported path is something else entirely — and the
@@ -1050,3 +1133,52 @@ def test_the_destination_swapped_mid_write_is_caught_dynamically(tmp_path):
     assert victim.read_text(encoding="utf-8") == "PRECIOUS", "the victim was overwritten"
     assert "secret-value" not in victim.read_text(encoding="utf-8")
     assert "no longer names the archive" in r.stderr, r.stderr
+
+
+def test_the_destination_is_opened_exactly_once_at_runtime(tmp_path):
+    """An exclusive create whose descriptor dies with a subshell forces the
+    parent to reopen the NAME, and that second open is ordinary: a link put
+    there in the interval is followed and the bytes land on whatever it points
+    at. The exclusivity looks present in the source and protects nothing.
+
+    Driven before the open rather than after it, so it catches the second open
+    itself instead of the later name check. The swap is armed only when the
+    destination already exists — which is true of a reopen and never of a sole
+    exclusive create — so a rewrite that reintroduces the window under any
+    spelling trips it."""
+    cfg = tmp_path / ".config" / "modulatio"
+    cfg.mkdir(parents=True)
+    (cfg / ".env").write_text("KEY=secret-value\n")
+    victim = tmp_path / "victim.txt"
+    victim.write_text("PRECIOUS", encoding="utf-8")
+    opens = tmp_path / "opens.log"
+
+    probe = (
+        f"source {UNINSTALL_SH}\n"
+        f'CONFIG_DIR="{cfg}"; VAULT="{tmp_path}/vault"\n'
+        f'DELIVERABLES="{tmp_path}/deliv"\n'
+        "REMOVE_SETTINGS=1; REMOVE_PROJECTS=0; REMOVE_DELIVERABLES=0\n"
+        "arm() {\n"
+        '  case "$BASH_COMMAND" in\n'
+        "    exec\\ 3\\>\\&-*) ;;\n"
+        "    exec\\ 3\\>*)\n"
+        f'      echo open >> "{opens}"\n'
+        f'      if [ -e "$dest" ] || [ -L "$dest" ]; then\n'
+        f'        rm -f "$dest"; ln -s "{victim}" "$dest"\n'
+        "      fi ;;\n"
+        "  esac\n"
+        "}\n"
+        "set -T\ntrap arm DEBUG\n"
+        'backup_userdata >/dev/null 2>&1; echo "RC=$?"\n'
+        "trap - DEBUG\n"
+        f'echo "OPENS=$(wc -l < "{opens}" 2>/dev/null || echo 0)"\n'
+    )
+    r = subprocess.run(["bash", "-c", probe], env=_fake_home_env(tmp_path),
+                       capture_output=True, text=True, timeout=60)
+
+    assert "OPENS=1" in r.stdout, f"the destination was opened more than once: {r.stdout}"
+    assert "RC=0" in r.stdout, r.stdout + r.stderr
+    assert victim.read_text(encoding="utf-8") == "PRECIOUS", "the victim was overwritten"
+    assert "secret-value" not in victim.read_text(encoding="utf-8")
+    archives = list(tmp_path.glob("modulatio-uninstall-backup-*.tar.gz"))
+    assert len(archives) == 1 and tarfile.open(archives[0]).getmembers()

@@ -852,13 +852,18 @@ _RUNNER_BUNDLE = Path(_config_mod.CONFIG_DIR) / "wheelhouse"
 
 
 def _enforceable_sandbox(monkeypatch):
-    """Make the gate both permitted to run and able to: sandbox predicates
-    plus the runner bundle. A host without a bundle skips rather than failing
-    for a reason no test here measures."""
+    """Make the gate both permitted to run and able to: sandbox policy plus the
+    runner bundle. A host without a bundle, or without the ability to confine,
+    skips rather than failing for a reason no test here measures.
+
+    Policy is overridden; capability is asked. Asserting a capability the host
+    lacks sends the probe on to exec a sandbox that is not there."""
     from modulatio import sandbox
     monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: False)
-    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: True)
     monkeypatch.setattr(sandbox, "current_profile", lambda: "standard")
+    if not sandbox.can_confine():
+        pytest.skip("host cannot confine — the gate's refusal to run producer "
+                    "code unsandboxed is measured elsewhere")
     if not any(_RUNNER_BUNDLE.glob("pytest-*.whl")):
         pytest.skip(f"no runner bundle at {_RUNNER_BUNDLE}")
     monkeypatch.setenv("MODULATIO_WHEELHOUSE", str(_RUNNER_BUNDLE))
@@ -2674,3 +2679,36 @@ def test_dropped_task_save_leaves_plan_uncommitted_zero_producers(
     assert producer_calls == []
     (goal,) = store_mod.list_goals(PROJECT_CODE)
     assert goal.task_plan_state == "prepared"
+
+
+def test_a_green_suite_cannot_outvote_unusable_convention_authority(project, monkeypatch):
+    """The digest and the identity derived from it are what bind a sealed
+    record to the conventions that sealed it. A record failing that pair is not
+    authority, so conformance cannot be checked at all — which is a hard state,
+    not a missing one. A producer whose suite is green gains nothing by
+    altering the record it is meant to conform to.
+
+    Driven through the whole gate rather than the helper, because the helper
+    returning a state is only half the contract; the other half is the consumer
+    binding it."""
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    root = orch._shared_artifacts_root()
+    _gate_suite(root, shape="import")          # a genuinely green suite
+
+    # The record is altered in place and its digest recomputed to agree with
+    # the new content — the identity still names what was originally sealed.
+    (goal,) = store_mod.list_goals(PROJECT_CODE)
+    (contract,) = goal.convention_contracts
+    contract.import_name = "not_what_was_sealed"
+    contract.digest = conventions.contract_digest(contract)
+    store_mod.save_goal(PROJECT_CODE, goal)
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
+
+    assert state is _TE.HARD_FAILURE, f"a green suite outvoted broken authority: {report}"
+    assert "convention authority is unusable" in report, report
+    assert "does not derive its identity" in report, report

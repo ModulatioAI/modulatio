@@ -92,10 +92,18 @@ def _enforceable_sandbox(monkeypatch):
     The suite's autouse bypass would otherwise make every gate call
     UNAVAILABLE, and without the runner bundle the gate can provision no
     interpreter to execute a suite with — so a host lacking it says so, rather
-    than failing these tests for a reason none of them measure."""
+    than failing these tests for a reason none of them measure.
+
+    POLICY is overridden here; CAPABILITY is asked, never asserted. The two are
+    separate questions and only the first is the test's to answer: claiming a
+    host can confine when it cannot sends the probe on to exec a sandbox that
+    is not there, which fails for a reason none of these tests measure either."""
     monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: False)
-    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: True)
     monkeypatch.setattr(sandbox, "current_profile", lambda: "standard")
+    if not sandbox.can_confine():
+        pytest.skip("host cannot confine — the gate refuses to run producer "
+                    "code unsandboxed, which is the behaviour under test "
+                    "elsewhere, not here")
     if not any(_RUNNER_BUNDLE.glob("pytest-*.whl")):
         pytest.skip(f"no runner bundle at {_RUNNER_BUNDLE}")
     monkeypatch.setenv("MODULATIO_WHEELHOUSE", str(_RUNNER_BUNDLE))
@@ -1912,6 +1920,23 @@ def test_every_typed_evidence_producer_returns_a_state():
                  "_convention_import_smoke"}
     seen: set = set()
 
+    def is_state(expr) -> bool:
+        """A state is named as one. A comparison or a boolean is not a state
+        however it is spelled, so position zero is required to BE the type
+        rather than merely to avoid being a literal."""
+        if isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name):
+            return expr.value.id == "TestEvidence"
+        if isinstance(expr, ast.IfExp):        # every branch, not just the first
+            return is_state(expr.body) and is_state(expr.orelse)
+        return False
+
+    def is_delegated(expr) -> bool:
+        """The whole result handed back from another producer, which carries
+        this same contract and is itself checked here."""
+        return (isinstance(expr, ast.Call)
+                and isinstance(expr.func, ast.Attribute)
+                and expr.func.attr in producers)
+
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef) or node.name not in producers:
             continue
@@ -1921,21 +1946,44 @@ def test_every_typed_evidence_producer_returns_a_state():
         nested = {n for d in ast.walk(node)
                   if isinstance(d, ast.FunctionDef) and d is not node
                   for n in ast.walk(d)}
+        # Where a returned name came from, so `return result` is resolved to
+        # what was put in it rather than waved through.
+        bound: dict[str, list] = {}
+        for asn in (n for n in ast.walk(node)
+                    if isinstance(n, ast.Assign) and n not in nested):
+            for tgt in asn.targets:
+                if isinstance(tgt, ast.Name):
+                    bound.setdefault(tgt.id, []).append(asn.value)
+
+        def check(value, ret, name=node.name, bound=bound, chain=()):
+            if isinstance(value, ast.Tuple):
+                assert is_state(value.elts[0]), (
+                    f"{name}:{ret.lineno} returns "
+                    f"`{ast.unparse(value.elts[0])}` where a state belongs — a "
+                    f"caller routing by identity will not recognise it")
+                return
+            if is_delegated(value):
+                return
+            if isinstance(value, ast.Name):
+                assert value.id not in chain, f"{name}:{ret.lineno} self-referential"
+                sources = bound.get(value.id)
+                assert sources, (
+                    f"{name}:{ret.lineno} returns `{value.id}`, whose source "
+                    f"this file cannot see — it may hold anything")
+                for src in sources:
+                    check(src, ret, chain=(*chain, value.id))
+                return
+            raise AssertionError(
+                f"{name}:{ret.lineno} returns `{ast.unparse(value)}`, which is "
+                f"neither a state tuple nor another producer's result")
+
         for ret in (n for n in ast.walk(node)
                     if isinstance(n, ast.Return) and n not in nested):
             value = ret.value
             if value is None or (isinstance(value, ast.Constant)
                                  and value.value is None):
                 continue                      # not applicable — the whole result
-            if isinstance(value, ast.Name):
-                continue                      # a state already decided elsewhere
-            assert isinstance(value, ast.Tuple), (
-                f"{node.name}:{ret.lineno} returns a non-tuple result")
-            first = value.elts[0]
-            assert not isinstance(first, ast.Constant), (
-                f"{node.name}:{ret.lineno} returns the raw value "
-                f"{first.value!r} where a state belongs — a caller routing by "
-                f"identity will not recognise it")
+            check(value, ret)
 
     assert seen == producers, f"a typed producer was not found: {producers - seen}"
 

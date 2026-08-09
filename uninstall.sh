@@ -94,21 +94,24 @@ backup_userdata() {
   # this function happens to want. Clearing noclobber unconditionally turns it
   # off for a caller who had deliberately turned it on, so a later redirect of
   # theirs silently truncates a file it would have refused.
+  # Restored INLINE at both exits rather than through a helper. A function
+  # defined inside another is global in this shell, not lexically scoped: it
+  # would overwrite a caller's function of the same name and outlive the locals
+  # it reads, so a later call runs this body with them gone. Duplicating two
+  # lines is cheaper than leaking a definition into a shell that sourced this.
   local prev_umask prev_noclobber
   prev_umask="$(umask)"
   case "$-" in *C*) prev_noclobber=on ;; *) prev_noclobber=off ;; esac
-  _restore_shell_state() {
-    [ "$prev_noclobber" = on ] || set +o noclobber
-    umask "$prev_umask"
-  }
   umask 077
   set -o noclobber
   if ! exec 3> "$dest"; then
-    _restore_shell_state
+    [ "$prev_noclobber" = on ] || set +o noclobber
+    umask "$prev_umask"
     echo "  ! backup destination could not be created safely: $dest" >&2
     return 1
   fi
-  _restore_shell_state
+  [ "$prev_noclobber" = on ] || set +o noclobber
+  umask "$prev_umask"
   if ! tar -cz "${items[@]}" 2>/dev/null >&3; then
     exec 3>&-
     echo "  ! backup FAILED — refusing to remove anything" >&2
