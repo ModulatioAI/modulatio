@@ -312,3 +312,66 @@ def test_plain_document_still_uses_triple_fence(tmp_path: Path):
     # No accidental over-fencing when content has no backticks.
     assert "````" not in text
     assert "just some prose, no fences" in text
+
+
+def test_a_swapped_source_cannot_change_what_the_image_request_sends(
+        tmp_path, monkeypatch):
+    """Encoding from the original name sends whatever it points at NOW. The
+    file can be replaced, or repointed at something outside the root the load
+    was authorized against, between authorization and dispatch — and the
+    digest describing the request would no longer describe what was sent."""
+    import base64
+
+    from modulatio import attachments, config
+    from modulatio.multimodal import build_image_content_block
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    safe = tmp_path / "shot.png"
+    safe.write_bytes(b"\x89PNG\r\n\x1a\n" + b"SAFE" * 4)
+    item = attachments.build_attachment(safe, kind="image")
+
+    # The source is replaced after the load authorized it.
+    secret = tmp_path / "secret.png"
+    secret.write_bytes(b"\x89PNG\r\n\x1a\n" + b"LEAK" * 4)
+    safe.unlink()
+    safe.symlink_to(secret)
+
+    url = build_image_content_block(item)["image_url"]["url"]
+    sent = base64.b64decode(url.split(",", 1)[1])
+    assert b"SAFE" in sent
+    assert b"LEAK" not in sent, "the replacement reached the provider request"
+
+
+def test_an_image_with_no_snapshot_is_refused_rather_than_fetched(tmp_path):
+    """A snapshot is what makes the bytes vouchable. Without one there is
+    nothing to send but a re-read of a path whose contents are no longer the
+    ones that were loaded."""
+    import pytest
+
+    from modulatio.attachments import Attachment
+    from modulatio.multimodal import build_image_content_block
+
+    orphan = Attachment(kind="image", path=tmp_path / "gone.png",
+                        name="gone.png", content=None)
+    with pytest.raises(ValueError, match="no engine-held snapshot"):
+        build_image_content_block(orphan)
+
+
+def test_bytes_that_no_longer_match_their_digest_are_refused(
+        tmp_path, monkeypatch):
+    """The digest is the claim the request makes about itself. Sending bytes
+    it does not describe would make the record of what was sent a fiction."""
+    import pytest
+
+    from modulatio import attachments, config
+    from modulatio.multimodal import build_image_content_block
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    src = tmp_path / "shot.png"
+    src.write_bytes(b"\x89PNG\r\n\x1a\n" + b"REAL" * 4)
+    item = attachments.build_attachment(src, kind="image")
+
+    # Tamper with the engine's own copy.
+    item.staged_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"HACK" * 4)
+    with pytest.raises(ValueError, match="does not match the digest"):
+        build_image_content_block(item)

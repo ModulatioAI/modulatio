@@ -41,21 +41,45 @@ MIME_TYPES: dict[str, str] = {
 _FALLBACK_MIME = "image/octet-stream"
 
 
-def build_image_content_block(path: Path) -> dict[str, Any]:
-    """Build an OpenAI-format ``image_url`` content block for an image
-    file. Returns ``{"type": "image_url", "image_url": {"url": "data:..."}}``.
+def build_image_content_block(source: "Attachment | Path") -> dict[str, Any]:
+    """Build an OpenAI-format ``image_url`` content block for an image.
+    Returns ``{"type": "image_url", "image_url": {"url": "data:..."}}``.
 
     LiteLLM rewrites this into provider-native shapes (Anthropic
     ``image`` blocks, Gemini parts, etc.) at completion time.
 
-    re-checks the image-size cap before
-    reading the file. The attach-time check in ``build_attachment``
-    is the primary gate; this is defense-in-depth for callers that
-    construct Attachment instances by hand and skip the builder.
+    Given a loaded attachment, the bytes come from the engine's OWN snapshot
+    and are checked against the digest taken when it was loaded. Encoding from
+    the original name instead would send whatever that name points at NOW: the
+    file can be replaced, truncated, or repointed at something outside the
+    root the load was authorized against, between authorization and dispatch,
+    and the digest describing the request would no longer describe what was
+    sent. An attachment with no snapshot is refused rather than fetched.
+
+    A bare path is still accepted for images the engine itself produced (a
+    render it just wrote), which never passed through a load.
+
+    Re-checks the image-size cap before reading. The attach-time check in
+    ``build_attachment`` is the primary gate; this is defense in depth.
     """
+    import hashlib
+
     from modulatio.attachments import (
         DEFAULT_MAX_IMAGE_BYTES, _OVERRIDE_ENV, _resolve_cap,
     )
+
+    expected = ""
+    if isinstance(source, Path):
+        path = source
+    else:
+        if source.staged_path is None:
+            raise ValueError(
+                f"image attachment {source.name!r} has no engine-held "
+                f"snapshot — refusing to re-read the original path, whose "
+                f"contents are no longer the ones that were loaded"
+            )
+        path = Path(source.staged_path)
+        expected = source.sha256
 
     cap = _resolve_cap(DEFAULT_MAX_IMAGE_BYTES)
     size = path.stat().st_size
@@ -66,8 +90,17 @@ def build_image_content_block(path: Path) -> dict[str, Any]:
             f"(override via {_OVERRIDE_ENV})."
         )
 
-    mime = MIME_TYPES.get(path.suffix.lower(), _FALLBACK_MIME)
+    name = source.name if isinstance(source, Attachment) else path.name
+    mime = MIME_TYPES.get(Path(name).suffix.lower(), _FALLBACK_MIME)
     raw = path.read_bytes()
+    if expected:
+        seen = f"sha256:{hashlib.sha256(raw).hexdigest()}"
+        if seen != expected:
+            raise ValueError(
+                f"image attachment {name!r} does not match the digest taken "
+                f"when it was loaded — refusing to send bytes the request "
+                f"does not describe"
+            )
     encoded = base64.b64encode(raw).decode("ascii")
     return {
         "type": "image_url",
@@ -115,7 +148,7 @@ def build_multimodal_messages(
     user_content: list[dict[str, Any]] = [{"type": "text", "text": text}]
     for att in attachments:
         if att.kind == "image":
-            user_content.append(build_image_content_block(att.path))
+            user_content.append(build_image_content_block(att))
     messages.append({"role": "user", "content": user_content})
     return messages
 

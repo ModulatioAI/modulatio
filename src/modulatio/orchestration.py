@@ -3324,7 +3324,7 @@ class Orchestrator:
         content: list[dict] = [{"type": "text", "text": prompt}]
         for att in attachments:
             if att.kind == "image":
-                content.append(build_image_content_block(att.path))
+                content.append(build_image_content_block(att))
         messages = [{"role": "user", "content": content}]
 
         # Multimodal: image content blocks aren't tokenizable
