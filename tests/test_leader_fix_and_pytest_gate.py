@@ -109,6 +109,20 @@ def _enforceable_sandbox(monkeypatch):
     monkeypatch.setenv("MODULATIO_WHEELHOUSE", str(_RUNNER_BUNDLE))
 
 
+def _simulated_capability(monkeypatch):
+    """Permit the gate, and SIMULATE the capability rather than requiring it.
+
+    For tests that assert on classification, registry shape, or the reading of
+    a record — no producer code is confined and no claim about real
+    confinement is made. Requiring the substrate here would delete those
+    assertions on every host that cannot confine, which is a silent pass
+    rather than a measurement."""
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: False)
+    monkeypatch.setattr(sandbox, "current_profile", lambda: "standard")
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: True)
+    monkeypatch.setattr(sandbox, "can_confine", lambda: True)
+
+
 def test_pytest_gate_states_non_code_unavailable_and_no_suite(
         project_with_run, monkeypatch):
     orch = _orch(project_with_run)
@@ -121,7 +135,7 @@ def test_pytest_gate_states_non_code_unavailable_and_no_suite(
     assert "sandbox" in unavailable[1]
     # Enforceable sandbox but no suite anywhere → RED, not a silent skip
     # (Mycroft MED-1): a code goal with no suite has no green evidence.
-    _enforceable_sandbox(monkeypatch)
+    _simulated_capability(monkeypatch)
     no_suite = orch._goal_pytest_gate([_code_task()])
     assert no_suite is not None and no_suite[0] is _TE.HARD_FAILURE
     assert "no runnable test suite" in no_suite[1]
@@ -577,7 +591,7 @@ def test_verify_registry_run_shell_cannot_write_run_state(
         project_with_run, monkeypatch):
     """WB H2: the leader registry's run_shell is artifacts-bound — a
     full-profile write aimed at engine-owned run state is refused."""
-    _enforceable_sandbox(monkeypatch)  # else run_shell is omitted (H1)
+    _simulated_capability(monkeypatch)  # else run_shell is omitted (H1)
     orch = _orch(project_with_run)
     run_root = orch._scope_root()
     sentinel = run_root / "run-state-sentinel.txt"
@@ -700,7 +714,7 @@ def test_leader_registry_omits_run_shell_when_sandbox_unenforceable(
     # read tools stay — the reviewer can still read the harness.
     assert "read_file" in orch._leader_verify_tool_registry()
 
-    _enforceable_sandbox(monkeypatch)
+    _simulated_capability(monkeypatch)
     assert "run_shell" in orch._leader_verify_tool_registry()
 
 
@@ -710,7 +724,7 @@ def test_fix_registry_edit_file_cannot_reach_registered_folder(
     against shared artifacts — a registered rw FOLDER (edit_file extra root
     in the base registry) is NOT writable from the fix lane."""
     from modulatio import tools
-    _enforceable_sandbox(monkeypatch)
+    _simulated_capability(monkeypatch)
     outside = Path(project_with_run.wiki_path).parent / "operator_folder"
     outside.mkdir(parents=True)
     (outside / "project.txt").write_text("owned", encoding="utf-8")
@@ -1499,7 +1513,7 @@ def test_absent_test_runner_is_unavailable_not_red(project_with_run, monkeypatch
     failure it would clamp the verdict, spend remediation on healthy code and
     withhold a correct deliverable, so it has to surface as UNAVAILABLE.
     """
-    _enforceable_sandbox(monkeypatch)
+    _simulated_capability(monkeypatch)
     orch = _orch(project_with_run)
     root = orch._shared_artifacts_root()
     root.mkdir(parents=True, exist_ok=True)
@@ -1532,7 +1546,7 @@ def test_absent_test_runner_is_unavailable_not_red(project_with_run, monkeypatch
 def test_a_real_failure_is_still_red(project_with_run, monkeypatch):
     """The runner check must not swallow genuine failures: a suite that ran and
     failed still holds the deliverable back."""
-    _enforceable_sandbox(monkeypatch)
+    _simulated_capability(monkeypatch)
     orch = _orch(project_with_run)
     root = orch._shared_artifacts_root()
     root.mkdir(parents=True, exist_ok=True)
@@ -1752,7 +1766,7 @@ def test_the_gate_runner_is_not_built_where_the_deliverable_can_write(
     environment being rebuilt over it, and runs even in isolated mode — so the
     process that is supposed to MEASURE the deliverable becomes the
     deliverable's."""
-    _enforceable_sandbox(monkeypatch)
+    _simulated_capability(monkeypatch)
     orch = _orch(project_with_run)
     root = orch._shared_artifacts_root()
     root.mkdir(parents=True, exist_ok=True)

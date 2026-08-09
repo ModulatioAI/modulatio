@@ -853,8 +853,10 @@ _RUNNER_BUNDLE = Path(_config_mod.CONFIG_DIR) / "wheelhouse"
 
 def _enforceable_sandbox(monkeypatch):
     """Make the gate both permitted to run and able to: sandbox policy plus the
-    runner bundle. A host without a bundle, or without the ability to confine,
-    skips rather than failing for a reason no test here measures.
+    runner bundle. For tests that let the gate build its SHIPPING runner and
+    execute real producer code, so the substrate must really be there — a host
+    that cannot confine skips rather than failing for a reason no test here
+    measures.
 
     Policy is overridden; capability is asked. Asserting a capability the host
     lacks sends the probe on to exec a sandbox that is not there."""
@@ -867,6 +869,22 @@ def _enforceable_sandbox(monkeypatch):
     if not any(_RUNNER_BUNDLE.glob("pytest-*.whl")):
         pytest.skip(f"no runner bundle at {_RUNNER_BUNDLE}")
     monkeypatch.setenv("MODULATIO_WHEELHOUSE", str(_RUNNER_BUNDLE))
+
+
+def _simulated_capability(monkeypatch):
+    """Permit the gate, and SIMULATE the capability rather than requiring it.
+
+    For tests that supply their own execution double: no producer code runs,
+    nothing is confined, and no claim about real confinement is made — the
+    classification tier is what is under test. Requiring the substrate here
+    would delete those assertions on every host that cannot confine, which is
+    a silent pass rather than a measurement. Real enforcement is witnessed by
+    the tests that build the shipping runner."""
+    from modulatio import sandbox
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: False)
+    monkeypatch.setattr(sandbox, "current_profile", lambda: "standard")
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: True)
+    monkeypatch.setattr(sandbox, "can_confine", lambda: True)
 
 
 class _DeterministicRunShell:
@@ -965,7 +983,7 @@ def test_import_smoke_green_for_declared_layout(project, monkeypatch):
     root = orch._shared_artifacts_root()
     assert (root / "webapp" / "__init__.py").exists()
     _gate_suite(root)
-    _enforceable_sandbox(monkeypatch)   # passes the gate's substrate guard…
+    _simulated_capability(monkeypatch)  # …the classification tier, not the substrate
     orch._pytest_gate_run_shell = _DeterministicRunShell()  # …execution seam
     monkeypatch.setattr(Orchestrator, "_goal_pytest_gate", _REAL_PYTEST_GATE)
     state, report = orch._goal_pytest_gate(tasks)
@@ -990,7 +1008,7 @@ def test_naming_the_component_is_not_counted_as_a_load(
     orch.kickoff("build the webapp package")
     tasks = store_mod.list_tasks(PROJECT_CODE)
     _gate_suite(orch._shared_artifacts_root(), shape=shape)
-    _enforceable_sandbox(monkeypatch)
+    _simulated_capability(monkeypatch)
     orch._pytest_gate_run_shell = _DeterministicRunShell()
     monkeypatch.setattr(Orchestrator, "_goal_pytest_gate", _REAL_PYTEST_GATE)
 
@@ -1010,7 +1028,7 @@ def test_every_real_import_form_is_observed(project, monkeypatch, shape):
     orch.kickoff("build the webapp package")
     tasks = store_mod.list_tasks(PROJECT_CODE)
     _gate_suite(orch._shared_artifacts_root(), shape=shape)
-    _enforceable_sandbox(monkeypatch)
+    _simulated_capability(monkeypatch)
     orch._pytest_gate_run_shell = _DeterministicRunShell()
     monkeypatch.setattr(Orchestrator, "_goal_pytest_gate", _REAL_PYTEST_GATE)
 
@@ -1062,7 +1080,7 @@ def test_state_a_test_can_manufacture_is_not_counted_as_a_load(
         (root / "tests" / "webapp.py").write_text("VALUE = 1\n", encoding="utf-8")
     (root / "tests" / "test_ok.py").write_text(bodies[shape], encoding="utf-8")
 
-    _enforceable_sandbox(monkeypatch)
+    _simulated_capability(monkeypatch)
     orch._pytest_gate_run_shell = _DeterministicRunShell()
     monkeypatch.setattr(Orchestrator, "_goal_pytest_gate", _REAL_PYTEST_GATE)
 
@@ -1094,7 +1112,7 @@ def test_a_repository_local_pytest_cannot_replace_the_engine_runner(
         "    m.__file__ = os.path.join(os.getcwd(), 'webapp', '__init__.py')\n"
         "    sys.modules['webapp'] = m\n    return 0\n", encoding="utf-8")
 
-    _enforceable_sandbox(monkeypatch)
+    _simulated_capability(monkeypatch)
     orch._pytest_gate_run_shell = _DeterministicRunShell()
     monkeypatch.setattr(Orchestrator, "_goal_pytest_gate", _REAL_PYTEST_GATE)
 
@@ -1120,7 +1138,7 @@ def test_import_smoke_red_when_package_name_diverges(project, monkeypatch):
     # A README naming the expected package proves nothing.
     (root / "README.md").write_text("webapp package\n", encoding="utf-8")
     _gate_suite(root)
-    _enforceable_sandbox(monkeypatch)   # passes the gate's substrate guard…
+    _simulated_capability(monkeypatch)  # …the classification tier, not the substrate
     orch._pytest_gate_run_shell = _DeterministicRunShell()  # …execution seam
     monkeypatch.setattr(Orchestrator, "_goal_pytest_gate", _REAL_PYTEST_GATE)
     state, report = orch._goal_pytest_gate(tasks)
@@ -1134,8 +1152,10 @@ def test_import_smoke_red_when_package_name_diverges(project, monkeypatch):
 def _run_gate(orch, tasks, monkeypatch, runner=None):
     """Drive the real gate over a produced repo. ``runner=None`` means NO
     execution double — the gate builds the shipping registry itself."""
-    _enforceable_sandbox(monkeypatch)
-    if runner is not None:
+    if runner is None:
+        _enforceable_sandbox(monkeypatch)      # builds the shipping runner
+    else:
+        _simulated_capability(monkeypatch)     # classification only
         orch._pytest_gate_run_shell = runner
     monkeypatch.setattr(Orchestrator, "_goal_pytest_gate", _REAL_PYTEST_GATE)
     return orch._goal_pytest_gate(tasks)
@@ -2712,3 +2732,72 @@ def test_a_green_suite_cannot_outvote_unusable_convention_authority(project, mon
     assert state is _TE.HARD_FAILURE, f"a green suite outvoted broken authority: {report}"
     assert "convention authority is unusable" in report, report
     assert "does not derive its identity" in report, report
+
+
+def test_the_classification_tier_runs_where_the_host_cannot_confine(project, monkeypatch):
+    """A test that supplies its own execution double asserts on classification,
+    not on confinement, so the host's substrate must not decide whether the
+    assertion is made at all. Gating it on the substrate turns a security
+    regression into a silent skip everywhere the substrate is absent — which
+    is most containers and every host without the confinement binary.
+
+    The substrate is forced ABSENT here and this case must still reach its
+    assertion and bind."""
+    from modulatio import sandbox, store as store_mod
+
+    monkeypatch.setattr(sandbox, "_probe_policy_shape", lambda: False)
+    sandbox.reset_enforcement_state_cache()
+
+    orch = _kickoff_orchestrator(project, _WEBAPP_PLAN, [], monkeypatch)
+    orch.kickoff("build the webapp package")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    _gate_suite(orch._shared_artifacts_root(), shape="import")
+    (goal,) = store_mod.list_goals(PROJECT_CODE)
+    (contract,) = goal.convention_contracts
+    contract.import_name = "not_what_was_sealed"
+    contract.digest = conventions.contract_digest(contract)
+    store_mod.save_goal(PROJECT_CODE, goal)
+
+    # A gated tier would SKIP, and a skipped test reports green — the exact
+    # way this regression hides. Converted to a failure.
+    from _pytest.outcomes import Skipped
+    try:
+        state, report = _run_gate(orch, tasks, monkeypatch, _DeterministicRunShell())
+    except Skipped as exc:
+        pytest.fail(f"the classification tier was gated on the host substrate: {exc}")
+
+    assert state is _TE.HARD_FAILURE, report
+    assert "convention authority is unusable" in report, report
+
+
+def test_the_shipping_runner_tier_skips_where_the_host_cannot_confine(monkeypatch):
+    """The other half of the split: a test that lets the gate build its real
+    runner and execute producer code makes a claim about confinement, so it
+    must not run pretending the substrate is there."""
+    from _pytest.outcomes import Skipped
+
+    from modulatio import sandbox
+
+    monkeypatch.setattr(sandbox, "_probe_policy_shape", lambda: False)
+    sandbox.reset_enforcement_state_cache()
+
+    with pytest.raises(Skipped, match="cannot confine"):
+        _enforceable_sandbox(monkeypatch)
+
+
+def test_the_simulated_tier_never_asks_the_host(monkeypatch):
+    """The simulated helper must answer the capability question itself. If it
+    consulted the host at all, every assertion behind it would disappear on a
+    host that cannot confine."""
+    from modulatio import sandbox
+
+    monkeypatch.setattr(sandbox, "_probe_policy_shape", lambda: False)
+    sandbox.reset_enforcement_state_cache()
+
+    from _pytest.outcomes import Skipped
+    try:
+        _simulated_capability(monkeypatch)
+    except Skipped as exc:
+        pytest.fail(f"the simulated tier consulted the host: {exc}")
+
+    assert sandbox.enforcement_state() is sandbox.EnforcementState.SANDBOXED_FULL

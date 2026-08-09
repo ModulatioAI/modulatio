@@ -1038,13 +1038,17 @@ def test_a_backup_leaves_no_helper_in_the_callers_function_table(tmp_path):
     a foreign body against variables that are gone."""
     sentinel = "_restore_shell_state() { echo CALLER_SENTINEL; }"
     _, r = _backup_probe(
-        tmp_path, "home-fn", sentinel,
-        "_restore_shell_state\n"
-        'echo "BODY<<$(declare -f _restore_shell_state)>>"\n',
+        tmp_path, "home-fn", sentinel + '\nbefore="$(declare -f _restore_shell_state)"',
+        'after="$(declare -f _restore_shell_state)"\n'
+        '[ "$before" = "$after" ] && echo IDENTICAL || {\n'
+        '  echo "CHANGED"; echo "--before--"; echo "$before"\n'
+        '  echo "--after--"; echo "$after"; }\n',
     )
     assert "RC=0" in r.stdout, r.stdout + r.stderr
-    assert "CALLER_SENTINEL" in r.stdout, "the caller's function was overwritten"
-    assert "umask" not in r.stdout.split("BODY<<")[1], "the backup's body leaked into it"
+    # The whole definition compared, not merely a surviving marker: a body that
+    # still prints the sentinel but has gained other statements is a changed
+    # function.
+    assert "IDENTICAL" in r.stdout, f"the caller's definition changed:\n{r.stdout}"
 
 
 def test_a_backup_defines_no_helper_where_the_caller_had_none(tmp_path):
@@ -1066,6 +1070,18 @@ def test_a_failed_exclusive_create_still_restores_the_callers_shell(tmp_path):
     cfg = home / ".config" / "modulatio"
     cfg.mkdir(parents=True)
     (cfg / ".env").write_text("KEY=value\n")
+
+    # The destination is made deterministic with a stand-in clock, then
+    # pre-created: noclobber refuses to open an existing file for the
+    # exclusive create. Permissions would not force this for a caller whose
+    # uid ignores them, which is the ordinary case inside a container.
+    bindir = tmp_path / "failbin"
+    bindir.mkdir()
+    (bindir / "date").write_text("#!/bin/sh\necho 19700101-000000\n", encoding="utf-8")
+    (bindir / "date").chmod(0o755)
+    (home / "modulatio-uninstall-backup-19700101-000000.tar.gz").write_text(
+        "occupied", encoding="utf-8")
+
     sentinel = "_restore_shell_state() { echo CALLER_SENTINEL; }"
     probe = (
         f"umask 022\nset -o noclobber\n{sentinel}\n"
@@ -1074,16 +1090,14 @@ def test_a_failed_exclusive_create_still_restores_the_callers_shell(tmp_path):
         f'CONFIG_DIR="{cfg}"; VAULT="{home}/vault"\n'
         f'DELIVERABLES="{home}/deliv"\n'
         "REMOVE_SETTINGS=1; REMOVE_PROJECTS=0; REMOVE_DELIVERABLES=0\n"
-        # An unwritable HOME makes the exclusive create fail.
-        f'chmod 500 "{home}"\n'
         "backup_userdata >/dev/null 2>&1; echo \"RC=$?\"\n"
-        f'chmod 700 "{home}"\n'
         'case "$-" in *C*) echo "NOCLOBBER=on" ;; *) echo "NOCLOBBER=off" ;; esac\n'
         'echo "UMASK=$(umask)"\n'
         "_restore_shell_state\n"
     )
     env = _fake_home_env(tmp_path)
     env["HOME"] = str(home)
+    env["PATH"] = f"{bindir}:{env.get('PATH', '/usr/bin:/bin')}"
     r = subprocess.run(["bash", "-c", probe], env=env,
                        capture_output=True, text=True, timeout=60)
     assert "RC=1" in r.stdout, r.stdout + r.stderr
