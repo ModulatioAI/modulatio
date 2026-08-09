@@ -1675,3 +1675,49 @@ def test_a_green_run_is_not_clamped_by_its_own_evidence(project, monkeypatch):
     summary = Orchestrator(project, runners).kickoff("ship the package")
 
     assert not any("clamped verdict" in e for e in summary.errors)
+
+
+def test_unmeasured_suite_is_disclosed_to_the_operator_without_clamping(
+        project, monkeypatch):
+    """An absent measurement is not a failing one, so the verdict stands — but
+    the report is then written over a gap, and the only thing asking the
+    verifier not to claim test health it cannot see is a line in a prompt.
+
+    The engine records the gap on its own account, which needs no agreement
+    from the text it sits beside."""
+    monkeypatch.setenv("MODULATIO_GOAL_MAX_RETRIES", "0")
+    monkeypatch.setattr(
+        Orchestrator, "_goal_pytest_gate",
+        lambda self, tasks: (None, "sandbox not enforceable on this host"),
+    )
+
+    def _leader_claims_green(prompt: str) -> str:
+        if "LEADER GOAL VERIFICATION" in prompt:
+            payload = {
+                "verdict": "satisfied",
+                "rationale": "all tests pass",
+                "report_body": "## Report\n\nThe suite is green.\n",
+            }
+            return f"```json\n{json.dumps(payload)}\n```"
+        return _leader_stub(prompt)
+
+    orch = Orchestrator(project, {
+        "leader": _leader_claims_green,
+        "planner": _planner_stub,
+        "drafter": _drafter_stub,
+        "qc": _qc_stub,
+    })
+    summary = orch.kickoff("code goal whose suite was never measured")
+
+    # Not measured is not failed: nothing clamps.
+    assert summary.verdicts[-1]["verdict"] == "satisfied"
+
+    stated = [r for r in summary.recommendations
+              if "no test evidence" in r["concern"]]
+    assert stated, summary.recommendations
+    assert "sandbox not enforceable" in stated[0]["concern"]
+    assert "unverified" in stated[0]["suggestion"]
+
+    report = summary.goal_reports[-1].read_text(encoding="utf-8")
+    assert "NOT MEASURED" in report
+    assert "unverified" in report

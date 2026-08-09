@@ -13868,6 +13868,23 @@ def test_engine_evidence_is_recorded_beside_the_verifier_account():
     assert fmt(None) == ""
 
 
+def test_an_unmeasured_goal_says_the_verdict_above_it_is_unverified():
+    """A measured failure is bound by the clamp and a measured pass speaks for
+    itself, so an ABSENT measurement is the state a report can claim test
+    health over without contradicting anything on the page. The engine says so
+    on its own account, and leaves the verdict alone — an absent measurement is
+    not a failing one."""
+    from modulatio.orchestration import _format_engine_evidence as fmt
+
+    unknown = fmt((None, "sandbox not enforceable"))
+    assert "unverified" in unknown
+    assert "verdict stands as written" in unknown
+
+    # A measurement that was actually taken needs no such caveat.
+    assert "unverified" not in fmt((True, "52 passed"))
+    assert "unverified" not in fmt((False, "1 failed"))
+
+
 def test_captured_output_cannot_break_out_of_the_evidence_block():
     """The body is captured tool output, which can close the block it is
     quoted inside and let the rest render as document."""

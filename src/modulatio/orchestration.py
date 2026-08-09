@@ -1116,11 +1116,24 @@ def _format_engine_evidence(gate: "tuple[bool | None, str] | None") -> str:
         True: "PASSED",
         False: "FAILED",
     }[green]
+    # A measured failure is bound elsewhere and a measured pass speaks for
+    # itself; an ABSENT measurement is the state a report can be written over
+    # without contradicting anything on the page. Saying so is the engine's to
+    # do, because the sentence asking the verifier not to claim what it cannot
+    # see is carried in a prompt, and nothing checks whether it was followed.
+    caveat = (
+        "\nThis goal's verdict rests on test health the engine did not "
+        "measure, so any claim of a passing suite above is unverified. The "
+        "verdict stands as written: an absent measurement is not a failing "
+        "one.\n"
+        if green is None else ""
+    )
     return (
         "\n\n---\n\n"
         "## Engine-measured build and test\n\n"
-        f"**{headline}.** Recorded by the engine, not by the verifier above.\n\n"
-        f"```\n{body.replace('```', chr(39) * 3).strip()}\n```\n"
+        f"**{headline}.** Recorded by the engine, not by the verifier above.\n"
+        f"{caveat}"
+        f"\n```\n{body.replace('```', chr(39) * 3).strip()}\n```\n"
     )
 
 
@@ -14074,6 +14087,23 @@ class Orchestrator:
                     "not claim test health you cannot see; record the gap "
                     "as a recommendation for the human."
                 )
+                # The instruction above is carried in a prompt, so whether it
+                # was followed is unknown by the time the report is read. The
+                # engine states the gap on its own account, which needs no
+                # agreement from the text it sits beside.
+                summary.recommendations.append({
+                    "goal_id": goal.id,
+                    "concern": (
+                        "This code goal shipped with no test evidence: "
+                        f"{gate_report.strip()}"
+                    ),
+                    "suggestion": (
+                        "Read any claim about tests in this goal's report as "
+                        "unverified — nothing measured them. Restore the gate "
+                        "(a working sandbox and an installed runner) to get a "
+                        "measurement instead of a claim."
+                    ),
+                })
             else:
                 artifact_blocks.append(
                     "### Test-suite evidence (engine-run pytest, "
