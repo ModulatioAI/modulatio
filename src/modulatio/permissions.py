@@ -1703,6 +1703,12 @@ PARITY_EXCEPTIONS = (
     ("clay.local-network", "clay_confinement", "network", "local network",
      "the confined seat runs network-on; the engine tool loop hard-refuses "
      "loopback/private targets", True),
+    ("clay.permission-model", "clay_confinement", "capability",
+     "per-request approval",
+     "the native seat decides tool use itself and is fenced only by the "
+     "sandbox around it, so nothing reaches the operator as an approvable "
+     "request; the engine tool loop asks per request and records the typed "
+     "grant it receives", False),
     ("mcp-stdio.local-network", "mcp_servers", "network", "local network",
      "stdio servers run outside the engine sandbox; their egress is not "
      "engine-fenced", False),

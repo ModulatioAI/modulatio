@@ -571,11 +571,15 @@ def test_snapshot_declared_exceptions_render_when_applicable():
     from modulatio import permissions as perm
 
     # default kwargs: clay_active True, mcp_servers carry no transport →
-    # only the two Clay exceptions render.
+    # only the native-seat exceptions render.
+    clay_ids = {e[0] for e in perm.PARITY_EXCEPTIONS
+                if e[1] == "clay_confinement"}
     snap = perm.effective_capability_snapshot(**_snapshot_kwargs())
     reduced = [f for f in snap.facts if f.state == perm.STATE_REDUCED]
     assert {f.source for f in reduced} == {"clay_confinement"}
-    assert len(reduced) == 2
+    # Every declared native-seat divergence renders — counted from the ledger
+    # so adding one to it cannot quietly go undisclosed.
+    assert len(reduced) == len(clay_ids)
 
     # a stdio MCP server makes the MCP-stdio exception applicable.
     with_stdio = _snapshot_kwargs(mcp_servers=(
