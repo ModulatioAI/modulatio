@@ -167,11 +167,19 @@ def test_uninstall_sh_no_main_and_no_crash_on_eval(tmp_path):
 
 def test_uninstall_sh_DOES_run_when_executed_directly(tmp_path):
     # Sanity: the guard must not over-block — direct execution still runs main.
+    # The fallback is exercised deliberately: by default the script hands off
+    # to the engine, which knows the whole destructive contract, so leaving
+    # that up to whether Python happens to import here would test the host.
     cache = tmp_path / ".cache" / "modulatio"
     cache.mkdir(parents=True)
+    env = _fake_home_env(tmp_path)
+    env["MODULATIO_UNINSTALL_STANDALONE"] = "1"
+    # Point the unit scan at an empty fixture tree: a developer machine running
+    # Modulatio as a service would otherwise decide what this test sees.
+    env["MODULATIO_SYSTEMD_ROOTS"] = str(tmp_path / "no-units")
     r = subprocess.run(
         ["bash", str(UNINSTALL_SH), "--keep-package", "--yes"],
-        env=_fake_home_env(tmp_path), stdin=subprocess.DEVNULL,
+        env=env, stdin=subprocess.DEVNULL,
         capture_output=True, text=True, timeout=30,
     )
     assert "Modulatio uninstaller" in r.stdout  # main ran
@@ -685,3 +693,55 @@ def test_an_existing_or_linked_destination_is_refused(tmp_path):
     with pytest.raises(un.BackupVerificationError):
         un.backup_plan(plan, link)
     assert victim.read_text() == "also do not clobber\n"
+
+
+def test_the_standalone_script_defers_to_the_engine_and_gates_on_services():
+    """The Python path knows the whole destructive contract — it refuses while
+    a service still launches Modulatio, stops every entry point rather than
+    only the pid-file daemon, and separates a folder the operator owns from the
+    state written inside it. The script exists for an install too broken to
+    import, not as a second opinion about what to delete.
+
+    Source-level pin: the shell path is not importable, and standing up a
+    harness to drive a destructive script costs more than it pins."""
+    from pathlib import Path
+
+    import modulatio
+
+    script = (Path(modulatio.__file__).parent.parent.parent / "uninstall.sh")
+    body = script.read_text()
+
+    assert "delegate_to_python" in body
+    assert "modulatio.uninstall" in body, "it must check the engine imports"
+    # The fallback still refuses under a live service, and stops the servers
+    # the pid file does not speak for.
+    assert "Refusing to uninstall" in body
+    assert "modulatio-api" in body
+
+
+def test_the_standalone_fallback_refuses_under_a_live_service(tmp_path):
+    """A unit outlives the files removed here: one carrying a restart directive
+    respawns onto a deleted executable every few seconds, so an uninstall that
+    ignores it leaves a service failing in a loop against an install that is
+    supposed to be gone. Both entry points must refuse, not only the engine's."""
+    units = tmp_path / "units"
+    units.mkdir()
+    (units / "renamed.service").write_text(
+        "[Service]\nExecStart=/usr/local/bin/modulatio-api\n")
+    cache = tmp_path / ".cache" / "modulatio"
+    cache.mkdir(parents=True)
+
+    env = _fake_home_env(tmp_path)
+    env["MODULATIO_UNINSTALL_STANDALONE"] = "1"
+    env["MODULATIO_SYSTEMD_ROOTS"] = str(units)
+    r = subprocess.run(
+        ["bash", str(UNINSTALL_SH), "--keep-package", "--yes"],
+        env=env, stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, timeout=30,
+    )
+
+    assert r.returncode == 1
+    assert "Refusing to uninstall" in r.stderr
+    # Matched on the start command, so a renamed unit is still found.
+    assert "renamed.service" in r.stderr
+    assert cache.exists(), "it removed something while a service still runs"

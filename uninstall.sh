@@ -179,8 +179,38 @@ remove_fastembed_env_cache() {
 
 # --- main: the destructive flow. Runs ONLY when executed directly (see the
 #     source-guard at the bottom), never on source/eval. --------------------
+# The Python uninstaller is the one that knows the whole destructive contract:
+# it refuses while a service still launches Modulatio, stops every entry point
+# rather than only the pid-file daemon, and separates a folder the operator
+# owns from the state Modulatio wrote inside it. When it can run, it runs —
+# this script exists for an install too broken to import, not as a second
+# opinion about what to delete.
+delegate_to_python() {
+  local py
+  for py in modulatio python3 python; do
+    command -v "$py" >/dev/null 2>&1 || continue
+    if [ "$py" = "modulatio" ]; then
+      "$py" uninstall "$@" && return 0
+      return 1
+    fi
+    if "$py" -c 'import modulatio.uninstall' >/dev/null 2>&1; then
+      "$py" -m modulatio.cli uninstall "$@" && return 0
+      return 1
+    fi
+  done
+  return 127
+}
+
 main() {
   set -u
+  if [ "${MODULATIO_UNINSTALL_STANDALONE:-0}" != "1" ]; then
+    delegate_to_python "$@"
+    case "$?" in
+      0) exit 0 ;;
+      127) echo "Modulatio cannot be imported — running the standalone fallback." >&2 ;;
+      *) exit 1 ;;
+    esac
+  fi
   REMOVE_SETTINGS=0; REMOVE_PROJECTS=0; REMOVE_DELIVERABLES=0
   REMOVE_PANDOC=0; REMOVE_PACKAGE=1; PRISTINE=0; YES=0
   for arg in "$@"; do
@@ -224,7 +254,39 @@ main() {
     [ "$(confirm "Proceed with uninstall?" 0)" = 1 ] || { echo "Aborted — nothing removed."; exit 1; }
   fi
 
+  # A unit outlives the files removed here: one carrying a restart directive
+  # respawns onto a deleted executable every few seconds, so an uninstall that
+  # ignores it leaves a service failing in a loop against an install that is
+  # supposed to be gone. Matched on the START COMMAND rather than the unit
+  # name, so a renamed unit is still found.
+  # Resolved through a variable rather than inlined so a test can point it at
+  # a fixture tree: these are absolute host paths, and a developer machine
+  # running Modulatio as a service would otherwise change what every run sees.
+  local unit_roots="${MODULATIO_SYSTEMD_ROOTS:-/etc/systemd/system /run/systemd/system $HOME/.config/systemd/user}"
+  local units=""
+  local d f
+  for d in $unit_roots; do
+    [ -d "$d" ] || continue
+    for f in "$d"/*.service; do
+      [ -e "$f" ] || continue
+      if grep -qE '^Exec[A-Za-z]*=.*(modulatio|modulatio-api|modulatio-tui)' "$f" 2>/dev/null; then
+        units="$units$f"$'\n'
+      fi
+    done
+  done
+  if [ -n "$units" ]; then
+    echo "Refusing to uninstall — a service still launches Modulatio." >&2
+    printf '%s' "$units" >&2
+    echo "Disable and remove it first, then re-run." >&2
+    exit 1
+  fi
+
   echo "Stopping daemon..."; stop_daemon
+  # The pid file speaks only for the cron daemon. The servers run detached, so
+  # they are found by inspection — a quiet daemon line otherwise reads as a
+  # quiet machine while a server still serves the install being removed.
+  pkill -f "modulatio-api" 2>/dev/null || true
+  pkill -f "modulatio-tui" 2>/dev/null || true
   if ! backup_userdata; then
     echo "Aborted — your data could not be backed up, so nothing was removed." >&2
     exit 1
