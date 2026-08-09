@@ -92,8 +92,51 @@ class Attachment:
     size: int = 0
 
 
+def _open_beneath(root: Path, rel: "Path | str") -> int:
+    """Open ``rel`` proving it stays beneath ``root``, and return the
+    descriptor.
+
+    Comparing pathnames after the fact asks the namespace what two names mean
+    once whoever controls them has had another turn. A root can be renamed and
+    replaced with a link to somewhere else between the moment it authorizes
+    and the moment it is read, and the check then blesses the replacement.
+
+    So the root is opened as a directory WITHOUT following links -- a root that
+    has become a link refuses outright -- and each component is opened relative
+    to the descriptor before it, also without following links. The result is
+    reached only by walking down from the authorized directory itself, so no
+    later renaming can change what was opened.
+    """
+    parts = [p for p in Path(rel).parts if p not in ("", ".")]
+    if not parts or any(p == ".." for p in parts):
+        raise ValueError(f"attachment path {str(rel)!r} does not stay inside "
+                         f"the folder it was authorized under")
+    try:
+        cur = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise ValueError(
+            f"the folder {root.name!r} an attachment was authorized under is "
+            f"no longer the folder that was authorized"
+        ) from exc
+    try:
+        for part in parts[:-1]:
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                          dir_fd=cur)
+            os.close(cur)
+            cur = nxt
+        return os.open(parts[-1], os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                       dir_fd=cur)
+    except OSError as exc:
+        raise ValueError(
+            f"attachment {parts[-1]!r} is not reachable from inside the folder "
+            f"it was authorized under — the path leaves it"
+        ) from exc
+    finally:
+        os.close(cur)
+
+
 def build_attachment(
-    path: Path, *, kind: AttachmentKind, within: "tuple[Path, ...]" = (),
+    path: Path, *, kind: AttachmentKind, beneath: "Path | None" = None,
 ) -> Attachment:
     """Construct an ``Attachment`` from a filesystem path.
 
@@ -124,7 +167,7 @@ def build_attachment(
         else DEFAULT_MAX_IMAGE_BYTES
     )
     sweep_orphan_snapshots()
-    staged, digest, size = _stage(path, cap=cap, kind=kind, within=within)
+    staged, digest, size = _stage(path, cap=cap, kind=kind, beneath=beneath)
     try:
         return _finish_attachment(path, kind, staged, digest, size)
     except BaseException:
@@ -176,7 +219,7 @@ def _staging_dir() -> Path:
 
 def _stage(
     path: Path, *, cap: int, kind: AttachmentKind,
-    within: "tuple[Path, ...]" = (),
+    beneath: "Path | None" = None,
 ) -> "tuple[Path, str, int]":
     """Copy the bytes aside and digest them: ``(staged, sha256, size)``.
 
@@ -207,34 +250,26 @@ def _stage(
     the guarantee downstream relies on is that it reads these bytes and never
     the path again.
     """
+    if beneath is not None:
+        # Reached by walking down from the authorized directory itself, so the
+        # bytes are proven to come from inside it rather than described as
+        # doing so by names read afterwards.
+        try:
+            rel = Path(path).relative_to(Path(beneath))
+        except ValueError as exc:
+            raise ValueError(
+                f"attachment {Path(path).name!r} is not inside the folder it "
+                f"was authorized under"
+            ) from exc
+        fd = _open_beneath(Path(beneath), rel)
+    else:
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError as exc:
+            raise ValueError(
+                f"attachment {path.name!r} could not be opened: {exc.strerror}"
+            ) from exc
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
-    except OSError as exc:
-        raise ValueError(
-            f"attachment {path.name!r} could not be opened: {exc.strerror}"
-        ) from exc
-    try:
-        if within:
-            # Where the caller authorized a ROOT, prove these bytes came from
-            # inside it — on the descriptor that is about to be read, not on
-            # the name that was checked. A name can be replaced with a link out
-            # of the root between the check and the open, and the copy would
-            # then be internally consistent while describing a file the grant
-            # never covered.
-            try:
-                opened = Path(os.readlink(f"/proc/self/fd/{fd}")).resolve()
-            except OSError as exc:
-                raise ValueError(
-                    f"attachment {path.name!r} could not be verified against "
-                    f"the folder it was authorized under"
-                ) from exc
-            roots = [Path(r).resolve() for r in within]
-            if not any(opened == r or r in opened.parents for r in roots):
-                raise ValueError(
-                    f"attachment {path.name!r} resolves outside the folder it "
-                    f"was authorized under — the name was repointed after it "
-                    f"was checked"
-                )
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             # A FIFO, device, socket or directory: its reported size is not
             # its content, and reading it can block or stream without end.

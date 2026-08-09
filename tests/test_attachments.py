@@ -329,12 +329,14 @@ def test_snapshots_nobody_claimed_are_swept_by_age(tmp_path, monkeypatch):
     assert live.staged_path.exists(), "an in-flight snapshot was swept"
 
 
-def test_bytes_must_come_from_the_folder_that_was_authorized(
+def test_bytes_must_come_from_inside_the_folder_that_authorized_them(
         tmp_path, monkeypatch):
-    """Resolving a name under an allowed root and then opening that name are
-    two acts, and the file can be repointed between them. The single open makes
-    the bytes internally consistent; only checking the DESCRIPTOR proves they
-    came from the root the grant covered."""
+    """Comparing pathnames afterwards asks the namespace what two names mean
+    once whoever controls them has had another turn. The load walks down from
+    the authorizing directory itself, so no later renaming changes what was
+    opened."""
+    import os as _os
+
     import pytest
 
     from modulatio import attachments, config
@@ -342,24 +344,40 @@ def test_bytes_must_come_from_the_folder_that_was_authorized(
     monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
     granted = tmp_path / "granted"
     granted.mkdir()
-    outside = tmp_path / "elsewhere" / "secret.md"
-    outside.parent.mkdir()
-    outside.write_text("NOT UNDER THE GRANT\n")
+    (granted / "note.txt").write_text("AUTHORIZED\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "note.txt").write_text("OUTSIDE\n")
 
-    inside = granted / "notes.md"
-    inside.symlink_to(outside)
+    # A file already pointing outside is refused: the walk does not follow it.
+    escape = granted / "escape.txt"
+    escape.symlink_to(outside / "note.txt")
+    with pytest.raises(ValueError, match="not reachable from inside"):
+        attachments.build_attachment(escape, kind="document", beneath=granted)
 
-    with pytest.raises(ValueError, match="outside the folder it was authorized"):
-        attachments.build_attachment(inside, kind="document", within=(granted,))
+    # And the root itself swapped between authorization and read is refused —
+    # the authorized directory is opened without following links, so a name
+    # that has become one no longer opens at all.
+    real_open = _os.open
 
-    # A real file under the grant still loads, and so does a link that stays
-    # inside it — the check is about where the bytes came from, not about links.
-    real = granted / "real.md"
-    real.write_text("under the grant\n")
+    def _swap_then_open(path, *a, **k):
+        if str(path).endswith("granted") and "dir_fd" not in k:
+            granted.rename(tmp_path / "moved")
+            (tmp_path / "granted").symlink_to(outside)
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(_os, "open", _swap_then_open)
+    with pytest.raises(ValueError, match="no longer the folder that was"):
+        attachments.build_attachment(
+            tmp_path / "granted" / "note.txt", kind="document",
+            beneath=tmp_path / "granted")
+    monkeypatch.setattr(_os, "open", real_open)
+
+    # An ordinary file under the grant still loads.
+    (tmp_path / "granted").unlink()          # drop the planted link
+    (tmp_path / "moved").rename(granted)
     assert attachments.build_attachment(
-        real, kind="document", within=(granted,)).content == "under the grant\n"
+        granted / "note.txt", kind="document",
+        beneath=granted).content == "AUTHORIZED\n"
 
-    hop = granted / "hop.md"
-    hop.symlink_to(real)
-    assert attachments.build_attachment(
-        hop, kind="document", within=(granted,)).content == "under the grant\n"
+

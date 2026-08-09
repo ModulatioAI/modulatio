@@ -392,3 +392,26 @@ def test_one_composer_finishing_a_turn_does_not_discard_another_s_uploads(
     import pytest
     with pytest.raises(uploads.UploadRefused):
         uploads.consume(mine, project="web")
+
+
+def test_a_refusal_partway_through_a_batch_strands_nothing(
+        client, tmp_path, monkeypatch):
+    """Claiming, building and dispatch were separate scopes, so a refusal
+    partway through left before the block that would have released what had
+    already succeeded — the first upload's snapshot had no owner and nothing
+    came back for it."""
+    from modulatio import config, uploads
+    from modulatio.web.routes import console as _console
+
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path / "cfg")
+    monkeypatch.setattr(_console, "_actor", lambda *a, **k: None)
+
+    good, _ = uploads.stage_upload(b"fine\n", display_name="a.md", project="web")
+    bad, _ = uploads.stage_upload(b"\xff\xfe\x00", display_name="b.md", project="web")
+
+    resp = client.post("/api/web/converse",
+                       json={"text": "two files", "uploads": [good, bad]})
+    assert resp.status_code == 415
+
+    assert not [p for p in (tmp_path / "cfg" / "uploads").glob("*") if p.is_file()]
+    assert not [p for p in (tmp_path / "cfg" / "loaded").glob("*") if p.is_file()]

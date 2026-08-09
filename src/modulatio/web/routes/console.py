@@ -166,38 +166,38 @@ def converse(project: str, body: ConverseBody, request: Request) -> dict:
     code = valid_project(project)
     attachments = []
     claimed: "list" = []
+    # ONE ownership block over claiming, building and dispatch. Splitting them
+    # meant a refusal partway through the batch left before the block that
+    # would have released what already succeeded: the first upload's snapshot
+    # had no owner and nothing came back for it.
     try:
-        for handle in body.uploads:
-            staged, shown = uploads.consume(handle, project=code)
-            claimed.append(staged)
-            # The same constructor a disk load goes through, so an upload
-            # meets one policy rather than a second one written for it: the
-            # byte cap, the digest, the regular-inode check, and the decode
-            # that refuses a binary posing as a document.
-            kind = "image" if looks_like_image(staged) else "document"
-            item = build_attachment(staged, kind=kind)
-            attachments.append(replace(item, name=shown))
-    except uploads.UploadRefused as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except (ValueError, OSError, UnicodeDecodeError) as exc:
-        raise HTTPException(status_code=415, detail=str(exc)) from exc
-    finally:
-        # The upload's own copy has served its purpose either way: the
-        # attachment carries an engine-held snapshot of its own, and a refused
-        # one must not outlive the refusal.
-        for path in claimed:
-            path.unlink(missing_ok=True)
-    try:
+        try:
+            for handle in body.uploads:
+                staged, shown = uploads.consume(handle, project=code)
+                claimed.append(staged)
+                # The same constructor a disk load goes through, so an upload
+                # meets one policy rather than a second one written for it: the
+                # byte cap, the digest, the regular-inode check, and the decode
+                # that refuses a binary posing as a document.
+                kind = "image" if looks_like_image(staged) else "document"
+                item = build_attachment(staged, kind=kind)
+                attachments.append(replace(item, name=shown))
+        except uploads.UploadRefused as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (ValueError, OSError, UnicodeDecodeError) as exc:
+            raise HTTPException(status_code=415, detail=str(exc)) from exc
         reply = _actor(request, code).converse(
             body.text, attachments=attachments or None)
     finally:
-        # This route built the attachments, so this route releases them: they
-        # were taken for one turn and that turn is over, however it ended.
+        # Everything this route acquired, released here — the uploads' own
+        # copies and every snapshot built from them, whether the turn was sent,
+        # refused partway, or failed. Anything staged by THIS composer and not
+        # sent has no turn left to ride; another composer's work is untouched.
+        for path in claimed:
+            path.unlink(missing_ok=True)
         for item in attachments:
             if item.staged_path is not None:
                 Path(item.staged_path).unlink(missing_ok=True)
-        # Anything staged by THIS composer and not sent with the turn has no
-        # turn left to ride; another composer's pending work is untouched.
         uploads.discard_all(code, _composer_id(request))
     return {"reply": reply}
 

@@ -7237,17 +7237,43 @@ class Orchestrator:
                 return (f"Can't load {path!r}: {exc}. An outside folder needs "
                         "the operator's grant — asking for it IS how you load "
                         "from one.")
+            # WHICH root authorized this is what the load must be tied to.
+            # Passing a set of root NAMES lets each be re-read later, after
+            # whoever controls them has had another turn; the load walks down
+            # from the one directory that authorized it instead.
+            authorized = None
+            for root in (workspace, *folder_rw, *folder_read,
+                         vault_root, shared_root, config_dir,
+                         *_lg.LiveGrantRoots(gate, "path")):
+                try:
+                    target.relative_to(Path(root).resolve())
+                except (ValueError, OSError):
+                    continue
+                authorized = Path(root).resolve()
+                break
+            if authorized is None:
+                return (f"Can't load {path!r}: it is not inside any folder "
+                        "this seat may read.")
             try:
-                # The roots the resolution just authorized travel WITH the
-                # load, so the bytes are proven to come from inside one of them
-                # on the descriptor that is read — a name checked and then
-                # opened can be repointed in between.
-                item = build_attachment(
-                    target,
-                    kind="image" if looks_like_image(target) else "document",
-                    within=(workspace, *folder_rw, *folder_read,
-                            vault_root, shared_root, config_dir,
-                            *_lg.LiveGrantRoots(gate, "path")))
+                # Modality comes from the bytes that were STAGED, so a file
+                # swapped after a pre-load sniff cannot arrive labelled as
+                # something the engine never looked at.
+                import dataclasses as _dc
+                # Staged first as bytes, then classified from the bytes that
+                # were actually stored: a file swapped after a pre-load sniff
+                # cannot arrive labelled as something the engine never saw.
+                if looks_like_image(target):
+                    item = build_attachment(
+                        target, kind="image", beneath=authorized)
+                    if not looks_like_image(item.staged_path):
+                        item = _dc.replace(item, kind="document",
+                                           content=item.staged_path.read_text(
+                                               encoding="utf-8"))
+                else:
+                    item = build_attachment(
+                        target, kind="document", beneath=authorized)
+                    if looks_like_image(item.staged_path):
+                        item = _dc.replace(item, kind="image", content=None)
             except UnicodeDecodeError:
                 return (f"Can't load {path!r}: a binary document with no "
                         "extractor (DOCX/ODT/…) — convert it to text or PDF "
