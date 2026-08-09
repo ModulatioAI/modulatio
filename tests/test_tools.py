@@ -3382,3 +3382,70 @@ def test_passive_gains_no_execution_from_the_toolchains():
     root = Path("/tmp/root")
     for cmd in ("cargo build", "make", "./app", "gcc -o a a.c", "javac A.java"):
         assert not tools._check_passive(shlex.split(cmd), root, ()), cmd
+
+
+def test_a_sealed_sandbox_takes_an_ordinary_shell_command(tmp_path):
+    """Judging the SHAPE of a command was a proxy for judging its reach, and
+    it fails both ways — refusing safe work while a permitted binary still
+    does whatever its arguments allow. Where confinement is sealed the mount
+    graph is the boundary, so ordinary shell composition runs."""
+    from unittest.mock import patch
+
+    from modulatio import sandbox
+
+    (tmp_path / "a.txt").write_text("alpha\nbeta\n")
+    sh = tools.make_run_shell(tmp_path)
+    with patch.object(sandbox, "enforcement_state",
+                      lambda: sandbox.EnforcementState.SANDBOXED_FULL):
+        for cmd in ("grep beta a.txt | wc -l",
+                    "echo hi > out.txt && cat out.txt",
+                    "for i in 1 2; do echo $i; done"):
+            out = sh(cmd=cmd, profile="full", timeout=30)
+            assert "exit_code: 0" in out, (cmd, out)
+
+
+def test_an_unsealed_sandbox_keeps_the_allowlist(tmp_path):
+    """The allowlist is the DEGRADED boundary, which is what that enforcement
+    state is named for: wherever confinement is missing, bypassed or switched
+    off, the shape of the command is the last thing between the model and the
+    host, so it goes back to doing that job."""
+    from unittest.mock import patch
+
+    from modulatio import sandbox
+
+    (tmp_path / "a.txt").write_text("x\n")
+    sh = tools.make_run_shell(tmp_path)
+    for state in (sandbox.EnforcementState.DEGRADED_ALLOWLIST,
+                  sandbox.EnforcementState.REFUSED):
+        with patch.object(sandbox, "enforcement_state", lambda s=state: s):
+            for refused in ("grep x a.txt | wc -l", "curl http://evil",
+                            "cat /etc/passwd"):
+                with pytest.raises(ValueError, match="not allowed by profile"):
+                    sh(cmd=refused, profile="full", timeout=15)
+
+
+def test_a_command_the_sandbox_cannot_bound_is_refused_even_when_sealed():
+    """A sandbox decides what a command can REACH, not what it does inside
+    that reach — and the one writable path is the deliverable, so a recursive
+    force-delete destroys the run's own product."""
+    for cmd in ("rm -rf build", "rm -fr /", "rm -r -f out",
+                "mkfs.ext4 /dev/sda1", "dd if=/dev/zero of=/dev/sda",
+                "shutdown -h now", "cat x > /dev/sda"):
+        assert tools._unbounded_shell_reason(cmd), cmd
+    # Ordinary work is untouched, including commands that merely LOOK alike.
+    for cmd in ("rm -r build", "rm out.txt", "make clean && ./configure",
+                "grep -rf patterns.txt src/", "cargo build && cargo test"):
+        assert not tools._unbounded_shell_reason(cmd), cmd
+
+
+def test_the_no_execution_profile_gains_no_shell(tmp_path):
+    """Sealing the sandbox widens the EXEC profile, never the passive one."""
+    from unittest.mock import patch
+
+    from modulatio import sandbox
+
+    sh = tools.make_run_shell(tmp_path)
+    with patch.object(sandbox, "enforcement_state",
+                      lambda: sandbox.EnforcementState.SANDBOXED_FULL):
+        with pytest.raises(ValueError, match="not allowed by profile"):
+            sh(cmd="echo hi | tee out.txt", profile="passive", timeout=15)

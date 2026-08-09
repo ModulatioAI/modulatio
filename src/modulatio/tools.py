@@ -1432,6 +1432,41 @@ def _not_installed_body(missing: str, detail: str = "") -> str:
     )
 
 
+#: Shell commands whose damage is not bounded by the mount graph. A sandbox
+#: decides what a command can REACH; it does not decide what the command does
+#: inside that reach, and the one writable path is the deliverable itself — so
+#: a recursive force-delete destroys the run's own product with nothing to
+#: restore it from. Device writes and power verbs are refused because a mount
+#: graph that exposed them is already faulty, and running one would turn that
+#: fault into damage.
+_UNBOUNDED_SHELL = (
+    re.compile(r"\brm\s+(-\S*\s+)*-\S*(rf|fr)\b"),
+    re.compile(r"\brm\s+-\S*r\S*\s+-\S*f\S*"),
+    re.compile(r"\bmkfs(\.\w+)?\b"),
+    re.compile(r"\bdd\b[^|;]*\bof=/(dev|boot|etc)\b"),
+    re.compile(r"\b(shutdown|reboot|halt|poweroff|init\s+0)\b"),
+    re.compile(r">\s*/dev/(sd|nvme|hd|mem)"),
+)
+
+
+def _unbounded_shell_reason(cmd: str) -> str:
+    """Why a shell command is refused outright, or ``""`` when it may run.
+
+    The sandbox answers where a command can reach. This answers the much
+    smaller question of which commands stay destructive inside that reach —
+    wiping the one writable tree, or acting on devices and power state that a
+    correct mount graph never exposed in the first place.
+    """
+    for pattern in _UNBOUNDED_SHELL:
+        if pattern.search(cmd):
+            return (
+                "refused: this destroys state that cannot be restored. Name "
+                "the paths to remove rather than recursively forcing, and "
+                "leave devices and power state alone"
+            )
+    return ""
+
+
 def make_run_shell(
     artifacts_root: Path, extra_roots=(),
     should_abort: "Callable[[], bool] | None" = None,
@@ -1502,14 +1537,35 @@ def make_run_shell(
                 f"unknown profile {profile!r}; expected one of "
                 f"{sorted(_PROFILE_CHECKS)!r}"
             )
-        try:
-            argv = shlex.split(cmd)
-        except ValueError as exc:
-            raise ValueError(f"unparseable cmd: {exc}") from exc
-        if not check(argv, artifacts_root, extra_roots):
-            raise ValueError(
-                f"command not allowed by profile {profile!r}: {cmd!r}"
-            )
+        # Where confinement is genuinely sealed, the mount graph is the
+        # boundary and the command may be an ordinary shell one: pipes,
+        # redirects, ``&&``, heredocs, any binary the image carries. Judging
+        # the SHAPE of a command was only ever a proxy for judging its reach,
+        # and it fails in both directions — refusing safe work while a
+        # permitted binary can still do anything its arguments allow.
+        #
+        # The argv allowlist remains the DEGRADED boundary, which is what the
+        # enforcement state of that name means. Wherever confinement is
+        # missing, bypassed, or switched off, the shape of the command is the
+        # last thing standing between the model and the host, so it goes back
+        # to doing that job. This branch never widens anything on a host whose
+        # sandbox is not proven working.
+        from modulatio import sandbox as _sb
+        sealed = _sb.enforcement_state() is _sb.EnforcementState.SANDBOXED_FULL
+        if profile == "full" and sealed:
+            refusal = _unbounded_shell_reason(cmd)
+            if refusal:
+                raise ValueError(f"{refusal}: {cmd!r}")
+            argv = ["bash", "-c", cmd]
+        else:
+            try:
+                argv = shlex.split(cmd)
+            except ValueError as exc:
+                raise ValueError(f"unparseable cmd: {exc}") from exc
+            if not check(argv, artifacts_root, extra_roots):
+                raise ValueError(
+                    f"command not allowed by profile {profile!r}: {cmd!r}"
+                )
         wd = _validate_run_shell_cwd(cwd, artifacts_root, extra_roots)
         # Rewrite happens AFTER the allowlist check so the safety
         # surface enforces user-visible cmd shapes; the rewrite is
