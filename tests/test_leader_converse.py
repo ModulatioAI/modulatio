@@ -786,3 +786,35 @@ def test_a_seat_that_cannot_look_says_so_instead_of_promising_a_re_run(
     assert "shot.png" in reply
     assert "could not be examined" in reply
     assert "let me look" in reply, "the seat's own words are not discarded"
+
+
+def test_an_attached_image_on_a_seat_with_no_image_channel_says_which(
+        project: Project, monkeypatch):
+    """An attached image reaches the same dead end a loaded one does when the
+    seat runs as its own program, and must be told about the same way rather
+    than sent down a path it cannot take. Naming it 'no model wired' would send
+    the operator to configure a seat that is already configured."""
+    from modulatio import attachments as _att
+    from modulatio import runners as _r
+
+    project.agent_models = {"leader": "clay"}
+    orch = Orchestrator(
+        project, _runners(),
+        chat_runners={"leader": lambda **k: ChatResponse(content="x", tool_calls=())},
+        chat_runner_models={"leader": "clay"},
+    )
+    shot = Path(orch._leader_workspace())
+    shot.mkdir(parents=True, exist_ok=True)
+    png = shot / "shot.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+
+    monkeypatch.setattr(_r, "is_native_seat_model", lambda _m: True)
+    monkeypatch.setattr(
+        orch, "_run_multimodal_leader",
+        lambda **k: pytest.fail("a look was attempted on a seat that has none"))
+
+    reply = orch.converse(
+        "what's this?", attachments=[_att.build_attachment(png, kind="image")])
+
+    assert "no image channel" in reply
+    assert "no leader model is wired" not in reply

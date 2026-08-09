@@ -7802,19 +7802,33 @@ class Orchestrator:
             # only the chat runner falsely reports "offline" for an image turn
             # whose multimodal model IS wired (and only the text runner is unset).
             if has_image:
+                from modulatio import runners as _r
                 multimodal_model = (
                     self.project.agent_models.get("leader")
                     or self.project.leader_model
                 )
+                # A seat that runs as its own binary has no completion to
+                # dispatch, so an attached image reaches the same dead end a
+                # loaded one does — and must be told about the same way rather
+                # than sent down a path it cannot take.
+                if multimodal_model and _r.is_native_seat_model(multimodal_model):
+                    multimodal_model = ""
                 branch_offline = not multimodal_model
             else:
                 branch_offline = self._resolve_chat_runner("leader") is None
             try:
                 if branch_offline:
-                    reply = (
-                        "(offline — no leader model is wired here, so I can't think "
-                        f"this through yet. You said: {message})"
-                    )
+                    if has_image:
+                        reply = (
+                            "(I can't look at an attached image on this seat — "
+                            "it runs as its own program and has no image "
+                            f"channel. You said: {message})"
+                        )
+                    else:
+                        reply = (
+                            "(offline — no leader model is wired here, so I can't "
+                            f"think this through yet. You said: {message})"
+                        )
                 elif has_image:
                     # Vision turn: a single multimodal completion (no tool-loop this
                     # turn — content blocks aren't carried through the text tool-loop).
@@ -7890,16 +7904,24 @@ class Orchestrator:
                             # re-run would be promising something that cannot
                             # happen — the files are named as unexamined
                             # instead.
-                            if mm_model and _r.is_native_seat_model(mm_model):
+                            _native_seat = bool(
+                                mm_model and _r.is_native_seat_model(mm_model))
+                            if _native_seat:
                                 mm_model = ""
                             if not mm_model:
                                 names = ", ".join(a.name for a in loaded)
+                                why = (
+                                    "this seat runs as its own program and has "
+                                    "no image channel"
+                                    if _native_seat
+                                    else "no leader model is wired for "
+                                         "multimodal dispatch; set the leader "
+                                         "seat's model, then load again"
+                                )
                                 reply = (
                                     f"{reply or ''}\n\n({len(loaded)} loaded "
                                     f"file(s) could not be examined: {names} — "
-                                    "no leader model is wired for multimodal "
-                                    "dispatch. Set the leader seat's model, "
-                                    "then load again.)"
+                                    f"{why}.)"
                                 ).strip()
                             else:
                                 redis = self._build_converse_prompt(
