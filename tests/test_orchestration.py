@@ -13896,3 +13896,51 @@ def test_an_account_of_a_run_never_fails_the_run(project, monkeypatch):
 
     monkeypatch.setattr(logstore, "write_run_log", _boom)
     orch._write_run_log(RunSummary(project=orch.project))  # must not raise
+
+
+def test_an_unclassifiable_folder_is_stated_not_dropped(monkeypatch):
+    """A registration nothing can classify is refused in writing. Dropping it
+    reads as 'the operator granted nothing here', which is a quieter falsehood
+    than saying so, and raising takes every other folder down with it."""
+    from modulatio import config, orchestration
+
+    monkeypatch.setattr(config, "list_folders", lambda: [
+        {"name": "docs", "mode": "ro", "path": "/tmp"},
+        {"name": "odd", "mode": "write-through", "path": "/tmp"},
+    ])
+    block = orchestration._format_registered_folders()
+
+    assert "docs" in block and "read-only" in block
+    assert "UNUSABLE" in block and "write-through" in block
+    assert "until the registration is corrected" in block
+
+
+def test_the_leader_is_told_what_its_shell_may_do(project, monkeypatch):
+    """The addresses say WHERE work may go; this says what a run can do when
+    it gets there. A confined run whose calls still reach outward is a
+    different posture from a confined one that cannot."""
+    from modulatio import sandbox
+    from modulatio.orchestration import Orchestrator
+
+    orch = Orchestrator(project, {"leader": _leader_stub})
+
+    monkeypatch.setattr(sandbox, "current_profile", lambda: "standard")
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: True)
+    monkeypatch.setattr(sandbox, "is_bypass_requested", lambda: False)
+    line = orch._substrate_line()
+    assert "sandboxed" in line and "'standard'" in line
+    assert "withheld" in line
+
+    # A profile that grants the network says so rather than staying silent.
+    monkeypatch.setattr(sandbox, "current_profile", lambda: "trusted")
+    assert "reachable" in orch._substrate_line()
+
+    # No sandbox is stated plainly, never implied by omission.
+    monkeypatch.setattr(sandbox, "is_sandbox_available", lambda: False)
+    monkeypatch.setattr(sandbox, "current_profile", lambda: "off")
+    assert "UNSANDBOXED" in orch._substrate_line()
+
+    # Describing the envelope must never be able to end a turn.
+    monkeypatch.setattr(sandbox, "current_profile",
+                        lambda: (_ for _ in ()).throw(OSError("boom")))
+    assert orch._substrate_line() == ""

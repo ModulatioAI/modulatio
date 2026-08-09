@@ -1019,8 +1019,21 @@ def _format_registered_folders() -> str:
             entry = f", {len(os.listdir(rec['path']))} top-level entries"
         except OSError:
             entry = ", currently unreachable"
+        words = mode_words.get(rec.get("mode", ""))
+        if words is None:
+            # A registration nothing can classify is stated and refused, never
+            # dropped and never allowed to take the block down with it: a
+            # missing folder reads as "the operator granted nothing here",
+            # which is a different and quieter falsehood than saying so.
+            lines.append(
+                f"- folder \"{rec.get('name', '(unnamed)')}\" — UNUSABLE: "
+                f"access mode {rec.get('mode')!r} is not one of "
+                f"{', '.join(sorted(mode_words))} — nothing here is reachable "
+                f"until the registration is corrected — path: {rec.get('path')}"
+            )
+            continue
         lines.append(
-            f"- folder \"{rec['name']}\" — {mode_words[rec['mode']]} — "
+            f"- folder \"{rec['name']}\" — {words} — "
             f"path: {rec['path']}{entry}"
         )
     lines.append(
@@ -6753,6 +6766,30 @@ class Orchestrator:
             + self._autonomy_block()
         )
 
+    def _substrate_line(self) -> str:
+        """One line stating the confinement a shell command runs under.
+
+        The addresses above say WHERE work may go; this says what the run can
+        do when it gets there. The two are separate axes — a confined run
+        whose calls still reach outward is a different posture from a confined
+        one that cannot — and a reader with only the addresses would take
+        either for granted.
+        """
+        try:
+            from modulatio import sandbox as _sandbox
+            profile = _sandbox.current_profile()
+            confined = (_sandbox.is_sandbox_available()
+                        and not _sandbox.is_bypass_requested()
+                        and profile != "off")
+            where = ("commands run sandboxed" if confined
+                     else "commands run UNSANDBOXED on this host")
+            net = ("the network is reachable" if profile in ("trusted", "off")
+                   or not confined else
+                   "the network is withheld unless the work declares it needs one")
+            return f"\nYour shell: {where} (profile {profile!r}); {net}.\n"
+        except Exception:  # noqa: BLE001 — a description never blocks a turn
+            return ""
+
     def _harness_home_block(self) -> str:
         """The Leader's home ADDRESSES, engine-rendered into every converse
         turn. His file tools resolve relative paths against his workspace
@@ -6770,6 +6807,7 @@ class Orchestrator:
             f"- the shared skills library: {lib}\n"
             f"- the project vault (all projects, runs, artifacts, logs): {_vault.VAULT_ROOT}\n"
             f"- the config dir (services, defaults): {_config.CONFIG_DIR}\n\n"
+            f"{self._substrate_line()}"
             "All of these are inside your home — reach them with ABSOLUTE paths "
             "through your FILE tools, no permission needed. Your shell runs in "
             "your workspace and the shared library only; the vault and config "

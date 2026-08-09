@@ -1798,6 +1798,24 @@ def effective_capability_snapshot(
                           and profile != "off") else STATE_AVAILABLE,
         sandbox_row))
 
+    # network — a separate axis from the filesystem sandbox and stated on its
+    # own, because a confined run whose calls still reach outward is a
+    # different posture from a confined one that cannot. Withheld is the
+    # DEFAULT: a shelled command reaches the network only where the profile
+    # grants it outright, or where the work about to run declares it needs it.
+    if bypass or profile == "off":
+        net_state, net_note = STATE_AVAILABLE, "unconfined — no sandbox to withhold it"
+    elif profile == "trusted":
+        net_state, net_note = STATE_AVAILABLE, f"granted by the {profile!r} profile"
+    else:
+        net_state, net_note = (
+            STATE_ASKS,
+            f"withheld under {profile!r} — reached only where the work declares it",
+        )
+    facts.append(CapabilityFact(
+        "substrate", _axs_classes.CLASS_SUBSTRATE, "run_shell network",
+        net_state, net_note))
+
     # workspace — the structural home: full file+exec authority, silently.
     facts.append(CapabilityFact(
         "workspace", "path", str(workspace), STATE_ALWAYS,
