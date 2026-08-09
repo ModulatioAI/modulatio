@@ -164,3 +164,21 @@ def test_interrupt_converse_when_idle_reports_false(client):
     resp = client.post("/api/web/converse/interrupt")
     assert resp.status_code == 200
     assert resp.json() == {"interrupted": False}
+
+
+def test_the_agents_listing_carries_the_name_a_seat_is_shown_by(client):
+    """Every event carries a seat ID, and the name its operator gave it lives
+    with the roster — so the console reads the listing to write a seat's name
+    rather than its id. A seat whose id is its role would otherwise appear as
+    the role word on every line."""
+    from modulatio import roster
+
+    roster.seed_default_roster(
+        "web", leader_model="stub", coordinator_model="stub",
+        producer_model="stub", qc_model="stub")
+    resp = client.get("/api/web/config/agents")
+    assert resp.status_code == 200
+    agents = resp.json()["agents"]
+    assert agents, "a seeded project lists its seats"
+    for a in agents:
+        assert a["id"] and a["name"], a

@@ -70,6 +70,15 @@ function humanize(token) {
   return t ? t.replace(/\b\w/g, (c) => c.toUpperCase()) : token;
 }
 
+// Seat id -> the name its operator gave it. A seat whose id is its role reads
+// as the role word otherwise, so a named reviewer stays anonymous on every
+// line it appears in while a producer, whose id IS a name, is credited.
+const seatNames = new Map();
+
+function seatName(token) {
+  return seatNames.get(token) || humanize(token);
+}
+
 function glyphVerb(ev) {
   if (ev.phase === "tool_call_ended") {
     const tool = typeof ev.detail === "object" ? ev.detail?.tool : "";
@@ -179,6 +188,15 @@ export function mountConsole(page, ctx) {
       el("div", { class: "row" }, btnLeader, btnTeam, btnClear)),
     tvLeader, teamWrap, statusLine, composer);
   page.append(consoleSection, modal);
+
+  // Seat names, loaded once. Every event carries a seat ID; the name its
+  // operator gave it lives with the roster, so without this a seat whose id
+  // is its role is written on screen as the role word.
+  api(`/${ctx.project}/config/agents`)
+    .then(({ agents }) => {
+      for (const a of agents || []) if (a.id && a.name) seatNames.set(a.id, a.name);
+    })
+    .catch(() => {});   // a listing that will not load costs names, never the feed
 
   // ── rendering ────────────────────────────────────────────────────
 
@@ -327,7 +345,7 @@ export function mountConsole(page, ctx) {
   function eventLine(ev) {
     trackRun(ev);
     const [glyph, verb] = glyphVerb(ev);
-    const name = humanize(ev.agent_id || ev.role);
+    const name = seatName(ev.agent_id || ev.role);
     const task = ev.task_id ? `  ·  ${ev.task_id}` : "";
     const line = el("div", { class: "stream-line mono" },
       el("span", { class: "glyph" }, glyph), ` ${name} ${verb}${task}`);
