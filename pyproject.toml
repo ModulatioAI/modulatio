@@ -66,7 +66,12 @@ Changelog = "https://github.com/ModulatioAI/modulatio/blob/main/CHANGELOG.md"
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
-    "ruff>=0.6",
+    # Upper-bounded on purpose. An unpinned linter makes the lint gate test
+    # the linter's release schedule rather than the code: a new minor version
+    # adds rules, and a build that passed yesterday fails today having changed
+    # nothing. Adopting a newer rule set is its own piece of work, done
+    # deliberately, not discovered during a release.
+    "ruff>=0.6,<0.16",
     # starlette's preferred TestClient transport — keeps the web-API
     # tests' output pristine (its httpx path is deprecated).
     "httpx2>=2.0",
