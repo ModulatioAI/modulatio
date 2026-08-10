@@ -32,6 +32,7 @@ from urllib.error import HTTPError
 
 import pytest
 
+from modulatio import sandbox as _sandbox_mod
 from modulatio import tools
 import subprocess
 from modulatio import sandbox as _sandbox
@@ -3442,6 +3443,9 @@ def test_passive_gains_no_execution_from_the_toolchains():
         assert not tools._check_passive(shlex.split(cmd), root, ()), cmd
 
 
+@pytest.mark.skipif(not _sandbox_mod.can_confine(),
+                    reason="host cannot confine — this test EXECS the "
+                           "sandbox rather than simulating it")
 def test_a_sealed_sandbox_takes_an_ordinary_shell_command(tmp_path):
     """Judging the SHAPE of a command was a proxy for judging its reach, and
     it fails both ways — refusing safe work while a permitted binary still
@@ -3649,6 +3653,11 @@ def test_a_pdf_is_not_parsed_at_all_without_containment(tmp_path, monkeypatch):
         lambda *a, **k: started.append(1) or _probes.ProbePhaseResult(
             status=_probes.ProbeStatus.ENGINE_UNAVAILABLE, phase="pdf_text",
             origin="engine", reason="sandbox enforcement not FULL"))
+    # A stub so the run reaches the CONTAINMENT decision. Without one, a host
+    # with no parser installed refuses earlier for a different reason and the
+    # test passes or fails on what the machine has rather than on the rule.
+    monkeypatch.setattr(tools.shutil, "which",
+                        lambda *a, **k: str(_stub_pdftotext(tmp_path, "true")))
 
     with pytest.raises(ValueError, match="under containment"):
         tools._pdf_text(b"%PDF-1.4\nstub\n", "probe.pdf")
@@ -3667,7 +3676,12 @@ def _parser_leaving(tmp_path, monkeypatch, make_output):
             reason="")
 
     monkeypatch.setattr(_probes, "run_probe_phase", _phase)
-    monkeypatch.setattr(tools.shutil, "which", lambda *a, **k: "/usr/bin/pdftotext")
+    # A stub binary the test owns, not a host path. What is under test is what
+    # the trusted parent does with a parser-controlled directory; naming a real
+    # system parser makes the test depend on poppler being installed, which is
+    # a fact about the machine and not about the behaviour being pinned.
+    stub = _stub_pdftotext(tmp_path, "true")
+    monkeypatch.setattr(tools.shutil, "which", lambda *a, **k: str(stub))
     return tools._pdf_text(b"%PDF-1.4 stub", "doc.pdf")
 
 

@@ -460,8 +460,22 @@ def test_doctor_access_card_renders_for_configured_project(
     assert "Access (configured authority" in result.stdout
     assert "[substrate]" in result.stdout
     assert "[tool_loadout]" in result.stdout
-    # The declared parity exceptions surface as reduced-parity on the card.
-    assert "Reduced/non-parity" in result.stdout
+    # The declared parity exceptions surface as reduced-parity on the card —
+    # but only the ones whose backend is active on THIS install. Asserting the
+    # line unconditionally tests what the machine has installed rather than
+    # whether the card renders what the snapshot holds, so the expectation
+    # comes from the same snapshot the card is built from.
+    from modulatio import permissions as _perms
+    from modulatio.cli import doctor_access_snapshot
+
+    snapshot = doctor_access_snapshot("DOC")
+    reduced = [f for f in snapshot.facts if f.state == _perms.STATE_REDUCED]
+    if reduced:
+        assert "Reduced/non-parity" in result.stdout
+        assert reduced[0].resource in result.stdout
+    else:
+        assert "Reduced/non-parity" not in result.stdout, (
+            "the card claimed a parity exception the snapshot does not hold")
 
 
 def test_doctor_access_snapshot_uses_production_authority(tmp_path, monkeypatch):
