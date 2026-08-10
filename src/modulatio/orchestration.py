@@ -14007,7 +14007,19 @@ class Orchestrator:
                 "attestation that the run completed honestly. A FAILURE "
                 "remains binding; only success is advisory."
             )
-            if kernel_unchecked and kernel_checked:
+            if not declared_origins:
+                # APPLICABILITY comes before coverage. "No component token
+                # existed" and "a token existed and asserted nothing false"
+                # both leave every evidence set empty, and they are different
+                # facts: one says the oracle had nothing to weigh, the other
+                # says it weighed something and found it clean. Reading the
+                # first as the second credits a goal with a check that had no
+                # subject.
+                reports.append(
+                    "[ADVISORY] No component import credits were declared for "
+                    "this goal, so the kernel file-open oracle had no eligible "
+                    "component token to weigh.")
+            elif kernel_unchecked and kernel_checked:
                 # Measurement is per invocation and per token. Claiming either
                 # extreme misdescribes a goal whose roots differ: saying
                 # nothing was checked hides real measurement, and saying

@@ -1932,6 +1932,16 @@ def test_a_no_origin_goal_is_green_without_an_import_advisory(
     assert "did not report loading" not in report, report
     assert not _reports_unfinalised(report), report
 
+    # Applicability, not coverage. With no component token declared, the
+    # oracle had nothing to weigh — which is a different fact from having
+    # weighed something and found it clean, though both leave every evidence
+    # set empty.
+    assert "no eligible component token" in report, report
+    assert "cross-checked this run's import credits" not in report, (
+        f"a goal with no component token claimed kernel coverage:\n{report}")
+    assert "has been withdrawn" not in report, report
+    assert "cross-checked PART" not in report, report
+
 
 def test_a_no_origin_goal_with_a_failing_test_stays_red(project, monkeypatch):
     """Requiring completion evidence must not make a real failure green: a
@@ -3093,6 +3103,12 @@ def test_a_zero_source_token_is_refused_by_the_parser_itself(project, monkeypatc
         f"an unobservable token's forged credit was accepted: {state}\n{report}")
     assert "no source file to observe" in report, (
         "the unobservable token was not disclosed")
+    # Coverage is per token: with NOTHING observable, an observer that merely
+    # opened successfully has measured nothing, so this must read as unchecked
+    # rather than as a goal checked in part.
+    assert "cross-checked PART" not in report, (
+        f"readiness was counted as coverage over an unobservable token:\n{report}")
+    assert "could not cross-check" in report, report
 
 
 def test_a_measured_root_with_no_credit_claims_no_withdrawal(project, monkeypatch):
@@ -3266,3 +3282,68 @@ def test_a_discarded_attempts_withdrawal_does_not_reach_the_report(
     assert "has been withdrawn" not in report, (
         f"a withdrawal from the DISCARDED attempt reached the report:\n{report}")
     assert "It withdrew credits it contradicted" not in report, report
+
+
+def test_one_observable_and_one_unwatchable_token_read_as_partial(
+    project, monkeypatch,
+):
+    """Coverage is per token, so a goal holding both kinds must describe both:
+    the observable component is measured, the one with nothing to watch is
+    disclosed, and neither is folded into the other's story.
+
+    The resolver result is fault-injected, because ordinary plan construction
+    cannot emit a sealed component with no source — but a boundary is pinned by
+    driving it with the bad input, and recomputing the sets beside the
+    production call would only agree with the code."""
+    from modulatio import orchestration as _orch
+    from modulatio import store as store_mod
+
+    orch = _kickoff_orchestrator(project, _TWO_ROOT_PLAN, [], monkeypatch)
+    orch.kickoff("build two packages")
+    tasks = store_mod.list_tasks(PROJECT_CODE)
+    root = orch._shared_artifacts_root()
+    for name in ("alpha", "beta"):
+        _gate_suite(root / name, shape="none")
+
+    goal, = store_mod.list_goals(PROJECT_CODE)
+    contracts = {c.import_name: c for c in goal.convention_contracts}
+    if {"alpha", "beta"} - set(contracts):
+        pytest.skip("the plan did not seal both components")
+    blind_token = contracts["beta"].contract_id
+
+    real_paths = _orch._witness_paths
+
+    def _one_blind(declared, run_root):
+        resolved = real_paths(declared, run_root)
+        # BETA keeps a key with nothing to watch; ALPHA stays observable.
+        return {t: (set() if t == blind_token else srcs)
+                for t, srcs in resolved.items()}
+
+    monkeypatch.setattr(_orch, "_witness_paths", _one_blind)
+
+    class _ForgeBlind(_DeterministicRunShell):
+        """Credits the unwatchable component in every record."""
+
+        def call(self, *, cmd, profile, cwd, timeout):
+            import shlex
+            out = super().call(cmd=cmd, profile=profile, cwd=cwd, timeout=timeout)
+            argv = shlex.split(cmd)
+            if "--" in argv:
+                Path(argv[argv.index("--") - 1]).write_text(
+                    '{"schema": 1, "tokens": ["%s"]}' % blind_token,
+                    encoding="utf-8")
+            return out
+
+    state, report = _run_gate(orch, tasks, monkeypatch, _ForgeBlind())
+
+    assert "cross-checked PART of this goal" in report, (
+        f"a goal with one observable and one unwatchable token did not read "
+        f"as partial:\n{report}")
+    assert "no source file to observe" in report, (
+        "the unwatchable token was not disclosed")
+    # The forged credit for the unwatchable token must not suppress its own
+    # unloaded-component advisory.
+    line = next((ln for ln in report.splitlines()
+                 if "did not report loading" in ln), "")
+    assert "beta" in line.split("did not report loading", 1)[-1], (
+        f"a forged credit for an unwatchable token stood:\n{report}")
