@@ -36,6 +36,7 @@ def tui_logs(tmp_path: Path, monkeypatch):
 async def test_logs_tab_lists_captured_logs(tui_logs):
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
+        await pilot.pause()
         app.query_one(TabbedContent).active = "tab-logs"
         await pilot.pause()
         table = app.query_one("#logs-table", DataTable)
@@ -48,6 +49,7 @@ async def test_logs_tab_lists_captured_logs(tui_logs):
 async def test_delete_confirms_then_removes_error_but_refuses_run_log(tui_logs):
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
+        await pilot.pause()
         app.query_one(TabbedContent).active = "tab-logs"
         await pilot.pause()
         screen = app.query_one(LogsScreen)
@@ -74,6 +76,7 @@ async def test_delete_confirms_then_removes_error_but_refuses_run_log(tui_logs):
 async def test_delete_cancel_keeps_the_log(tui_logs):
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
+        await pilot.pause()
         app.query_one(TabbedContent).active = "tab-logs"
         await pilot.pause()
         screen = app.query_one(LogsScreen)
@@ -90,6 +93,7 @@ async def test_delete_cancel_keeps_the_log(tui_logs):
 async def test_send_opens_review_modal(tui_logs):
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
+        await pilot.pause()
         app.query_one(TabbedContent).active = "tab-logs"
         await pilot.pause()
         screen = app.query_one(LogsScreen)
@@ -116,6 +120,7 @@ async def test_send_modal_headless_copies_link_and_stays_exitable(tui_logs, monk
     )
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
+        await pilot.pause()
         app.query_one(TabbedContent).active = "tab-logs"
         await pilot.pause()
         screen = app.query_one(LogsScreen)
@@ -146,6 +151,7 @@ async def test_logs_has_controls_row_with_counts_and_search(tui_logs):
 
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
+        await pilot.pause()
         app.query_one(TabbedContent).active = "tab-logs"
         await pilot.pause()
         # Scope to the LOGS screen — TICKETS also carries a ControlsRow.
@@ -161,6 +167,7 @@ async def test_logs_search_filters_rows_and_marks_filtered(tui_logs):
     as filtered."""
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
+        await pilot.pause()
         app.query_one(TabbedContent).active = "tab-logs"
         await pilot.pause()
         screen = app.query_one(LogsScreen)
@@ -176,6 +183,7 @@ async def test_logs_affordance_names_send_and_delete(tui_logs):
     """The detail affordance names the send + delete keys (s · d)."""
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
+        await pilot.pause()
         app.query_one(TabbedContent).active = "tab-logs"
         await pilot.pause()
         text = str(app.query_one("#logs-affordance", Static).render())

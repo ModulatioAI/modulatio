@@ -385,6 +385,7 @@ async def test_skills_table_survives_bracketed_cells(monkeypatch):
 
     app = _Harness()
     async with app.run_test() as pilot:
+        await pilot.pause()
         screen = app.query_one(SkillsScreen)
         # Should not raise while populating the table with bracketed strings.
         screen._refresh()

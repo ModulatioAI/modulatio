@@ -6,6 +6,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-08-09
+
+### Fixed
+
+- A query issued from the app walks from its default screen, so several
+  interface tests asked for a widget before a screen was on the stack and
+  raised instead of returning nothing. Whether the screen had mounted by then
+  was scheduling, so the failure appeared only on a slower machine and moved
+  between tests. Every such query now waits for the mount first. Test-only; no
+  shipped behaviour changes.
+
+
 ## [1.0.0] — 2026-08-09
 
 **1.0 — and still beta software.** v1.0.0b1 opened the 1.0 line with the

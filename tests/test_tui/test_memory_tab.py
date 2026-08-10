@@ -289,6 +289,12 @@ def _propose(body="QC finds sourcing improves with primary docs."):
 
 async def _open_memory_tab(app, pilot):
     from textual.widgets import TabbedContent
+
+    # A query from the APP walks from the default screen, so one issued before
+    # a screen is on the stack raises rather than returning nothing. Whether
+    # the screen has mounted by the time the pilot is handed over is
+    # scheduling, so every query after run_test() waits first.
+    await pilot.pause()
     tabbed = app.query_one(TabbedContent)
     tabbed.active = "tab-memory"
     await pilot.pause()

@@ -372,6 +372,7 @@ async def test_export_dialog_defaults_binary_media_to_copy(tmp_path):
     media.write_bytes(b"\x00\x01media")
     app = _Harness()
     async with app.run_test() as pilot:
+        await pilot.pause()
         dialog = app.query_one(ExportDialog)
         dialog.set_source(media)
         await pilot.pause()
@@ -1066,6 +1067,7 @@ async def test_export_error_with_bracket_markup_does_not_crash(monkeypatch):
 
     app = _Harness()
     async with app.run_test() as pilot:
+        await pilot.pause()
         dialog = app.query_one(ExportDialog)
         dialog.set_source(Path("/tmp/source.md"))
         await pilot.pause()
@@ -1091,6 +1093,7 @@ async def test_result_error_with_bracket_markup_does_not_crash(monkeypatch):
 
     app = _Harness()
     async with app.run_test() as pilot:
+        await pilot.pause()
         dialog = app.query_one(ExportDialog)
         dialog.set_source(Path("/tmp/source.md"))
         await pilot.pause()
@@ -1113,6 +1116,7 @@ async def test_success_dest_with_bracket_markup_does_not_crash(monkeypatch):
 
     app = _Harness()
     async with app.run_test() as pilot:
+        await pilot.pause()
         dialog = app.query_one(ExportDialog)
         dialog.set_source(Path("/tmp/source.md"))
         await pilot.pause()

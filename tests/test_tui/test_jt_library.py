@@ -227,6 +227,7 @@ async def test_jt_library_table_survives_bracketed_cells(monkeypatch):
 
     app = _Harness()
     async with app.run_test() as pilot:
+        await pilot.pause()
         screen = app.query_one(JTLibraryScreen)
         # Should not raise while populating the table with bracketed strings.
         screen.refresh_templates()

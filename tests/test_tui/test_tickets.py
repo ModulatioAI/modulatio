@@ -486,6 +486,7 @@ async def test_delete_confirms_then_removes_ticket(project_with_tickets):
 
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
+        await pilot.pause()
         app.query_one(TabbedContent).active = "tab-tickets"
         await pilot.pause()
         screen = app.query_one(TicketsScreen)
@@ -507,6 +508,7 @@ async def test_delete_cancel_keeps_the_ticket(project_with_tickets):
 
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
+        await pilot.pause()
         app.query_one(TabbedContent).active = "tab-tickets"
         await pilot.pause()
         screen = app.query_one(TicketsScreen)

@@ -57,6 +57,7 @@ async def test_theme_cycle_reresolves_accent_live():
 async def test_logs_tab_adopts_master_detail_full_height_divider():
     app = ModulatioApp(project_code=PROJECT_CODE, stub=True)
     async with app.run_test() as pilot:
+        await pilot.pause()
         app.query_one(TabbedContent).active = "tab-logs"
         await pilot.pause()
         screen = app.query_one(LogsScreen)
