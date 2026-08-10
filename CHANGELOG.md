@@ -6,7 +6,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [1.0.0] — 2026-07-29
+## [1.0.0] — 2026-08-09
 
 **1.0 — and still beta software.** v1.0.0b1 opened the 1.0 line with the
 standalone Leader harness *present*. This release makes it **trustworthy**:
@@ -139,6 +139,46 @@ the line, not a promise of stability — read the
   its evidence artifact is captured from a clean commit into an external file
   before being committed — so the provenance it records is the provenance of
   the code it tested.
+- **The engine can now refute an import credit it is told about.** Evidence
+  gathered inside the interpreter running the code under judgement is worth
+  nothing against that code — every secret the observer holds sits in a frame
+  the observed code can walk — so a suite could credit itself a component it
+  never loaded. The kernel is the one party to the run that code cannot write
+  to: the shipped component's source is watched from outside, and a credit for
+  a file never opened is withdrawn. It reports ACCESS, not execution, so it can
+  refute a false load and never attest an honest one, and the report says which
+  fact is not producer-authored. An import served from cached bytecode opens no
+  source, and the tree under examination can supply that cache, so the cache is
+  removed first — and the removal follows no symlink, empties nothing it cannot
+  prove is in scope, and reports whether the tree is provably clear.
+- **A run is described per token and per invocation.** A goal with no component
+  declared says the oracle did not apply rather than claiming coverage; a goal
+  measured in part names both halves; a withdrawal is only ever the
+  intersection of what a record claimed and what the kernel contradicted; and
+  provenance from an attempt the gate discarded can no longer reach the report.
+- **The secret store's lock is addressed by an inode, not a name.** A lock
+  reached through a pathname is only as stable as the name: renaming it aside
+  and creating another valid one let two processes hold good locks on different
+  inodes and serialize against nothing. The domain is the settings directory
+  itself, opened no-follow and checked and repaired through that descriptor —
+  so nothing outside the tree is ever inspected or altered on the way in, and a
+  non-directory planted at the path is refused instead of blocking the process.
+- **The vault migration is one transaction**, so a key written between its read
+  and its write is no longer overwritten with an older value.
+- **Build evidence is taken from the interpreter that will build.** Markers are
+  evaluated against the target environment and wheel tags come from the target
+  itself, so a requirement the target needs is no longer excluded by the
+  engine's own version and a wheel that cannot be installed no longer counts as
+  supplying one. Where the target cannot be read, no filter is applied — the
+  check adds evidence and never fails a build that works.
+- **The preflight probes run isolated.** They no longer place the inherited
+  working directory on the import path, where a tree under examination could
+  have its own `packaging` or `platform` executed in the engine's process.
+- **An upload is claimed by the composer that staged it**, matching the scope
+  cleanup already used — two browsers on one project are two people, and a turn
+  can no longer send bytes it could never have discarded.
+- **`doctor` reports a key stored under another provider's env var**, where two
+  endpoints silently shared one secret and setting either replaced the other.
 
 ## [1.0.0b1] — 2026-07-20
 
