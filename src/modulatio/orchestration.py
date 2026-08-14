@@ -3809,13 +3809,56 @@ class Orchestrator:
                     # The runner carries its own hard kill-boundary (runners.
                     # _hard_deadline, wrapped at the factory): a call that wedges
                     # past the transport timeout is released + stack-dumped there.
-                    return runner(prompt)
+                    response = runner(prompt)
+                    self._record_response(
+                        role=role, agent_id=agent_id or role,
+                        goal_id=goal_id, task_id=task_id, response=response,
+                    )
+                    return response
                 except Exception:
                     # Op C: emit an honest terminal so the TUI clears the stuck
                     # "working" status (KeyboardInterrupt/SystemExit = teardown,
                     # excluded by `except Exception`).
                     self._emit_call_failed(role, agent_id, task_id)
                     raise
+
+    def _record_response(
+        self,
+        *,
+        role: str,
+        agent_id: str,
+        goal_id: str | None,
+        task_id: str | None,
+        response: str,
+    ) -> None:
+        """Append one model response to ``responses.jsonl`` in the run directory.
+
+        The tool-call sidecar records calls and their results, so a reply carrying
+        no tool call — a plan emitted as bare JSON, a QC verdict — leaves no trace
+        of what the model actually returned. That makes a field the engine consumes
+        but never receives impossible to attribute between "never emitted" and
+        "dropped in parsing".
+
+        Best-effort: a run must not fail because its transcript could not be
+        written. Shares the store lock with the other run-file appends so
+        concurrent wave workers cannot interleave partial lines.
+        """
+        row = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "role": role,
+            "agent_id": agent_id,
+            "goal_id": goal_id,
+            "task_id": task_id,
+            "response": response,
+        }
+        try:
+            path = self._scope_root() / "responses.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with self._store_lock:
+                with path.open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:  # noqa: BLE001 — a transcript write never fails a run
+            _logger.debug("could not append to responses.jsonl", exc_info=True)
 
     def _run_agent_call(
         self,
