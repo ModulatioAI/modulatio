@@ -830,6 +830,12 @@ def litellm_runner(
     ``/no_think`` — reasoning-class models that emit ``<think>`` blocks honor
     this and skip the inner-monologue output.
     """
+    if not model or model in ("stub", "none"):
+        # A placeholder is not a model. Said here, once, in plain words, rather
+        # than as the provider library's complaint about a missing prefix.
+        raise ValueError(
+            "no model is set for this seat: the roster names none, or a placeholder "
+            "stood in for it. Set one in the Config tab and restart the service.")
     if timeout is None:
         timeout = _default_call_timeout()
     # Resolve once at runner-construction time for raw-id callers (so the

@@ -133,3 +133,12 @@ def test_litellm_runner_passes_raw_id_through(monkeypatch):
     runner = runners.litellm_runner("anthropic/claude-opus-4-7")
     runner("hi")
     assert fake_completion.call_args.kwargs["model"] == "anthropic/claude-opus-4-7"
+
+
+def test_litellm_runner_refuses_a_placeholder_model_plainly():
+    """A placeholder is not a model: said at construction, in the operator's
+    words, rather than as the provider library's complaint about a prefix."""
+    with pytest.raises(ValueError, match="no model is set for this seat"):
+        runners.litellm_runner("stub")
+    with pytest.raises(ValueError, match="no model is set for this seat"):
+        runners.litellm_runner("")
