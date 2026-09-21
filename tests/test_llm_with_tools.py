@@ -826,3 +826,25 @@ def test_compression_within_cap_does_not_raise(monkeypatch):
         model="some-model",
     )
     assert out == "done"
+
+
+def test_loop_answers_from_what_it_gathered_when_the_cap_is_hit():
+    """A model that keeps calling tools past the cap is asked once more with
+    no tools offered, and that answer is returned instead of the turn's loss."""
+    from modulatio import tools as _tools
+
+    seen: list = []
+
+    def runner(*, messages, tools, tool_choice=None):
+        seen.append(bool(tools))
+        if tools:
+            return ChatResponse(content=None, tool_calls=(
+                ToolCall(id=f"c{len(seen)}", name="echo", args={"x": "hi"}),))
+        return ChatResponse(content="here is what I found", tool_calls=())
+
+    echo = _tools.Tool(name="echo", description="echo", call=lambda **kw: kw["x"])
+    reply = runners.run_llm_with_tools(
+        chat_runner=runner, prompt="look around", tool_loadout=("echo",),
+        tool_registry={"echo": echo}, max_iters=2)
+    assert reply == "here is what I found"
+    assert seen == [True, True, False]

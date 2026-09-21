@@ -2022,6 +2022,21 @@ def run_llm_with_tools(
                 "content": conv_content + iter_suffix,
             })
 
+    # The budget is spent, and what was gathered is worth an answer: one more
+    # completion with no tools offered turns the tool results into one,
+    # rather than discarding the turn with them.
+    messages.append({
+        "role": "user",
+        "content": (f"[SYSTEM: The tool budget for this turn ({max_iters} calls) is "
+                    "spent. Answer now from what you have gathered; no tool may be "
+                    "called.]"),
+    })
+    try:
+        final = chat_runner(messages=messages, tools=[])
+    except Exception:  # noqa: BLE001 — the loop's own failure is the one to report
+        final = None
+    if final is not None and final.content:
+        return final.content
     raise MaxItersExhausted(
         f"run_llm_with_tools: max_iters {max_iters} exceeded without final content"
     )
