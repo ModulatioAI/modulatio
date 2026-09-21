@@ -3735,3 +3735,28 @@ def test_read_file_names_a_directory_and_lists_it_under_the_secret_floor(tmp_pat
     assert ".env" not in out
     with pytest.raises(ValueError, match="does not exist"):
         read_file("runs/missing.md")
+
+
+def test_run_shell_refuses_a_path_the_sandbox_cannot_see(tmp_path, monkeypatch):
+    """Under the sealed sandbox an absolute path outside the shell's roots and
+    the system prefixes is refused by name before any command runs; a path the
+    sandbox can show truthfully still reaches it."""
+    art = _make_artifacts(tmp_path)
+    rs = tools.make_run_shell(art)
+
+    class _ReachedSandbox(Exception):
+        pass
+
+    def _sentinel(*a, **k):
+        raise _ReachedSandbox
+
+    monkeypatch.setattr(_sandbox, "enforcement_state",
+                        lambda: _sandbox.EnforcementState.SANDBOXED_FULL)
+    monkeypatch.setattr(_sandbox, "build_sandboxed_argv", _sentinel)
+    with pytest.raises(ValueError, match="outside the shell's reach"):
+        rs(cmd="ls /home/nobody/vault/project", profile="full", timeout=5)
+    with pytest.raises(ValueError, match="outside the shell's reach"):
+        rs(cmd="ls ~/Documents/somewhere", profile="full", timeout=5)
+    for reachable in (f"ls {art}", "ls /usr", "ls /"):
+        with pytest.raises(_ReachedSandbox):
+            rs(cmd=reachable, profile="full", timeout=5)

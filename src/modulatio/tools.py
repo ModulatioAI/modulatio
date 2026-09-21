@@ -1468,6 +1468,30 @@ def _unbounded_shell_reason(cmd: str) -> str:
     return ""
 
 
+#: What the sandbox shows besides the shell's own roots: the system, read-only,
+#: and a fresh /tmp. Any other absolute path is either an empty directory bwrap
+#: made on the way to a mount, or absent — both read as facts about the disk.
+_SANDBOX_VISIBLE = ("usr", "bin", "sbin", "lib", "lib64", "etc", "proc", "dev", "tmp")
+
+
+def _out_of_reach(cmd: str, roots: "list[Path]") -> "str | None":
+    """The first path in ``cmd`` the sandbox cannot show truthfully, or None."""
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        return None
+    for token in tokens:
+        if not token.startswith(("/", "~/")):
+            continue
+        seen = Path(os.path.expanduser(token)).resolve()
+        if seen == Path("/") or (len(seen.parts) > 1 and seen.parts[1] in _SANDBOX_VISIBLE):
+            continue
+        if any(seen == r or r in seen.parents for r in roots):
+            continue
+        return token
+    return None
+
+
 def make_run_shell(
     artifacts_root: Path, extra_roots=(),
     should_abort: "Callable[[], bool] | None" = None,
@@ -1575,6 +1599,16 @@ def make_run_shell(
                     f"command not allowed by profile {profile!r}: {cmd!r}"
                 )
         wd = _validate_run_shell_cwd(cwd, artifacts_root, extra_roots)
+        # A path the sandbox cannot see is refused by name: the stand-in it
+        # would show — an empty directory, or nothing — reads as a fact about
+        # the disk, and the file tools can read what the shell cannot.
+        unseen = _out_of_reach(cmd, [Path(artifacts_root).resolve(),
+                                     *(Path(r).resolve() for r in extra_roots)])
+        if unseen is not None:
+            raise ValueError(
+                f"run_shell: {unseen!r} is outside the shell's reach — the shell "
+                f"sees its workspace, granted folders and the system; read it with "
+                f"read_file")
         # Rewrite happens AFTER the allowlist check so the safety
         # surface enforces user-visible cmd shapes; the rewrite is
         # a transparent execution helper that lets ``pytest`` /
