@@ -7,6 +7,29 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 
+## [1.0.4] — 2026-09-21
+
+### Fixed
+
+- **A placeholder model name is refused in plain words.** A seat whose model
+  read as a placeholder reached the provider library and died with its
+  complaint about a missing prefix. The runner now refuses at construction:
+  "no model is set for this seat… set one in the Config tab and restart the
+  service."
+- **Two tests are hermetic under parallel load.** The web boot-stamp test
+  launches its server with the engine's environment knobs stripped and lets
+  the kernel pick the port; the jobs detail-card test waits for the card over
+  frames. Test-only; the first had failed two release gates in a row.
+
+### Verified
+
+- **A task hinted to a busy producer moves to a free one.** The wave scheduler
+  follows a continuity hint only while that producer has a free slot; this has
+  been the engine's behaviour since the continuous-pull occupancy accounting
+  and is now pinned by a test.
+
+
+
 ## [1.0.3] — 2026-09-21
 
 ### Fixed
