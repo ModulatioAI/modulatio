@@ -18015,6 +18015,26 @@ class Orchestrator:
         # Fix C: each run starts with a CLEAR abort state — the conversational
         # orchestrator is reused across turns, so a stop from a prior run must not
         # carry over and kill this one before it begins.
+        # A run needs a Leader to plan and a QC seat to verify. A roster missing
+        # either would not fail; it would produce drafts nobody reviewed, with
+        # nothing to say so. Refused here, before anything is written.
+        missing = [seat for seat in ("leader", "qc")
+                   if seat not in (self.runners or {})
+                   and not roster.model_for_tier(self.project.code, seat)]
+        if missing:
+            from modulatio import logstore
+            names = {"leader": "Leader", "qc": "QC"}
+            loud = ("a kickoff needs a runnable Leader and a runnable QC agent; this "
+                    f"roster has no {' or '.join(names[m] for m in missing)} seat with a "
+                    "model. Add the seat, then re-run.")
+            summary = RunSummary(project=self.project)
+            summary.errors.append(loud)
+            try:
+                logstore.write_error_log(f"kickoff refused — {loud}",
+                                         context={"surface": "kickoff", "project": self.project.code})
+            except Exception:  # noqa: BLE001 — logging must not mask the refusal
+                pass
+            return summary
         self.abort_event.clear()
         # Disclosure outbox: recover mint disclosures whose audit row never landed
         # (durable pending markers survive even on terminal parents).
