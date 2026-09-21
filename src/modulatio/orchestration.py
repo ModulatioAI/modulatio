@@ -8076,6 +8076,7 @@ class Orchestrator:
                     # like the registry override — the loop dispatches tools on
                     # this thread.
                     self._tls.loaded_items = []
+                    self._tls.wrote = []
                     try:
                         reply = self._run_chat_loop(
                             prompt=prompt,
@@ -8188,6 +8189,12 @@ class Orchestrator:
             # Defensive: never persist None (a misbehaving runner path) — keep the
             # log a clean string thread.
             reply = reply if reply is not None else ""
+            wrote = list(getattr(self._tls, "wrote", ()))
+            if wrote and not interrupted:
+                # Where each file went is stated by the engine, in the reply that
+                # made it: a destination the tools could not honour is otherwise
+                # exchanged for one they could without a word.
+                reply = reply.rstrip() + "\n\n" + "\n".join(f"wrote: {p}" for p in wrote)
             # The success append must not be able to leave the durable log ending
             # on an unanswered operator turn (#5379): if writing the reply fails
             # (disk error, encoding), record a placeholder leader turn so the next
@@ -10144,6 +10151,9 @@ class Orchestrator:
             artifacts_root=workspace,
             tool_calls_dir=workspace / "tool_calls",
             project_code=self.project.code,
+            # Each write's destination is noted for the turn that made it, so the
+            # reply can state where the file went.
+            on_artifact_write=lambda target: getattr(self._tls, "wrote", []).append(str(target)),
             # PATH-granted roots reach the file tools (read/edit/write); EXEC-
             # granted roots reach run_shell (a separate, sharper grant class —
             # a folder widen never confers exec). Registered

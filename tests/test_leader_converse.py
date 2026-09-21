@@ -818,3 +818,35 @@ def test_an_attached_image_on_a_seat_with_no_image_channel_says_which(
 
     assert "no image channel" in reply
     assert "no leader model is wired" not in reply
+
+
+def test_converse_names_every_file_written_in_the_reply(project: Project):
+    """A write's destination is stated by the engine in the reply that made it,
+    so a file that landed somewhere other than where the operator asked is
+    never silently placed."""
+    from modulatio import runners as mod_runners
+
+    calls: list = []
+
+    def mock_leader(*, messages, tools, tool_choice=None):
+        calls.append(list(messages))
+        if len(calls) == 1:
+            return ChatResponse(content="", tool_calls=(
+                mod_runners.ToolCall(
+                    id="c1", name="write_artifact",
+                    args={"path": "reports/summary.md", "content": "# done\n"}),
+            ))
+        return ChatResponse(content="the report is written", tool_calls=())
+
+    orch = Orchestrator(
+        project, _runners(),
+        chat_runners={"leader": mock_leader},
+        chat_runner_models={"leader": "mock-model"},
+    )
+    reply = orch.converse("write me a summary report")
+    written = orch._leader_workspace() / "reports" / "summary.md"
+    assert written.read_text(encoding="utf-8") == "# done\n"
+    assert reply.startswith("the report is written")
+    assert reply.rstrip().endswith(f"wrote: {written}")
+    # a turn that writes nothing says nothing about files
+    assert not orch.converse("thanks").rstrip().startswith("wrote:")
