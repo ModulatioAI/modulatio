@@ -3721,3 +3721,17 @@ def test_a_parser_flood_is_bounded_by_the_ceiling_not_by_what_it_wrote(
 
     assert text.endswith(f"[...truncated at {tools._READ_FILE_MAX_BYTES} bytes]")
     assert len(text) <= tools._READ_FILE_MAX_BYTES + 100
+
+
+def test_read_file_names_a_directory_and_lists_it_under_the_secret_floor(tmp_path):
+    root = tmp_path / "vault"
+    (root / "runs" / "r1").mkdir(parents=True)
+    (root / "runs" / "note.md").write_text("x", encoding="utf-8")
+    (root / "runs" / ".env").write_text("SECRET=1", encoding="utf-8")
+    read_file = tools.make_read_file(root)
+    out = read_file("runs")
+    assert "is a directory" in out
+    assert "r1/" in out and "note.md" in out
+    assert ".env" not in out
+    with pytest.raises(ValueError, match="does not exist"):
+        read_file("runs/missing.md")

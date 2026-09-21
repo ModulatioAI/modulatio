@@ -2166,6 +2166,14 @@ def make_read_file(
     def read_file(path: str) -> str:
         target = _resolve_file_under_root(
             path, root, (*extra_roots, *extra_read_roots))
+        if target.is_dir():
+            # A granted directory is a place, not an absence: say so and list it,
+            # under the same secret floor the resolver holds, so nothing is named
+            # that could not be opened.
+            names = sorted(f"{p.name}/" if p.is_dir() else p.name
+                           for p in target.iterdir() if not p.name.startswith("."))
+            return (f"read_file: {path!r} is a directory. It contains: "
+                    + ("  ".join(names) or "(nothing)"))
         if not target.is_file():
             raise ValueError(f"read_file: {path!r} does not exist")
         data = target.read_bytes()
