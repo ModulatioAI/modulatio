@@ -7,6 +7,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 
+## [1.0.3] — 2026-09-21
+
+### Fixed
+
+- **The shell no longer shows an empty stand-in for folders it cannot see.**
+  `run_shell` runs in a sandbox that carries the workspace and granted
+  folders but not the vault, and the sandbox created the parents of those
+  mounts as empty directories — so `ls` on the project folder answered with
+  one entry, and the Leader told the operator the run's work was gone from
+  disk. A path outside the shell's roots and the system prefixes is now
+  refused by name, with `read_file` named as the way to read it.
+- **The tool loop answers from what it gathered when the iteration cap is
+  hit.** A model that kept calling tools past the cap used to lose the whole
+  turn ("failed before I could reply"). The loop now makes one final
+  completion with no tools offered and returns that answer.
+
+
+
 ## [1.0.2] — 2026-09-21
 
 ### Fixed
