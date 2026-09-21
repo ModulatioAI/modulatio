@@ -297,7 +297,6 @@ def test_boot_stamp_emits_once_on_the_real_entry_path():
     runs before Uvicorn installs logging, AND Uvicorn configures only the
     uvicorn* loggers (root has no handler, so a modulatio.* INFO record dies
     at lastResort). Hence: launch the real server, read the real log."""
-    import socket
     import subprocess
     import sys
     import tempfile
@@ -306,11 +305,8 @@ def test_boot_stamp_emits_once_on_the_real_entry_path():
 
     from modulatio import __version__
 
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-
+    # Port 0 lets the kernel pick a free port at bind time: a port chosen
+    # here and released can be taken by another test worker in between.
     # Output to a file, not a pipe: the server runs until we stop it, so
     # reading a pipe mid-flight risks a deadlock.
     with tempfile.TemporaryDirectory() as td:
@@ -319,11 +315,13 @@ def test_boot_stamp_emits_once_on_the_real_entry_path():
             proc = subprocess.Popen(
                 [sys.executable, "-c",
                  "from modulatio.web import server; "
-                 "server.run(['--port', '%d'])" % port],
+                 "server.run(['--port', '0'])"],
                 stdout=fh, stderr=subprocess.STDOUT,
             )
             try:
-                deadline = time.monotonic() + 45
+                # A cold start imports the whole engine; on a machine running
+                # a dozen test workers that takes well over the idle figure.
+                deadline = time.monotonic() + 120
                 while time.monotonic() < deadline:
                     if "Application startup complete" in out.read_text():
                         break
