@@ -40,7 +40,11 @@ async def test_jobs_detail_card_shows_objective_and_contents(project_with_runs):
         await pilot.pause()
         screen = app.query_one(JobsScreen)
         screen._render_detail("20260101T010101Z-aaa111")
-        await pilot.pause()
+        # The detail arrives over frames; on a loaded machine one is not enough.
+        for _ in range(60):
+            await pilot.pause()
+            if "write the essay" in screen.detail_source:
+                break
         assert "write the essay" in screen.detail_source
         assert "Contents" in screen.detail_source
 
