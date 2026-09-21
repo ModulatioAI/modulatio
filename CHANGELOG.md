@@ -6,6 +6,34 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [1.0.2] — 2026-09-21
+
+### Fixed
+
+- **A granted directory no longer reports itself absent.** `read_file` on a
+  directory said `does not exist`, so the Leader could tell an operator the
+  project vault was missing while its own report sat inside it. A directory
+  now says so and lists its entries, under the same secret floor as every
+  other read (no dotfile is named).
+- **Every file a conversation turn writes is named in the reply.** A
+  destination the tools could not honour used to be exchanged for one they
+  could, without a word; the operator then hunted for a file the engine knew
+  the location of. The engine now appends `wrote: <path>` for each write to
+  the turn that made it.
+- **A kickoff without a runnable Leader or QC seat is refused** before anything
+  is written, with a plain message and an error log entry. Previously the run
+  went ahead and produced drafts nobody reviewed, with nothing to say so.
+
+### Added
+
+- **Every model response is recorded to the run directory** (`responses.jsonl`
+  beside the tool-call log): role, agent, goal, task and the verbatim text. A
+  reply with no tool call — a task plan emitted as bare JSON, a QC verdict —
+  previously left no trace, so a field the engine consumed but never received
+  could not be told apart from one dropped in parsing.
+
+
 ## [1.0.1] — 2026-08-09
 
 ### Fixed
