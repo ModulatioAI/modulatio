@@ -1442,3 +1442,17 @@ def test_a_dependency_chain_does_not_land_on_one_producer():
     assert len(set(picked)) == 3, f"work never reached the whole roster: {load}"
     assert max(load.values()) - min(load.values()) <= 1, (
         f"work concentrated instead of spreading: {load}")
+
+
+def test_schedule_wave_moves_a_hinted_task_off_a_busy_producer():
+    """A continuity hint is followed only while that producer has a free
+    slot; once it is busy, a free producer pulls the task instead of the task
+    queuing behind the hint."""
+    task = _wtask("W-T-005", ["drafter"])
+    task.preferred_continuity_agent = "cheryl"
+    agents = [_wagent("cheryl", ["drafter"], cap=1), _wagent("jan", ["drafter"], cap=1)]
+    busy = dispatch.schedule_wave([task], agents, occupied_by_agent={"cheryl": 1})
+    assert busy.assignments == {"W-T-005": "jan"}
+    assert busy.deferred == ()
+    free = dispatch.schedule_wave([task], agents, occupied_by_agent={})
+    assert free.assignments == {"W-T-005": "cheryl"}
