@@ -72,7 +72,10 @@ jobs:
       # publishes to GHCR, versioned + latest.
       - name: Publish container image
         run: |
-          DEB="$(ls dist/modulatio_*_amd64.deb)"
+          # The versioned file by name: the attach step above also leaves
+          # modulatio_latest_amd64.deb in dist/, and a glob would hand the
+          # build two paths joined by a newline.
+          DEB="dist/modulatio_${VERSION}_amd64.deb"
           echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           docker build -f packaging/Dockerfile --build-arg DEB="$DEB" \
             -t "ghcr.io/modulatioai/modulatio:${VERSION}" \
