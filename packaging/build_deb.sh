@@ -139,6 +139,10 @@ Description: Orchestrate teams of LLM agents on real projects
  under /opt/modulatio and requires only glibc from the host. Architecture: amd64.
 CONTROL
 
+# The licence, the credits and the list of bundled third-party software go with the package.
+install -m 0644 "$REPO_ROOT/LICENSE" "$REPO_ROOT/NOTICE" "$REPO_ROOT/THIRD-PARTY.md" \
+    "$ROOT/usr/share/doc/modulatio/"
+
 cat > "$ROOT/usr/share/doc/modulatio/README.Debian" <<'DOC'
 Modulatio — Debian/Ubuntu package
 

@@ -5,7 +5,7 @@ description = "Multi-model agent framework with plan-mode orchestration, integra
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "NOTICE", "THIRD-PARTY.md"]
 keywords = ["agents", "llm", "orchestration", "multi-agent", "tui", "plan-mode"]
 classifiers = [
     "Development Status :: 4 - Beta",
